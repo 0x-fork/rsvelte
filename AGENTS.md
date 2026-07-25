@@ -232,6 +232,22 @@ Wave 4 architecture (decided; tsgo ships an LSP server as of TypeScript 7, so th
 [`@rsvelte/lint`](apps/npm/lint), fixed-versioned with `@rsvelte/compiler` via Changesets.
 Its real-world parity corpus ratchet lives at `compatibility/lint-known-failures.json`.
 
+### Type-aware lint suite (out-of-workspace)
+
+`crates/rsvelte_lint_types` (the corsa/`tsgo` type-aware backend) is its **own Cargo
+workspace** — it path-depends on `submodules/corsa-bind`, whose corsa client stack
+nothing else needs, so the root `cargo test` and the CI shards never build it (nor
+does the root `cargo fmt` / `clippy`). `submodules/corsa-bind` is **public**; it
+clones with no credentials. Run the suite with `pnpm run test:type-aware-lint`,
+which checks out the submodules, installs the **pinned**
+`@typescript/native-preview` (`scripts/dev/type-aware-lint/package.json` — exact
+version because upstream publishes dated dev builds and the tests assert exact
+diagnostic text), and runs the 9 tests. A missing binary **fails** instead of
+skipping. Do not point it at `$TSGO_BIN`: that names a batch `tsc`/`tsgo` for
+`rsvelte-check`, whereas this backend needs a `--api` server (`$CORSA_EXECUTABLE`).
+`.github/workflows/type-aware-lint.yml` runs fmt + clippy + the suite on changes to
+the crate, weekly, and on dispatch.
+
 ## Quick Reference
 
 ### Adding Features
