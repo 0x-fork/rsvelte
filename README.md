@@ -170,19 +170,19 @@ All npm packages ship under the `@rsvelte` scope.
 
 ## Performance
 
-Multi-threaded rsvelte vs. the official JavaScript tool, same machine, same corpus (3,412 real `.svelte` files; Apple M1 Pro, 10-core; 10 iterations after 3 warmup):
+Multi-threaded rsvelte vs. the official JavaScript tool, same machine, same corpus (3,417 real `.svelte` files; Apple M1 Pro, 10-core; 10 iterations after 3 warmup):
 
 | Task | JS baseline | Rust (1 thread) | Rust (multi) | Multi vs JS |
 |---|---:|---:|---:|---:|
-| Compile — client (full pipeline) | 751.8 ms | 248.3 ms | 34.7 ms | **21.7×** |
-| Compile — server (SSR) | 608.3 ms | 140.9 ms | 22.5 ms | **27.0×** |
-| Parse only | 186.0 ms | 9.9 ms | 2.8 ms | **65.6×** |
-| `svelte2tsx` | 302.1 ms | 99.5 ms | 15.2 ms | **19.9×** |
-| Format (vs prettier-plugin-svelte) | 3,099.2 ms | 82.8 ms | 14.8 ms | **210.1×** |
-| Lint (vs eslint + eslint-plugin-svelte) | 6,158.7 ms | 800.3 ms | 136.1 ms | **45.3×** |
-| `svelte-check` (500-file workspace) | 1,129.5 ms | 39.7 ms | 13.0 ms | **86.8×** |
+| Compile — client (full pipeline) | 742.5 ms | 236.7 ms | 35.1 ms | **21.2×** |
+| Compile — server (SSR) | 602.5 ms | 136.1 ms | 21.6 ms | **27.9×** |
+| Parse only | 174.2 ms | 4.0 ms | 0.8 ms | **217.1×** |
+| `svelte2tsx` | 285.7 ms | 87.5 ms | 13.1 ms | **21.9×** |
+| Format (vs prettier-plugin-svelte) | 3,055.7 ms | 64.0 ms | 10.8 ms | **281.7×** |
+| Lint (vs eslint + eslint-plugin-svelte) | 6,141.0 ms | 720.0 ms | 112.9 ms | **54.4×** |
+| `svelte-check` (500-file workspace) | 1,098.5 ms | 39.0 ms | 12.9 ms | **84.8×** |
 
-The corpus is Svelte's own test suite, restricted to the 3,412 of 3,869 files the official compiler
+The corpus is Svelte's own test suite, restricted to the 3,417 of 3,874 files the official compiler
 accepts under the benchmark's options — otherwise the numbers would partly measure how fast each
 compiler throws. Of the 457 excluded, 290 are valid sources that merely need `experimental.async`
 (which the benchmark does not enable) and 167 are deliberately invalid error-case fixtures.
