@@ -32,6 +32,7 @@ use crate::ast::arena::{IdRange, ParseArena};
 use crate::ast::js::Expression;
 use crate::ast::typed_expr::{
     JsNode, LiteralValue, Loc, RegexValue, SourcePosition, TemplateElementValue,
+    alloc_deser_children, alloc_deser_node, child_node_from_value,
 };
 use crate::compiler::phases::phase1_parse::utils::find_matching_bracket;
 use compact_str::CompactString;
@@ -1502,13 +1503,13 @@ pub fn parse_destructuring_pattern<'a>(
                 && let Some(declarator) = var_decl.declarations.first()
             {
                 let adjusted_offset = offset.wrapping_sub(4);
-                let pattern_json = convert_binding_pattern_for_param(
+                let pattern_node = convert_binding_pattern_for_param_as_node(
                     arena,
                     &declarator.id,
                     adjusted_offset,
                     line_offsets,
                 );
-                return Some(Expression::from_json(pattern_json));
+                return Some(Expression::from_node(pattern_node));
             }
 
             None
@@ -2660,19 +2661,35 @@ fn attach_param_type_annotation<'a>(
     let Some(type_ann) = &param.type_annotation else {
         return expr;
     };
-    let mut json = expr.as_json().clone();
-    if let Some(obj) = json.as_object_mut() {
-        let start = obj.get("start").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
-        let end = adjusted_offset + type_ann.span.end as usize;
-        obj.set_field("end", Value::Number((end as i64).into()));
-        if let Some(loc) = create_loc(start, end, line_offsets) {
-            obj.set_field("loc", loc);
+    let annotation =
+        convert_type_annotation_adjusted(arena, type_ann, adjusted_offset, line_offsets);
+    let annotated_end = adjusted_offset + type_ann.span.end as usize;
+    let mut node = expr_to_node(expr);
+    let (start, end, loc, type_annotation) = match &mut node {
+        JsNode::ObjectPattern {
+            start,
+            end,
+            loc,
+            type_annotation,
+            ..
         }
-        let type_ann_obj =
-            convert_type_annotation_adjusted(arena, type_ann, adjusted_offset, line_offsets);
-        obj.set_field("typeAnnotation", type_ann_obj);
+        | JsNode::ArrayPattern {
+            start,
+            end,
+            loc,
+            type_annotation,
+            ..
+        } => (start, end, loc, type_annotation),
+        // The two callers only pass object/array patterns; anything else keeps
+        // its spans rather than silently dropping the annotation.
+        _ => return Expression::from_node(node),
+    };
+    *end = annotated_end as u32;
+    if let Some(new_loc) = create_typed_loc(*start as usize, annotated_end, line_offsets) {
+        *loc = Some(new_loc);
     }
-    Expression::from_json(json)
+    *type_annotation = Some(Box::new(annotation));
+    Expression::from_node(node)
 }
 
 /// Convert oxc ObjectPattern to our Expression format (for function parameters).
@@ -10808,6 +10825,15 @@ fn convert_property_key(
 
 /// Parse a binding pattern (for {#each} context).
 /// This parses patterns like `item`, `{ name }`, `[a, b]`, etc.
+fn is_plain_ascii_identifier(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    match bytes.next() {
+        Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {}
+        _ => return false,
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+}
+
 pub fn parse_binding_pattern<'a>(
     arena: &ParseArena,
     content: &str,
@@ -10829,6 +10855,16 @@ pub fn parse_binding_pattern<'a>(
                 trimmed
             ),
             (offset, offset),
+        ));
+    }
+
+    // `{#each xs as item}` / `{#await p then v}` bind a bare identifier in the
+    // vast majority of cases; skip the `let … = null` wrap + full JS parse.
+    if is_plain_ascii_identifier(trimmed) {
+        let start = offset + (content.len() - content.trim_start().len());
+        let end = start + trimmed.len();
+        return Ok(Expression::from_node(
+            create_identifier_for_binding_toplevel(trimmed, start, end, line_offsets),
         ));
     }
 
@@ -10866,7 +10902,7 @@ pub fn parse_binding_pattern<'a>(
                 ));
             }
 
-            return Ok(Expression::from_json(
+            return Ok(Expression::from_node(
                 convert_binding_pattern_with_adjustment(arena, &decl.id, offset, 4, line_offsets),
             ));
         }
@@ -10899,13 +10935,13 @@ fn convert_binding_pattern_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     match pattern {
         oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
             // Position in document = doc_offset + (span_pos - prefix_len)
             let start = doc_offset + id.span.start as usize - prefix_len;
             let end = doc_offset + id.span.end as usize - prefix_len;
-            create_identifier_for_binding(&id.name, start, end, line_offsets).to_value()
+            create_identifier_for_binding(&id.name, start, end, line_offsets)
         }
         oxc_ast::ast::BindingPattern::ObjectPattern(obj_pat) => {
             convert_object_pattern_with_adjustment(
@@ -10943,15 +10979,11 @@ fn convert_object_pattern_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     let start = doc_offset + obj_pat.span.start as usize - prefix_len;
     let end = doc_offset + obj_pat.span.end as usize - prefix_len;
 
-    let mut obj = Map::new();
-    obj.set_field("type", Value::String("ObjectPattern".to_string()));
-    push_binding_span_fields(&mut obj, start, end, line_offsets);
-
-    let mut properties: Vec<Value> = obj_pat
+    let mut properties: Vec<JsNode> = obj_pat
         .properties
         .iter()
         .map(|prop| {
@@ -10967,32 +10999,46 @@ fn convert_object_pattern_with_adjustment(
 
     // Handle rest element if present (e.g., `...others` in `{ foo, ...others }`)
     if let Some(rest) = &obj_pat.rest {
-        let rest_start = doc_offset + rest.span.start as usize - prefix_len;
-        let rest_end = doc_offset + rest.span.end as usize - prefix_len;
-
-        let mut rest_obj = Map::new();
-        rest_obj.set_field("type", Value::String("RestElement".to_string()));
-        rest_obj.set_field("start", Value::Number((rest_start as i64).into()));
-        rest_obj.set_field("end", Value::Number((rest_end as i64).into()));
-        if let Some(loc) = create_loc_for_binding(rest_start, rest_end, line_offsets) {
-            rest_obj.set_field("loc", loc);
-        }
-        rest_obj.set_field(
-            "argument",
-            convert_binding_pattern_with_adjustment(
-                arena,
-                &rest.argument,
-                doc_offset,
-                prefix_len,
-                line_offsets,
-            ),
-        );
-        properties.push(Value::Object(rest_obj));
+        properties.push(rest_element_with_adjustment(
+            arena,
+            rest,
+            doc_offset,
+            prefix_len,
+            line_offsets,
+        ));
     }
 
-    obj.set_field("properties", Value::Array(properties));
+    JsNode::ObjectPattern {
+        start: start as u32,
+        end: end as u32,
+        loc: create_typed_loc_for_binding(start, end, line_offsets),
+        properties: alloc_deser_children(properties),
+        type_annotation: None,
+    }
+}
 
-    Value::Object(obj)
+/// `...rest` inside an object or array pattern.
+fn rest_element_with_adjustment(
+    arena: &ParseArena,
+    rest: &oxc_ast::ast::BindingRestElement,
+    doc_offset: usize,
+    prefix_len: usize,
+    line_offsets: &[usize],
+) -> JsNode {
+    let start = doc_offset + rest.span.start as usize - prefix_len;
+    let end = doc_offset + rest.span.end as usize - prefix_len;
+    JsNode::RestElement {
+        start: start as u32,
+        end: end as u32,
+        loc: create_typed_loc_for_binding(start, end, line_offsets),
+        argument: alloc_deser_node(convert_binding_pattern_with_adjustment(
+            arena,
+            &rest.argument,
+            doc_offset,
+            prefix_len,
+            line_offsets,
+        )),
+    }
 }
 
 fn convert_array_pattern_with_adjustment(
@@ -11001,57 +11047,44 @@ fn convert_array_pattern_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     let start = doc_offset + arr_pat.span.start as usize - prefix_len;
     let end = doc_offset + arr_pat.span.end as usize - prefix_len;
 
-    let mut obj = Map::new();
-    obj.set_field("type", Value::String("ArrayPattern".to_string()));
-    push_binding_span_fields(&mut obj, start, end, line_offsets);
-
-    let mut elements: Vec<Value> = arr_pat
+    let mut elements: Vec<Option<JsNode>> = arr_pat
         .elements
         .iter()
-        .map(|elem| match elem {
-            Some(pat) => convert_binding_pattern_with_adjustment(
-                arena,
-                pat,
-                doc_offset,
-                prefix_len,
-                line_offsets,
-            ),
-            None => Value::Null,
+        .map(|elem| {
+            elem.as_ref().map(|pat| {
+                convert_binding_pattern_with_adjustment(
+                    arena,
+                    pat,
+                    doc_offset,
+                    prefix_len,
+                    line_offsets,
+                )
+            })
         })
         .collect();
 
     // Add rest element if present
     if let Some(rest) = &arr_pat.rest {
-        let rest_start = doc_offset + rest.span.start as usize - prefix_len;
-        let rest_end = doc_offset + rest.span.end as usize - prefix_len;
-
-        let mut rest_obj = Map::new();
-        rest_obj.set_field("type", Value::String("RestElement".to_string()));
-        rest_obj.set_field("start", Value::Number((rest_start as i64).into()));
-        rest_obj.set_field("end", Value::Number((rest_end as i64).into()));
-        if let Some(loc) = create_loc_for_binding(rest_start, rest_end, line_offsets) {
-            rest_obj.set_field("loc", loc);
-        }
-        rest_obj.set_field(
-            "argument",
-            convert_binding_pattern_with_adjustment(
-                arena,
-                &rest.argument,
-                doc_offset,
-                prefix_len,
-                line_offsets,
-            ),
-        );
-        elements.push(Value::Object(rest_obj));
+        elements.push(Some(rest_element_with_adjustment(
+            arena,
+            rest,
+            doc_offset,
+            prefix_len,
+            line_offsets,
+        )));
     }
 
-    obj.set_field("elements", Value::Array(elements));
-
-    Value::Object(obj)
+    JsNode::ArrayPattern {
+        start: start as u32,
+        end: end as u32,
+        loc: create_typed_loc_for_binding(start, end, line_offsets),
+        elements,
+        type_annotation: None,
+    }
 }
 
 fn convert_assignment_pattern_with_adjustment(
@@ -11060,37 +11093,35 @@ fn convert_assignment_pattern_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     let start = doc_offset + assign_pat.span.start as usize - prefix_len;
     let end = doc_offset + assign_pat.span.end as usize - prefix_len;
 
-    let mut obj = Map::new();
-    obj.set_field("type", Value::String("AssignmentPattern".to_string()));
-    push_binding_span_fields(&mut obj, start, end, line_offsets);
-
-    obj.set_field(
-        "left",
-        convert_binding_pattern_with_adjustment(
-            arena,
-            &assign_pat.left,
-            doc_offset,
-            prefix_len,
-            line_offsets,
-        ),
-    );
+    let left = alloc_deser_node(convert_binding_pattern_with_adjustment(
+        arena,
+        &assign_pat.left,
+        doc_offset,
+        prefix_len,
+        line_offsets,
+    ));
 
     // For the right side (expression), we need to adjust positions too
     // Using the expression converter with adjusted offset
-    let right = convert_expression_with_adjustment(
+    let right = alloc_deser_node(child_node_from_value(convert_expression_with_adjustment(
         arena,
         &assign_pat.right,
         doc_offset,
         prefix_len,
         line_offsets,
-    );
-    obj.set_field("right", right);
+    )));
 
-    Value::Object(obj)
+    JsNode::AssignmentPattern {
+        start: start as u32,
+        end: end as u32,
+        loc: create_typed_loc_for_binding(start, end, line_offsets),
+        left,
+        right,
+    }
 }
 
 fn convert_binding_property_with_adjustment(
@@ -11099,39 +11130,36 @@ fn convert_binding_property_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     let start = doc_offset + prop.span.start as usize - prefix_len;
     let end = doc_offset + prop.span.end as usize - prefix_len;
 
-    let mut obj = Map::new();
-    obj.set_field("type", Value::String("Property".to_string()));
-    push_binding_span_fields(&mut obj, start, end, line_offsets);
-    obj.set_field("method", Value::Bool(false));
-    obj.set_field("shorthand", Value::Bool(prop.shorthand));
-    obj.set_field("computed", Value::Bool(prop.computed));
-    obj.set_field("kind", Value::String("init".to_string()));
-
-    // Convert key
-    let key = convert_property_key_with_adjustment(
+    let key = alloc_deser_node(convert_property_key_with_adjustment(
         arena,
         &prop.key,
         doc_offset,
         prefix_len,
         line_offsets,
-    );
-    obj.set_field("key", key);
-
-    // Convert value
-    let value = convert_binding_pattern_with_adjustment(
+    ));
+    let value = alloc_deser_node(convert_binding_pattern_with_adjustment(
         arena,
         &prop.value,
         doc_offset,
         prefix_len,
         line_offsets,
-    );
-    obj.set_field("value", value);
+    ));
 
-    Value::Object(obj)
+    JsNode::Property {
+        start: start as u32,
+        end: end as u32,
+        loc: create_typed_loc_for_binding(start, end, line_offsets),
+        key,
+        value,
+        kind: CompactString::from("init"),
+        method: false,
+        shorthand: prop.shorthand,
+        computed: prop.computed,
+    }
 }
 
 fn convert_property_key_with_adjustment(
@@ -11140,31 +11168,28 @@ fn convert_property_key_with_adjustment(
     doc_offset: usize,
     prefix_len: usize,
     line_offsets: &[usize],
-) -> Value {
+) -> JsNode {
     match key {
         oxc_ast::ast::PropertyKey::StaticIdentifier(id) => {
             let start = doc_offset + id.span.start as usize - prefix_len;
             let end = doc_offset + id.span.end as usize - prefix_len;
-            create_identifier_for_binding(&id.name, start, end, line_offsets).to_value()
+            create_identifier_for_binding(&id.name, start, end, line_offsets)
         }
         oxc_ast::ast::PropertyKey::PrivateIdentifier(id) => {
             let start = doc_offset + id.span.start as usize - prefix_len;
             let end = doc_offset + id.span.end as usize - prefix_len;
-            create_private_identifier_for_binding(&id.name, start, end, line_offsets).to_value()
+            create_private_identifier_for_binding(&id.name, start, end, line_offsets)
         }
-        _ => {
-            if let Some(expr) = key.as_expression() {
-                convert_expression_with_adjustment(
-                    arena,
-                    expr,
-                    doc_offset,
-                    prefix_len,
-                    line_offsets,
-                )
-            } else {
-                Value::Null
-            }
-        }
+        _ => match key.as_expression() {
+            Some(expr) => child_node_from_value(convert_expression_with_adjustment(
+                arena,
+                expr,
+                doc_offset,
+                prefix_len,
+                line_offsets,
+            )),
+            None => JsNode::Null,
+        },
     }
 }
 

@@ -251,6 +251,12 @@ impl<'a> Parser<'a> {
     /// Check if the remaining content from current position to EOF is only whitespace.
     #[inline]
     pub fn remaining_is_whitespace_only(&self) -> bool {
+        // Every `true` answer implies the rest of the source is whitespace under
+        // `char::is_whitespace`, so anything before `content_end` is a `false`
+        // no scan can change.
+        if self.index < self.content_end {
+            return false;
+        }
         // Fast path: scan bytes for ASCII whitespace
         let bytes = &self.bytes[self.index..];
         for &b in bytes {
@@ -282,10 +288,7 @@ impl<'a> Parser<'a> {
             // allowed between `{` and the `/` / `:` marker char (upstream
             // `tag()` runs `allow_whitespace()` before dispatching).
             let (is_block_close, is_block_continuation) = if first_byte == b'{' {
-                (
-                    self.match_block_close_marker().is_some(),
-                    self.match_block_continuation_marker().is_some(),
-                )
+                self.match_block_markers()
             } else {
                 (false, false)
             };

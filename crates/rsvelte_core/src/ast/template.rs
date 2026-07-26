@@ -23,7 +23,9 @@ use super::span::SourceLocation;
 // =============================================================================
 
 /// The root node of a Svelte component AST.
-#[derive(Debug, Clone, Serialize)]
+// Not `Clone`: the owned `ParseArena` is chunked, append-only storage that
+// cannot be duplicated cheaply, and nothing in production cloned a `Root`.
+#[derive(Debug, Serialize)]
 pub struct Root<'a> {
     /// CSS stylesheet, or null if none.
     pub css: Option<Box<StyleSheet>>,
@@ -1125,7 +1127,7 @@ pub struct Script<'a> {
     pub attributes: Vec<AttributeNode<'a>>,
     /// Raw script content for deferred parsing. Empty string means content was already parsed eagerly.
     #[serde(skip)]
-    pub raw_content: String,
+    pub raw_content: &'a str,
     /// Offset of raw_content in the source for position mapping.
     #[serde(skip)]
     pub content_offset: u32,
@@ -1410,3 +1412,16 @@ pub struct ComponentNodeMetadata {
     /// Set during Phase 2 analysis from preceding svelte-ignore comments.
     pub ignored_codes: Vec<String>,
 }
+
+// Upper bounds on the expression-bearing template nodes. These are moved by
+// value into `Vec<TemplateNode>` / `Vec<AttributeValuePart>` during parsing, so
+// a size regression here shows up directly as parse-time memcpy.
+const _: () = {
+    use std::mem::size_of;
+    assert!(size_of::<ExpressionTag>() <= 176);
+    assert!(size_of::<Attribute>() <= 296);
+    assert!(size_of::<AttributeValuePart>() <= 176);
+    assert!(size_of::<EachBlock>() <= 384);
+    assert!(size_of::<AwaitBlock>() <= 280);
+    assert!(size_of::<TemplateNode>() <= 128);
+};

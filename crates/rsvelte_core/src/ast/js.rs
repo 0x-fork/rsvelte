@@ -19,7 +19,9 @@ use super::typed_expr::{JsNode, Loc, SourcePosition};
 /// while still avoiding repeated serialization during analysis/transform.
 pub struct TypedExpr<'a> {
     pub node: JsNode,
-    json_cache: std::cell::OnceCell<serde_json::Value>,
+    /// Boxed so an unpopulated cache costs one null pointer (8 B) rather than
+    /// an inline `serde_json::Value` (72 B) in every expression.
+    json_cache: std::cell::OnceCell<Box<serde_json::Value>>,
     /// Reserves the borrowed-AST lifetime `'a` ahead of M5-B, when the typed
     /// node's verbatim strings (operators, `Literal.raw`) borrow from source.
     _marker: PhantomData<&'a ()>,
@@ -39,7 +41,8 @@ impl<'a> TypedExpr<'a> {
     /// First call is expensive (serde serialization), subsequent calls are O(1).
     #[inline]
     pub fn as_json(&self) -> &serde_json::Value {
-        self.json_cache.get_or_init(|| self.node.to_value())
+        self.json_cache
+            .get_or_init(|| Box::new(self.node.to_value()))
     }
 }
 
@@ -66,19 +69,39 @@ impl<'a> std::fmt::Debug for TypedExpr<'a> {
     }
 }
 
+/// How a deferred expression's parse failure must be reported, and whether the
+/// eager parser it replaces built `loc` objects. Each variant mirrors one
+/// parse-time entry point so `resolve_lazy_expressions` reproduces its
+/// diagnostics byte-for-byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum LazyKind {
+    /// `{expr}` mustache: leftover input after a complete expression is an
+    /// `expected_token`, anything else a `js_parse_error` spanning the body.
+    Mustache,
+    /// Attribute value / quoted-value chunk: always a point `js_parse_error`.
+    Attribute,
+    /// Block or directive head terminated by `}`.
+    HeadBrace,
+    /// `{#each … (key)}` head terminated by `)`.
+    HeadParen,
+    /// Error-swallowing head (`{@render …}`, the `{#await …}` expression): a
+    /// parse failure recovers with an empty identifier and raises nothing.
+    Lenient,
+}
+
 /// A JavaScript expression.
 ///
 /// Backed by a typed `JsNode`. The parser produces `Typed` (or `Lazy`, which is
 /// resolved before analysis); consumers access via `as_json()` (lazy JSON
 /// conversion) or `as_node()` (direct).
-// `Typed` is the overwhelmingly common (hot) variant; `Lazy` is a small,
-// transient placeholder resolved before analysis. Boxing `Typed` to equalize
-// variant sizes would add an allocation + indirection to every expression on
-// the hot path, so we intentionally keep it inline.
-#[allow(clippy::large_enum_variant)]
 pub enum Expression<'a> {
     /// A typed JavaScript expression (performance-optimized).
-    Typed(TypedExpr<'a>),
+    // Boxed: an inline `TypedExpr` made `Expression` 152 B, which the template
+    // AST then embeds up to three times per node — the resulting `Vec` growth
+    // memcpy and struct moves cost more than the one allocation per expression
+    // that boxing adds (A/B: parse −3% fixtures / −6% real-world).
+    Typed(Box<TypedExpr<'a>>),
     /// A deferred expression — stores source byte offsets (zero allocation).
     /// Resolved by `resolve_lazy_expressions()` before analysis.
     Lazy {
@@ -88,8 +111,16 @@ pub enum Expression<'a> {
         end: u32,
         /// Whether source is TypeScript.
         ts: bool,
+        /// Which parse-time entry point deferred this expression.
+        kind: LazyKind,
     },
 }
+
+// `Expression` is embedded by value in every expression-bearing template node
+// (`ExpressionTag`, `Attribute`, `EachBlock`, `AwaitBlock`, …), so its width
+// multiplies into `Vec` growth memcpy and struct moves on the parse hot path.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Expression<'static>>() == 16);
 
 impl<'a> Expression<'a> {
     /// Create a new identifier expression.
@@ -113,14 +144,14 @@ impl<'a> Expression<'a> {
                 },
             })
         });
-        Expression::Typed(TypedExpr::new(JsNode::Identifier {
+        Expression::Typed(Box::new(TypedExpr::new(JsNode::Identifier {
             start,
             end,
             loc: typed_loc,
             name: name.into(),
             optional: false,
             type_annotation: None,
-        }))
+        })))
     }
 
     /// Create an expression from a JSON value (types it eagerly via `from_value`).
@@ -130,7 +161,7 @@ impl<'a> Expression<'a> {
 
     /// Create an expression from a typed JsNode.
     pub fn from_node(node: JsNode) -> Self {
-        Expression::Typed(TypedExpr::new(node))
+        Expression::Typed(Box::new(TypedExpr::new(node)))
     }
 
     /// Get the underlying JSON value. Cached for Typed variant.
@@ -425,11 +456,17 @@ impl<'a> Expression<'a> {
 impl<'a> Clone for Expression<'a> {
     fn clone(&self) -> Self {
         match self {
-            Expression::Typed(te) => Expression::Typed(te.clone()),
-            Expression::Lazy { start, end, ts } => Expression::Lazy {
+            Expression::Typed(te) => Expression::Typed(Box::new((**te).clone())),
+            Expression::Lazy {
+                start,
+                end,
+                ts,
+                kind,
+            } => Expression::Lazy {
                 start: *start,
                 end: *end,
                 ts: *ts,
+                kind: *kind,
             },
         }
     }
@@ -444,13 +481,15 @@ impl<'a> PartialEq for Expression<'a> {
                     start: s1,
                     end: e1,
                     ts: t1,
+                    kind: k1,
                 },
                 Expression::Lazy {
                     start: s2,
                     end: e2,
                     ts: t2,
+                    kind: k2,
                 },
-            ) => s1 == s2 && e1 == e2 && t1 == t2,
+            ) => s1 == s2 && e1 == e2 && t1 == t2 && k1 == k2,
             // Cross-variant comparison: convert to JSON
             (a, b) => a.as_json() == b.as_json(),
         }
@@ -461,11 +500,17 @@ impl<'a> std::fmt::Debug for Expression<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expression::Typed(te) => f.debug_tuple("Expression::Typed").field(&te.node).finish(),
-            Expression::Lazy { start, end, ts } => f
+            Expression::Lazy {
+                start,
+                end,
+                ts,
+                kind,
+            } => f
                 .debug_tuple("Expression::Lazy")
                 .field(start)
                 .field(end)
                 .field(ts)
+                .field(kind)
                 .finish(),
         }
     }

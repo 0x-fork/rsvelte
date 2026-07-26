@@ -12,8 +12,8 @@
 use std::borrow::Cow;
 
 use compact_str::CompactString;
-use memchr::memchr;
 use memchr::memmem;
+use memchr::{memchr, memchr3};
 use smallvec::SmallVec;
 
 use crate::ast::js::Expression;
@@ -25,6 +25,7 @@ use crate::ast::template::{
 use crate::error::ParseResult;
 
 use super::super::parser::{ElementType, Parser, StackEntry};
+use super::super::utils::TrimWs;
 use super::super::utils::decode_html_entities;
 use super::super::utils::is_void_element;
 
@@ -38,11 +39,16 @@ fn template_has_lang<'a>(attributes: &[crate::ast::Attribute<'a>]) -> bool {
             && let AttributeValue::Sequence(parts) = &node.value
             && let Some(AttributeValuePart::Text(t)) = parts.first()
         {
-            return !t.data.trim().is_empty();
+            return !t.data.trim_ws().is_empty();
         }
     }
     false
 }
+
+static COMMENT_END_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"-->"));
+static BLOCK_COMMENT_END_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"*/"));
 
 impl<'a> Parser<'a> {
     /// Parse an element or comment.
@@ -56,7 +62,7 @@ impl<'a> Parser<'a> {
             let data_start = self.index;
 
             // Use SIMD-accelerated search for "-->" instead of byte-by-byte scanning
-            if let Some(pos) = memmem::find(&self.bytes[self.index..], b"-->") {
+            if let Some(pos) = COMMENT_END_FINDER.find(&self.bytes[self.index..]) {
                 self.index += pos;
             } else {
                 self.index = self.bytes.len();
@@ -188,7 +194,12 @@ impl<'a> Parser<'a> {
             (name == "script" || name == "style") && self.stack.len() == 1;
         let prev_in_root_script_or_style = self.in_root_script_or_style;
         self.in_root_script_or_style = is_top_level_script_or_style;
+        // `parse_svelte_options` reads these values below, before
+        // `resolve_lazy_expressions` ever runs, so they must be parsed eagerly.
+        let prev_in_svelte_options = self.in_svelte_options;
+        self.in_svelte_options = name == "svelte:options";
         let attributes_result = self.parse_attributes();
+        self.in_svelte_options = prev_in_svelte_options;
         self.in_root_script_or_style = prev_in_root_script_or_style;
         let attributes = attributes_result?;
 
@@ -852,6 +863,53 @@ impl<'a> Parser<'a> {
             _ => return None, // If parent is a block ({#if}, {#each}, etc.), don't implicitly close
         };
 
+        // Only these parents can ever be implicitly closed, so resolve the rule
+        // before paying for the look-ahead scan below.
+        let closers: &[&str] = match current_element {
+            "li" => &["li"],
+            "p" => &[
+                "address",
+                "article",
+                "aside",
+                "blockquote",
+                "details",
+                "div",
+                "dl",
+                "fieldset",
+                "figcaption",
+                "figure",
+                "footer",
+                "form",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+                "header",
+                "hgroup",
+                "hr",
+                "main",
+                "menu",
+                "nav",
+                "ol",
+                "p",
+                "pre",
+                "section",
+                "table",
+                "ul",
+            ],
+            "dt" | "dd" => &["dt", "dd"],
+            "rt" | "rp" => &["rt", "rp"],
+            "td" | "th" => &["td", "th", "tr"],
+            "tr" => &["tr", "tbody"],
+            "thead" | "tbody" => &["tbody", "tfoot"],
+            "tfoot" => &["tbody"],
+            "option" => &["option", "optgroup"],
+            "optgroup" => &["optgroup"],
+            _ => return None,
+        };
+
         // Check if the next tag would implicitly close the current element
         if !self.match_byte(b'<') || self.match_str("</") || self.match_str("<!") {
             return None;
@@ -885,62 +943,10 @@ impl<'a> Parser<'a> {
         // This avoids the heap allocation from to_lowercase()
         let next_tag_str = std::str::from_utf8(next_tag_bytes).unwrap_or("");
 
-        // Helper macro for case-insensitive comparison against lowercase literals
-        macro_rules! tag_eq {
-            ($lit:expr) => {
-                next_tag_str.eq_ignore_ascii_case($lit)
-            };
-        }
-
         // Check implicit closing rules (case-insensitive for HTML compliance)
-        let closes = match current_element {
-            "li" => tag_eq!("li"),
-            "p" => {
-                tag_eq!("address")
-                    || tag_eq!("article")
-                    || tag_eq!("aside")
-                    || tag_eq!("blockquote")
-                    || tag_eq!("details")
-                    || tag_eq!("div")
-                    || tag_eq!("dl")
-                    || tag_eq!("fieldset")
-                    || tag_eq!("figcaption")
-                    || tag_eq!("figure")
-                    || tag_eq!("footer")
-                    || tag_eq!("form")
-                    || tag_eq!("h1")
-                    || tag_eq!("h2")
-                    || tag_eq!("h3")
-                    || tag_eq!("h4")
-                    || tag_eq!("h5")
-                    || tag_eq!("h6")
-                    || tag_eq!("header")
-                    || tag_eq!("hgroup")
-                    || tag_eq!("hr")
-                    || tag_eq!("main")
-                    || tag_eq!("menu")
-                    || tag_eq!("nav")
-                    || tag_eq!("ol")
-                    || tag_eq!("p")
-                    || tag_eq!("pre")
-                    || tag_eq!("section")
-                    || tag_eq!("table")
-                    || tag_eq!("ul")
-            }
-            "dt" => tag_eq!("dt") || tag_eq!("dd"),
-            "dd" => tag_eq!("dt") || tag_eq!("dd"),
-            "rt" => tag_eq!("rt") || tag_eq!("rp"),
-            "rp" => tag_eq!("rt") || tag_eq!("rp"),
-            "td" => tag_eq!("td") || tag_eq!("th") || tag_eq!("tr"),
-            "th" => tag_eq!("td") || tag_eq!("th") || tag_eq!("tr"),
-            "tr" => tag_eq!("tr") || tag_eq!("tbody"),
-            "thead" => tag_eq!("tbody") || tag_eq!("tfoot"),
-            "tbody" => tag_eq!("tbody") || tag_eq!("tfoot"),
-            "tfoot" => tag_eq!("tbody"),
-            "option" => tag_eq!("option") || tag_eq!("optgroup"),
-            "optgroup" => tag_eq!("optgroup"),
-            _ => false,
-        };
+        let closes = closers
+            .iter()
+            .any(|lit| next_tag_str.eq_ignore_ascii_case(lit));
 
         if closes {
             Some(CompactString::from(next_tag_str.to_ascii_lowercase()))
@@ -1066,6 +1072,9 @@ impl<'a> Parser<'a> {
     /// `root_comments`), `false` otherwise. Mirrors `read_comment()` in the
     /// official Svelte compiler (5.53+).
     fn read_attr_comment(&mut self) -> bool {
+        if self.bytes.get(self.index) != Some(&b'/') {
+            return false;
+        }
         let start = self.index;
         if self.match_str("//") {
             self.advance_by(2); // consume '//'
@@ -1093,7 +1102,7 @@ impl<'a> Parser<'a> {
             self.advance_by(2); // consume '/*'
             let value_start = self.index;
             let value_end;
-            if let Some(pos) = memmem::find(&self.bytes[self.index..], b"*/") {
+            if let Some(pos) = BLOCK_COMMENT_END_FINDER.find(&self.bytes[self.index..]) {
                 value_end = self.index + pos;
                 self.index += pos + 2; // skip past '*/'
             } else {
@@ -1164,7 +1173,7 @@ impl<'a> Parser<'a> {
                 let expr_content = &self.source[expr_start..self.index];
                 self.advance(); // consume '}'
                 let expression =
-                    self.parse_head_expression(expr_content.trim(), expr_start, false, '}')?;
+                    self.parse_head_expression(expr_content.trim_ws(), expr_start, false, '}')?;
                 return Ok(Some(crate::ast::Attribute::SpreadAttribute(
                     crate::ast::template::SpreadAttribute {
                         start: start as u32,
@@ -1200,7 +1209,7 @@ impl<'a> Parser<'a> {
 
             // Check for empty attribute shorthand {}
             // In loose mode, allow empty shorthand (e.g., when typing)
-            if expr_content.trim().is_empty() {
+            if expr_content.trim_ws().is_empty() {
                 if !self.options.loose {
                     return Err(crate::error::ParseError::svelte(
                         "attribute_empty_shorthand",
@@ -1261,10 +1270,10 @@ impl<'a> Parser<'a> {
             }
 
             // Create the expression
-            let expression = self.parse_js_expression(expr_content.trim(), expr_start);
+            let expression = self.parse_js_expression(expr_content.trim_ws(), expr_start);
 
             // Create the attribute name from the expression (shorthand)
-            let name = expr_content.trim().to_string();
+            let name = expr_content.trim_ws().to_string();
 
             // Attribute shorthand must be a bare identifier (`{foo}`). Upstream
             // reads a single identifier and then expects `}`, so `{a.b}`,
@@ -1816,7 +1825,7 @@ impl<'a> Parser<'a> {
                         parts.push(AttributeValuePart::ExpressionTag(ExpressionTag {
                             start: expr_start as u32,
                             end: self.index as u32,
-                            expression: self.parse_js_expression_strict_eager(
+                            expression: self.parse_js_expression_attribute(
                                 &self.source[inner_start..inner_end],
                                 inner_start,
                             )?,
@@ -1877,7 +1886,7 @@ impl<'a> Parser<'a> {
                         parts.push(AttributeValuePart::ExpressionTag(ExpressionTag {
                             start: expr_start as u32,
                             end: self.index as u32,
-                            expression: self.parse_js_expression_strict_eager(
+                            expression: self.parse_js_expression_attribute(
                                 &self.source[inner_start..inner_end],
                                 inner_start,
                             )?,
@@ -2173,7 +2182,8 @@ impl<'a> Parser<'a> {
         let expr_content = &self.source[expr_start..expr_end];
         self.advance(); // consume closing '}'
 
-        let expression = self.parse_head_expression(expr_content.trim(), expr_start, false, '}')?;
+        let expression =
+            self.parse_head_expression(expr_content.trim_ws(), expr_start, false, '}')?;
 
         Ok(Some(crate::ast::Attribute::AttachTag(
             crate::ast::template::AttachTag {
@@ -2343,7 +2353,7 @@ impl<'a> Parser<'a> {
                     // parse leniently and never raise `js_parse_error`.
                     self.parse_js_expression(expr_content, expr_start + 1)
                 } else {
-                    self.parse_js_expression_strict_eager(expr_content, expr_start + 1)?
+                    self.parse_js_expression_attribute(expr_content, expr_start + 1)?
                 };
                 parts.push(AttributeValuePart::ExpressionTag(ExpressionTag {
                     start: expr_start as u32,
@@ -2354,19 +2364,34 @@ impl<'a> Parser<'a> {
             } else {
                 // Text content - use byte-level scanning for speed
                 let text_start = self.index;
+                let mut entity_before_stop = None;
                 if let Some(q) = quote {
-                    // Quoted: scan for '{' or closing quote using memchr
-                    while self.index < self.bytes.len() {
-                        let b = self.bytes[self.index];
-                        if b == b'{' || b == q {
-                            break;
-                        }
-                        if b < 0x80 {
-                            self.index += 1;
-                        } else {
-                            self.advance();
+                    // Quoted: the terminators are ASCII and no UTF-8
+                    // continuation byte can equal one, so a raw byte search
+                    // stops exactly where the char-wise scan did. Reaching a
+                    // terminator also proves no '&' preceded it, so the
+                    // no-entity majority needs one pass instead of two.
+                    let rest = &self.bytes[self.index..];
+                    let mut offset = 0;
+                    let mut seen = false;
+                    loop {
+                        match memchr3(b'{', q, b'&', &rest[offset..]) {
+                            Some(hit) if rest[offset + hit] == b'&' => {
+                                seen = true;
+                                offset += hit + 1;
+                            }
+                            Some(hit) => {
+                                offset += hit;
+                                break;
+                            }
+                            None => {
+                                offset = rest.len();
+                                break;
+                            }
                         }
                     }
+                    self.index += offset;
+                    entity_before_stop = Some(seen);
                 } else {
                     // Unquoted: scan for '{', whitespace, '>', or '/>'
                     while self.index < self.bytes.len() {
@@ -2403,7 +2428,9 @@ impl<'a> Parser<'a> {
                 if text_end > text_start {
                     let raw = &self.source[text_start..text_end];
                     // Fast path: skip entity decoding when no '&' present
-                    let has_entity = memchr(b'&', &self.bytes[text_start..text_end]).is_some();
+                    let has_entity = entity_before_stop.unwrap_or_else(|| {
+                        memchr(b'&', &self.bytes[text_start..text_end]).is_some()
+                    });
                     if has_entity {
                         let data = decode_html_entities(raw, true);
                         parts.push(AttributeValuePart::Text(Text {
@@ -2598,7 +2625,7 @@ fn is_valid_element_name(name: &str) -> bool {
     }
 
     // Check for namespaced element (e.g., svg:rect)
-    if let Some(colon_pos) = name.find(':') {
+    if let Some(colon_pos) = memchr(b':', bytes) {
         let before_bytes = &name.as_bytes()[..colon_pos];
         let after_bytes = &name.as_bytes()[colon_pos + 1..];
 

@@ -29,6 +29,17 @@ use crate::error::{ParseError, ParseResult};
 
 use super::ParseOptions;
 
+/// Substring searchers used once per file; building one is not free, so they
+/// are shared instead of reconstructed per parse.
+static SCRIPT_TAG_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"<script"));
+static HTML_COMMENT_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"<!--"));
+static LANG_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"lang"));
+static COMMENT_END_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"-->"));
+
 /// Last auto-closed tag information.
 ///
 /// Corresponds to `LastAutoClosedTag` in `svelte/packages/svelte/src/compiler/phases/1-parse/index.js`.
@@ -49,6 +60,10 @@ pub struct Parser<'a> {
     pub(crate) bytes: &'a [u8],
     /// Current byte position in the source.
     pub(crate) index: usize,
+    /// Index just past the last non-whitespace char. Nothing at or after it can
+    /// be anything but trailing whitespace, so `remaining_is_whitespace_only`
+    /// rejects every earlier position without scanning.
+    pub(crate) content_end: usize,
     /// Parser options.
     pub(crate) options: ParseOptions,
     /// Stack of open elements/blocks for validation.
@@ -82,6 +97,11 @@ pub struct Parser<'a> {
     /// `generics="T extends { foo: number }"`) are plain text, never JS
     /// expressions — and must not raise `js_parse_error`.
     pub(crate) in_root_script_or_style: bool,
+    /// Whether `<svelte:options>` attributes are currently being parsed.
+    /// `read_options` inspects their values (`runes={false}`,
+    /// `customElement={{…}}`) during the parse itself, so they can never be
+    /// deferred into `Expression::Lazy`.
+    pub(crate) in_svelte_options: bool,
     /// Meta tags (e.g., svelte:head, svelte:options).
     ///
     /// Corresponds to `meta_tags` field in JavaScript Parser.
@@ -189,6 +209,7 @@ impl<'a> Parser<'a> {
             source,
             bytes: source.as_bytes(),
             index: 0,
+            content_end: source.trim_end().len(),
             options,
             stack,
             line_offsets,
@@ -200,6 +221,7 @@ impl<'a> Parser<'a> {
             ts,
             script_ts: false,
             in_root_script_or_style: false,
+            in_svelte_options: false,
             meta_tags: FxHashMap::default(),
             last_auto_closed_tag: None,
             parse_warnings: Vec::new(),
@@ -214,6 +236,7 @@ impl<'a> Parser<'a> {
         self.source = source;
         self.bytes = source.as_bytes();
         self.index = 0;
+        self.content_end = source.trim_end().len();
         self.options = options;
 
         self.stack.clear();
@@ -235,6 +258,7 @@ impl<'a> Parser<'a> {
         self.ts = options.force_typescript || Self::detect_typescript_mode(source);
         self.script_ts = false;
         self.in_root_script_or_style = false;
+        self.in_svelte_options = false;
         self.instance_script = None;
         self.module_script = None;
         self.stylesheet = None;
@@ -255,30 +279,47 @@ impl<'a> Parser<'a> {
         let bytes = source.as_bytes();
         let len = bytes.len();
 
-        // Use memchr to quickly find '<' characters, then check for <script
-        let mut pos = 0;
-        while let Some(offset) = memchr::memchr(b'<', &bytes[pos..]) {
-            let i = pos + offset;
-            pos = i + 1;
+        // Every positive answer needs a literal `lang` attribute, so one cheap
+        // pass rules out the two scans below for the whole no-`lang` majority.
+        if LANG_FINDER.find(bytes).is_none() {
+            return false;
+        }
 
-            // Skip HTML comments: <!-- ... -->
-            if i + 3 < len && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
-                if let Some(end_offset) = memchr::memmem::find(&bytes[i + 4..], b"-->") {
-                    pos = i + 4 + end_offset + 3;
-                } else {
+        // Jump straight between `<script` occurrences; HTML-comment spans are
+        // resolved lazily so a commented-out script is still ignored.
+        let script_finder = &*SCRIPT_TAG_FINDER;
+        let comment_finder = &*HTML_COMMENT_FINDER;
+        let mut comment_pos = 0usize;
+        let mut script_pos = 0usize;
+
+        'outer: while let Some(offset) = script_finder.find(&bytes[script_pos..]) {
+            let i = script_pos + offset;
+
+            while comment_pos <= i {
+                let Some(coffset) = comment_finder.find(&bytes[comment_pos..]) else {
+                    comment_pos = len + 1;
+                    break;
+                };
+                let comment_start = comment_pos + coffset;
+                if comment_start > i {
+                    comment_pos = comment_start;
                     break;
                 }
-                continue;
+                let comment_end = match COMMENT_END_FINDER.find(&bytes[comment_start + 4..]) {
+                    Some(end_offset) => comment_start + 4 + end_offset + 3,
+                    None => len,
+                };
+                comment_pos = comment_end;
+                if comment_end > i {
+                    script_pos = comment_end;
+                    continue 'outer;
+                }
             }
+
+            script_pos = i + 7;
 
             // Check for <script followed by whitespace or >
             if i + 7 < len
-                && bytes[i + 1] == b's'
-                && bytes[i + 2] == b'c'
-                && bytes[i + 3] == b'r'
-                && bytes[i + 4] == b'i'
-                && bytes[i + 5] == b'p'
-                && bytes[i + 6] == b't'
                 && (bytes[i + 7] == b' '
                     || bytes[i + 7] == b'\t'
                     || bytes[i + 7] == b'\n'
@@ -328,9 +369,7 @@ impl<'a> Parser<'a> {
                     }
                     j += 1;
                 }
-                if j < len {
-                    pos = j + 1;
-                }
+                script_pos = if j < len { j + 1 } else { len };
             }
         }
 
@@ -557,6 +596,26 @@ impl<'a> Parser<'a> {
             return None;
         }
         Some(i)
+    }
+
+    /// `(close, continuation)` markers, sharing the single whitespace skip.
+    #[inline]
+    pub fn match_block_markers(&self) -> (bool, bool) {
+        let Some(i) = self.index_after_open_brace_ws() else {
+            return (false, false);
+        };
+        match self.bytes[i] {
+            b'/' => (
+                !matches!(self.bytes.get(i + 1), Some(b'*') | Some(b'/')),
+                false,
+            ),
+            b':' => (
+                false,
+                !(self.bytes.get(i + 1) == Some(&b'/')
+                    && matches!(self.bytes.get(i + 2), Some(b'*') | Some(b'/'))),
+            ),
+            _ => (false, false),
+        }
     }
 
     /// Consume a string if it matches.

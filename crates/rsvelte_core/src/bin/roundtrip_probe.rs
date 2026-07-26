@@ -75,12 +75,7 @@ fn main() {
                 c.ts_skipped += 1;
                 continue;
             }
-            let raw: String = if script.raw_content.is_empty() {
-                String::new()
-            } else {
-                script.raw_content.clone()
-            };
-            let trimmed = raw.trim();
+            let trimmed = script.raw_content.trim();
             if trimmed.is_empty() {
                 c.empty_skipped += 1;
                 continue;

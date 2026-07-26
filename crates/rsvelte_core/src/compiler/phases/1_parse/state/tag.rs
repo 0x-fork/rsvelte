@@ -11,15 +11,17 @@
 
 use compact_str::CompactString;
 
-use crate::ast::js::Expression;
+use crate::ast::js::{Expression, LazyKind};
 use crate::ast::template::{
     AwaitBlock, ConstTag, DebugTag, DeclarationTag, EachBlock, ExpressionTag, Fragment,
     FragmentType, HtmlTag, IfBlock, KeyBlock, RenderTag, SnippetBlock, TemplateNode,
 };
+use crate::ast::typed_expr::JsNode;
 use crate::compiler::phases::phase1_parse::utils::find_matching_bracket;
 use crate::error::ParseResult;
 
 use super::super::parser::{Parser, StackEntry};
+use super::super::utils::TrimWs;
 
 impl<'a> Parser<'a> {
     /// Try to parse a declaration tag (`{let x = …}` / `{const x = …}`,
@@ -265,8 +267,8 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let pattern_str = body_text[..eq_idx].trim();
-        let init_str = body_text[eq_idx + 1..].trim();
+        let pattern_str = body_text[..eq_idx].trim_ws();
+        let init_str = body_text[eq_idx + 1..].trim_ws();
 
         // In loose mode, an empty RHS (`{const x = }`) collapses both sides
         // into a single empty-name declarator at the `}` position — mirrors
@@ -378,8 +380,8 @@ impl<'a> Parser<'a> {
 
         let declaration = build_kind_variable_declaration(
             &self.arena,
-            &pattern_expr,
-            &init_expr,
+            pattern_expr,
+            init_expr,
             decl_start,
             body_end,
             kind,
@@ -414,7 +416,7 @@ impl<'a> Parser<'a> {
         let mut declarators: Vec<Value> = Vec::with_capacity(segments.len());
         for (seg_off, raw) in segments {
             let lead = raw.len() - raw.trim_start().len();
-            let seg = raw.trim();
+            let seg = raw.trim_ws();
             if seg.is_empty() {
                 continue;
             }
@@ -424,8 +426,8 @@ impl<'a> Parser<'a> {
                 Some(eq) => {
                     let init_lead = seg[eq + 1..].len() - seg[eq + 1..].trim_start().len();
                     (
-                        seg[..eq].trim().to_string(),
-                        seg[eq + 1..].trim().to_string(),
+                        seg[..eq].trim_ws().to_string(),
+                        seg[eq + 1..].trim_ws().to_string(),
                         seg_off + eq + 1 + init_lead,
                     )
                 }
@@ -548,7 +550,7 @@ impl<'a> Parser<'a> {
 
         // Parse the expression - propagate JS parse errors when not in loose mode
         // (corresponds to Svelte's read_expression call which throws on invalid JS)
-        let expression = self.parse_js_expression_strict(expr_content.trim(), expr_start)?;
+        let expression = self.parse_js_expression_strict(expr_content.trim_ws(), expr_start)?;
 
         Ok(Some(TemplateNode::ExpressionTag(Box::new(ExpressionTag {
             start: start as u32,
@@ -634,7 +636,7 @@ impl<'a> Parser<'a> {
         let expr_content = &self.source[expr_start..self.index];
         self.advance(); // consume '}'
 
-        let test = self.parse_head_expression(expr_content.trim(), expr_start, false, '}')?;
+        let test = self.parse_head_expression(expr_content.trim_ws(), expr_start, false, '}')?;
 
         // Push block to stack
         self.stack.push(StackEntry::IfBlock {
@@ -717,7 +719,7 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '}'
 
             let alt_test =
-                self.parse_head_expression(alt_expr_content.trim(), alt_expr_start, false, '}')?;
+                self.parse_head_expression(alt_expr_content.trim_ws(), alt_expr_start, false, '}')?;
             let alt_consequent = self.parse_fragment()?;
 
             // Recursively check for another else/else-if
@@ -892,7 +894,7 @@ impl<'a> Parser<'a> {
         }
 
         let expr_end = self.index;
-        let expr_content = &self.source[expr_start..expr_end].trim();
+        let expr_content = &self.source[expr_start..expr_end].trim_ws();
         // Use disallow_loose = true to prevent patterns like `as { y = z }` from being parsed as expressions
         // (corresponds to Svelte's read_expression(parser, undefined, true))
         let expression = self.parse_head_expression(expr_content, expr_start, true, '}')?;
@@ -916,8 +918,8 @@ impl<'a> Parser<'a> {
                 }
 
                 if let Some(comma_pos) = last_comma {
-                    let expr_part = s[..comma_pos].trim();
-                    let idx_part = s[comma_pos + 1..].trim();
+                    let expr_part = s[..comma_pos].trim_ws();
+                    let idx_part = s[comma_pos + 1..].trim_ws();
 
                     // Check if idx_part contains a key expression (contains '(' at top level)
                     // e.g., "i (key)" means we have both index and key
@@ -942,7 +944,7 @@ impl<'a> Parser<'a> {
                     if !idx_part.is_empty() {
                         // Extract the identifier part (before any '(')
                         let idx_name = if idx_has_key {
-                            idx_part.split('(').next().unwrap_or("").trim()
+                            idx_part.split('(').next().unwrap_or("").trim_ws()
                         } else {
                             idx_part
                         };
@@ -965,7 +967,7 @@ impl<'a> Parser<'a> {
                                             .unwrap_or(self.bytes.len());
                                     let key_raw = &self.source[key_start..key_end];
                                     let key_lead = key_raw.len() - key_raw.trim_start().len();
-                                    let key_content = key_raw.trim().to_string();
+                                    let key_content = key_raw.trim_ws().to_string();
                                     Some(self.parse_head_expression(
                                         &key_content,
                                         key_start + key_lead,
@@ -1167,7 +1169,7 @@ impl<'a> Parser<'a> {
 
         let context_end = self.index;
         let raw_content = &self.source[context_start..context_end];
-        let trimmed_content = raw_content.trim();
+        let trimmed_content = raw_content.trim_ws();
         // Calculate actual start position after trimming leading whitespace
         let leading_ws = raw_content.len() - raw_content.trim_start().len();
         let actual_context_start = context_start + leading_ws;
@@ -1185,7 +1187,7 @@ impl<'a> Parser<'a> {
                 }
                 self.advance();
             }
-            let idx_name = self.source[idx_start..self.index].trim();
+            let idx_name = self.source[idx_start..self.index].trim_ws();
             if !idx_name.is_empty() {
                 index = Some(CompactString::from(idx_name));
             }
@@ -1201,7 +1203,7 @@ impl<'a> Parser<'a> {
             // `{#each items as item (item.name + ")")}`) doesn't close it early.
             self.index =
                 find_matching_bracket(self.source, key_start, '(').unwrap_or(self.bytes.len());
-            let key_content = self.source[key_start..self.index].trim();
+            let key_content = self.source[key_start..self.index].trim_ws();
             // Use opening_token = '(' for key expressions (corresponds to Svelte's read_expression(parser, '('))
             key = Some(self.parse_head_expression(key_content, key_start, false, ')')?);
             self.eat_optional(")"); // consume closing paren
@@ -1443,27 +1445,33 @@ impl<'a> Parser<'a> {
         let adjusted_end = expr_end - (expr_content.len() - trimmed_content.trim_end().len());
         // For await blocks, we parse the expression with a known end position
         // to avoid find_matching_bracket finding the block's closing }
-        let expression = super::super::expression::parse_expression_with_end(
-            &self.arena,
-            trimmed_content.trim(),
-            adjusted_start,
-            adjusted_end,
-            self.expression_line_offsets(),
-            self.source,
-            self.options.loose,
-            false,
-            '{',
-            self.ts,
-        )
-        .unwrap_or_else(|(_, pos)| {
-            // Return an invalid identifier on parse error (empty name)
-            super::super::expression::create_identifier_with_character(
-                "",
-                pos,
+        let expression = if let Some(lazy) =
+            self.defer_expression(trimmed_content.trim_ws(), adjusted_start, LazyKind::Lenient)
+        {
+            lazy
+        } else {
+            super::super::expression::parse_expression_with_end(
+                &self.arena,
+                trimmed_content.trim_ws(),
+                adjusted_start,
                 adjusted_end,
                 self.expression_line_offsets(),
+                self.source,
+                self.options.loose,
+                false,
+                '{',
+                self.ts,
             )
-        });
+            .unwrap_or_else(|(_, pos)| {
+                // Return an invalid identifier on parse error (empty name)
+                super::super::expression::create_identifier_with_character(
+                    "",
+                    pos,
+                    adjusted_end,
+                    self.expression_line_offsets(),
+                )
+            })
+        };
 
         // Parse 'then' value if present
         if has_then {
@@ -1476,12 +1484,12 @@ impl<'a> Parser<'a> {
                 // Parse pattern with brace/bracket matching for destructuring patterns
                 self.skip_pattern_expression();
                 let value_content = &self.source[value_start..self.index];
-                if !value_content.trim().is_empty() {
+                if !value_content.trim_ws().is_empty() {
                     // Use parse_binding_pattern to properly parse destructuring patterns
                     // (e.g., `{ width, height }` -> ObjectPattern) instead of creating
                     // a simple identifier. This ensures phase 2 scope analysis correctly
                     // declares individual bindings for destructured names.
-                    value = Some(self.parse_binding_pattern(value_content.trim(), value_start)?);
+                    value = Some(self.parse_binding_pattern(value_content.trim_ws(), value_start)?);
                 }
             }
         }
@@ -1497,10 +1505,10 @@ impl<'a> Parser<'a> {
                 // Parse pattern with brace/bracket matching for destructuring patterns
                 self.skip_pattern_expression();
                 let error_content = &self.source[error_start..self.index];
-                if !error_content.trim().is_empty() {
+                if !error_content.trim_ws().is_empty() {
                     // Use parse_binding_pattern to properly parse destructuring patterns
                     // (same as for then values above).
-                    error = Some(self.parse_binding_pattern(error_content.trim(), error_start)?);
+                    error = Some(self.parse_binding_pattern(error_content.trim_ws(), error_start)?);
                 }
             }
         }
@@ -1546,10 +1554,10 @@ impl<'a> Parser<'a> {
                     // Parse pattern with brace/bracket matching for destructuring patterns
                     self.skip_pattern_expression();
                     let value_content = &self.source[value_start..self.index];
-                    if !value_content.trim().is_empty() {
+                    if !value_content.trim_ws().is_empty() {
                         // Use parse_binding_pattern to properly parse destructuring patterns
                         value =
-                            Some(self.parse_binding_pattern(value_content.trim(), value_start)?);
+                            Some(self.parse_binding_pattern(value_content.trim_ws(), value_start)?);
                     }
                 }
                 self.skip_whitespace();
@@ -1565,10 +1573,10 @@ impl<'a> Parser<'a> {
                     // Parse pattern with brace/bracket matching for destructuring patterns
                     self.skip_pattern_expression();
                     let error_content = &self.source[error_start..self.index];
-                    if !error_content.trim().is_empty() {
+                    if !error_content.trim_ws().is_empty() {
                         // Use parse_binding_pattern to properly parse destructuring patterns
                         error =
-                            Some(self.parse_binding_pattern(error_content.trim(), error_start)?);
+                            Some(self.parse_binding_pattern(error_content.trim_ws(), error_start)?);
                     }
                 }
                 self.skip_whitespace();
@@ -1620,7 +1628,8 @@ impl<'a> Parser<'a> {
         let expr_content = &self.source[expr_start..self.index];
         self.advance(); // consume '}'
 
-        let expression = self.parse_head_expression(expr_content.trim(), expr_start, false, '}')?;
+        let expression =
+            self.parse_head_expression(expr_content.trim_ws(), expr_start, false, '}')?;
 
         // Push block to stack
         self.stack.push(StackEntry::KeyBlock {
@@ -1697,8 +1706,8 @@ impl<'a> Parser<'a> {
                 }
             }
             let type_params_content = &self.source[type_params_start..self.index];
-            if !type_params_content.trim().is_empty() {
-                type_params = Some(CompactString::from(type_params_content.trim()));
+            if !type_params_content.trim_ws().is_empty() {
+                type_params = Some(CompactString::from(type_params_content.trim_ws()));
             }
             self.eat_optional(">"); // consume closing >
         }
@@ -1750,7 +1759,7 @@ impl<'a> Parser<'a> {
             // (the compiler-errors fixture needs its position), but skips it in
             // svelte2tsx mode (`script_ts`, set only by `parse_script_ts`).
             if !self.script_ts {
-                let trimmed = params_content.trim();
+                let trimmed = params_content.trim_ws();
                 let mut depth = 0;
                 for (byte_offset, c) in trimmed.char_indices() {
                     if c == '(' || c == '[' || c == '{' {
@@ -1770,7 +1779,7 @@ impl<'a> Parser<'a> {
             }
 
             // Parse parameters with TypeScript type annotations
-            if !params_content.trim().is_empty() {
+            if !params_content.trim_ws().is_empty() {
                 // Upstream parses `${params} => {}` with `parse_expression_at`
                 // in the file's `parser.ts` mode (1-parse/state/tag.js), so
                 // TS annotations without `lang="ts"` raise `js_parse_error`.
@@ -1905,7 +1914,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume '}'
 
                 let expression =
-                    self.parse_head_expression(expr_content.trim(), expr_start, false, '}')?;
+                    self.parse_head_expression(expr_content.trim_ws(), expr_start, false, '}')?;
 
                 Ok(Some(TemplateNode::HtmlTag(Box::new(HtmlTag {
                     start: start as u32,
@@ -1934,8 +1943,8 @@ impl<'a> Parser<'a> {
                 // render_tag.rs` performs the precise AST-based check, so we must
                 // not reject it here at parse time (svelte2tsx, which only parses,
                 // would otherwise diverge from official by erroring).
-                let trimmed = expr_content.trim();
-                let expression = self.parse_js_expression(trimmed, expr_start);
+                let trimmed = expr_content.trim_ws();
+                let expression = self.parse_js_expression_lenient(trimmed, expr_start);
 
                 Ok(Some(TemplateNode::RenderTag(Box::new(RenderTag {
                     start: start as u32,
@@ -1968,7 +1977,7 @@ impl<'a> Parser<'a> {
                 // assignment operator inside a bracketed destructuring default
                 // (depth > 0) or a string, both of which are skipped here, so
                 // the first depth-0 `=` is the assignment.
-                let trimmed = expr_content.trim();
+                let trimmed = expr_content.trim_ws();
                 let mut depth = 0i32;
                 let mut in_string = false;
                 let mut string_char = 0u8;
@@ -2022,8 +2031,8 @@ impl<'a> Parser<'a> {
                 // top-level `=` we already found.
                 let declaration = if let Some(eq_idx) = first_equals {
                     // Split into pattern string and init string
-                    let pattern_str = trimmed[..eq_idx].trim();
-                    let init_str = trimmed[eq_idx + 1..].trim();
+                    let pattern_str = trimmed[..eq_idx].trim_ws();
+                    let init_str = trimmed[eq_idx + 1..].trim_ws();
 
                     // Strip TypeScript type annotation from pattern if present.
                     // For a simple identifier like `area: number`, strip `: number`.
@@ -2096,8 +2105,8 @@ impl<'a> Parser<'a> {
                     let decl_keyword_start = start + 2;
                     build_const_variable_declaration(
                         &self.arena,
-                        &pattern_expr,
-                        &init_expr,
+                        pattern_expr,
+                        init_expr,
                         decl_keyword_start,
                         expr_end,
                         declarator_end,
@@ -2133,7 +2142,7 @@ impl<'a> Parser<'a> {
                     let end = find_matching_bracket(self.source, expr_start, '{')
                         .unwrap_or(self.source.len());
                     self.index = end;
-                    let expr_content = self.source[expr_start..end].trim();
+                    let expr_content = self.source[expr_start..end].trim_ws();
 
                     if expr_content.is_empty() {
                         Vec::new()
@@ -2208,7 +2217,7 @@ impl<'a> Parser<'a> {
 
         // Adjust offset for leading whitespace that gets trimmed
         let leading_ws = content.len() - content.trim_start().len();
-        let trimmed = content.trim();
+        let trimmed = content.trim_ws();
         super::super::expression::parse_expression(
             &self.arena,
             trimmed,
@@ -2237,20 +2246,21 @@ impl<'a> Parser<'a> {
     ) -> crate::error::ParseResult<Expression<'a>> {
         // In deferred mode, create a Lazy expression
         if self.options.defer_script_parse {
-            let trimmed = content.trim();
+            let trimmed = content.trim_ws();
             if !trimmed.is_empty() {
                 let leading_ws = content.len() - content.trim_start().len();
                 return Ok(Expression::Lazy {
                     start: (offset + leading_ws) as u32,
                     end: (offset + leading_ws + trimmed.len()) as u32,
                     ts: self.ts,
+                    kind: LazyKind::Mustache,
                 });
             }
         }
 
         // Adjust offset for leading whitespace that gets trimmed
         let leading_ws = content.len() - content.trim_start().len();
-        let trimmed = content.trim();
+        let trimmed = content.trim_ws();
         let trimmed_offset = offset + leading_ws;
         super::super::expression::parse_expression(
             &self.arena,
@@ -2285,20 +2295,63 @@ impl<'a> Parser<'a> {
         self.parse_js_expression_internal(content, offset, false, '{')
     }
 
-    /// Like `parse_js_expression_strict`, but always parses eagerly (never
-    /// creates a `Lazy` expression). Used for attribute values, which may be
-    /// inspected at parse time (e.g. `<svelte:options runes={false} />`), so
-    /// they cannot be deferred — while still propagating `js_parse_error` for
-    /// invalid expressions like upstream's `read_expression`.
-    pub fn parse_js_expression_strict_eager(
+    /// Defer `trimmed` (already whitespace-trimmed, starting at
+    /// `trimmed_offset`) into an `Expression::Lazy` when the parse options and
+    /// the current context allow it. `resolve_lazy_expressions` reproduces the
+    /// eager entry point's diagnostics from `kind`.
+    ///
+    /// Loose (editor) mode is excluded: it recovers from broken expressions
+    /// with placeholder identifiers, which the resolver cannot reconstruct.
+    /// Comment-bearing bodies are excluded too: the JS comment sink is drained
+    /// into `root.comments` when the parse ends, long before the resolver runs.
+    #[inline]
+    fn defer_expression(
+        &self,
+        trimmed: &str,
+        trimmed_offset: usize,
+        kind: LazyKind,
+    ) -> Option<Expression<'a>> {
+        (self.options.defer_script_parse
+            && !self.options.loose
+            && !self.in_svelte_options
+            && !trimmed.is_empty()
+            && !contains_js_comment(trimmed))
+        .then(|| Expression::Lazy {
+            start: trimmed_offset as u32,
+            end: (trimmed_offset + trimmed.len()) as u32,
+            ts: self.ts,
+            kind,
+        })
+    }
+
+    /// Parse an expression whose parse failures are swallowed into an empty
+    /// identifier: `{@render …}` (its invalid-call check is an analysis-phase
+    /// error) and the `{#await …}` head.
+    pub fn parse_js_expression_lenient(&self, content: &str, offset: usize) -> Expression<'a> {
+        let leading_ws = content.len() - content.trim_start().len();
+        let trimmed = content.trim_ws();
+        match self.defer_expression(trimmed, offset + leading_ws, LazyKind::Lenient) {
+            Some(lazy) => lazy,
+            None => self.parse_js_expression_internal(content, offset, false, '{'),
+        }
+    }
+
+    /// Parse an attribute-value expression, propagating `js_parse_error` for
+    /// invalid expressions like upstream's `read_expression`. Deferred unless
+    /// the value belongs to `<svelte:options>`, whose values `read_options`
+    /// inspects during the parse itself (e.g. `runes={false}`).
+    pub fn parse_js_expression_attribute(
         &self,
         content: &str,
         offset: usize,
     ) -> crate::error::ParseResult<Expression<'a>> {
         // Adjust offset for leading whitespace that gets trimmed
         let leading_ws = content.len() - content.trim_start().len();
-        let trimmed = content.trim();
+        let trimmed = content.trim_ws();
         let trimmed_offset = offset + leading_ws;
+        if let Some(lazy) = self.defer_expression(trimmed, trimmed_offset, LazyKind::Attribute) {
+            return Ok(lazy);
+        }
         super::super::expression::parse_expression(
             &self.arena,
             trimmed,
@@ -2342,9 +2395,18 @@ impl<'a> Parser<'a> {
         close_char: char,
     ) -> crate::error::ParseResult<Expression<'a>> {
         let leading_ws = content.len() - content.trim_start().len();
-        let trimmed = content.trim();
+        let trimmed = content.trim_ws();
         let trimmed_offset = offset + leading_ws;
         let opening_token = if close_char == ')' { '(' } else { '{' };
+
+        let kind = if close_char == ')' {
+            LazyKind::HeadParen
+        } else {
+            LazyKind::HeadBrace
+        };
+        if let Some(lazy) = self.defer_expression(trimmed, trimmed_offset, kind) {
+            return Ok(lazy);
+        }
 
         match super::super::read::expression::parse_expression(
             &self.arena,
@@ -2401,6 +2463,20 @@ impl<'a> Parser<'a> {
 /// This handles nested braces/brackets so that colons inside destructuring
 /// patterns (like `{ x: aliasX }`) are not mistakenly treated as type
 /// annotations.
+/// Whether `s` contains a `//` or `/*` comment opener. A `/` inside a string or
+/// regex can produce a false positive, which only costs an eager parse.
+fn contains_js_comment(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while let Some(off) = memchr::memchr(b'/', &bytes[i..]) {
+        i += off + 1;
+        if matches!(bytes.get(i), Some(b'/') | Some(b'*')) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Find the byte offset of the first top-level assignment `=` in a declaration
 /// body, skipping `==` / `===` / `!=` / `<=` / `>=` / `=>` and any `=` inside
 /// strings or `()` / `[]` / `{}` nesting. Returns `None` when there is none.
@@ -2533,7 +2609,7 @@ fn strip_type_annotation(pattern: &str) -> String {
             '}' | ']' | ')' => depth -= 1,
             ':' if depth == 0 => {
                 // Found a top-level colon - this is a type annotation
-                return pattern[..i].trim().to_string();
+                return pattern[..i].trim_ws().to_string();
             }
             _ => {}
         }
@@ -2543,7 +2619,7 @@ fn strip_type_annotation(pattern: &str) -> String {
     pattern.to_string()
 }
 
-/// Build a `VariableDeclaration` JSON node with a caller-supplied kind
+/// Build a `VariableDeclaration` node with a caller-supplied kind
 /// (`let` / `const` / `var`) from a pattern expression and init expression.
 /// Mirrors `build_const_variable_declaration` (which is locked to `const`)
 /// and powers both `{@const}` and the `{let x = …}` / `{const x = …}`
@@ -2562,109 +2638,82 @@ fn strip_type_annotation(pattern: &str) -> String {
 /// ```
 fn build_kind_variable_declaration<'a>(
     arena: &crate::ast::arena::ParseArena,
-    pattern: &Expression,
-    init: &Expression,
+    pattern: Expression<'a>,
+    init: Expression<'a>,
     decl_start: usize,
     decl_end: usize,
     kind: &str,
 ) -> Expression<'a> {
-    use serde_json::{Map, Value};
-
-    let pattern_value = crate::ast::arena::with_serialize_arena(arena, || pattern.as_json());
-    let init_value = crate::ast::arena::with_serialize_arena(arena, || init.as_json());
-
-    let id_start = pattern_value
-        .get("start")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(decl_start as u64);
-    let init_end = init_value
-        .get("end")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(decl_end as u64);
-
-    let mut declarator = Map::new();
-    declarator.insert(
-        "type".to_string(),
-        Value::String("VariableDeclarator".to_string()),
-    );
-    declarator.insert("id".to_string(), pattern_value.clone());
-    declarator.insert("init".to_string(), init_value.clone());
-    declarator.insert("start".to_string(), Value::Number((id_start as i64).into()));
-    declarator.insert("end".to_string(), Value::Number((init_end as i64).into()));
-
-    let mut declaration = Map::new();
-    declaration.insert(
-        "type".to_string(),
-        Value::String("VariableDeclaration".to_string()),
-    );
-    declaration.insert("kind".to_string(), Value::String(kind.to_string()));
-    declaration.insert(
-        "declarations".to_string(),
-        Value::Array(vec![Value::Object(declarator)]),
-    );
-    declaration.insert(
-        "start".to_string(),
-        Value::Number((decl_start as i64).into()),
-    );
-    declaration.insert("end".to_string(), Value::Number((decl_end as i64).into()));
-
-    Expression::from_json(Value::Object(declaration))
+    build_variable_declaration(arena, pattern, init, decl_start, decl_end, None, kind)
 }
 
 fn build_const_variable_declaration<'a>(
     arena: &crate::ast::arena::ParseArena,
-    pattern: &Expression,
-    init: &Expression,
+    pattern: Expression<'a>,
+    init: Expression<'a>,
     decl_start: usize,
     decl_end: usize,
     declarator_end: usize,
 ) -> Expression<'a> {
-    use serde_json::{Map, Value};
+    build_variable_declaration(
+        arena,
+        pattern,
+        init,
+        decl_start,
+        decl_end,
+        Some(declarator_end),
+        "const",
+    )
+}
 
-    // Use the parser's arena for serialization context
-    let pattern_value = crate::ast::arena::with_serialize_arena(arena, || pattern.as_json());
-    let init_value = crate::ast::arena::with_serialize_arena(arena, || init.as_json());
+/// Shared typed builder behind [`build_kind_variable_declaration`] and
+/// [`build_const_variable_declaration`]. `declarator_end` overrides the
+/// declarator's end (upstream captures `parser.index` just past the
+/// initializer text, which differs from `init.end` inside wrapping parens);
+/// `None` falls back to the initializer's own end.
+fn build_variable_declaration<'a>(
+    arena: &crate::ast::arena::ParseArena,
+    pattern: Expression<'a>,
+    init: Expression<'a>,
+    decl_start: usize,
+    decl_end: usize,
+    declarator_end: Option<usize>,
+    kind: &str,
+) -> Expression<'a> {
+    let pattern_node = expression_into_node(pattern);
+    let init_node = expression_into_node(init);
 
-    // Get positions from the pattern and init for the declarator
-    let id_start = pattern_value
-        .get("start")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(decl_start as u64);
+    let id_start = pattern_node.start().unwrap_or(decl_start as u32);
+    let init_end = init_node.end().unwrap_or(decl_end as u32);
 
-    // Build VariableDeclarator
-    let mut declarator = Map::new();
-    declarator.insert(
-        "type".to_string(),
-        Value::String("VariableDeclarator".to_string()),
-    );
-    declarator.insert("id".to_string(), pattern_value.clone());
-    declarator.insert("init".to_string(), init_value.clone());
-    declarator.insert("start".to_string(), Value::Number((id_start as i64).into()));
-    // `declarator_end` is the parser position just past the initializer text
-    // (including any wrapping parens) but before trailing whitespace, mirroring
-    // upstream's `declarator_end = parser.index` (Svelte 5.56.4) rather than the
-    // bare `init.end` (which stops inside the parens).
-    declarator.insert(
-        "end".to_string(),
-        Value::Number((declarator_end as i64).into()),
-    );
+    let id = arena.alloc_js_node(pattern_node);
+    let init_id = arena.alloc_js_node(init_node);
 
-    // Build VariableDeclaration
-    let mut declaration = Map::new();
-    declaration.insert(
-        "type".to_string(),
-        Value::String("VariableDeclaration".to_string()),
-    );
-    declaration.insert("kind".to_string(), Value::String("const".to_string()));
-    declaration.insert(
-        "declarations".to_string(),
-        Value::Array(vec![Value::Object(declarator)]),
-    );
-    declaration.insert(
-        "start".to_string(),
-        Value::Number((decl_start as i64).into()),
-    );
-    declaration.insert("end".to_string(), Value::Number((decl_end as i64).into()));
+    let declarations = arena.alloc_js_children(vec![JsNode::VariableDeclarator {
+        start: id_start,
+        end: declarator_end.map_or(init_end, |e| e as u32),
+        loc: None,
+        id,
+        init: Some(init_id),
+    }]);
 
-    Expression::from_json(Value::Object(declaration))
+    Expression::from_node(JsNode::VariableDeclaration {
+        start: decl_start as u32,
+        end: decl_end as u32,
+        loc: None,
+        declarations,
+        kind: kind.into(),
+        declare: false,
+    })
+}
+
+/// Take ownership of an expression's typed node. `Lazy` cannot reach these
+/// builders: the declaration paths parse their pattern/init eagerly.
+fn expression_into_node(expr: Expression<'_>) -> JsNode {
+    match expr {
+        Expression::Typed(te) => te.node,
+        Expression::Lazy { .. } => {
+            panic!("Expression::Lazy must be resolved before building a declaration")
+        }
+    }
 }
