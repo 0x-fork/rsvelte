@@ -114,6 +114,258 @@ let count: number = $state<number>(0);
 }
 
 #[test]
+fn retained_typescript_projection_avoids_state_transform_reparse() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let source = r#"<script lang="ts">
+import type { Widget } from './types';
+import { noop } from './helpers';
+let count: number = $state(0);
+const read = (value: Widget & { count: number }) => count + value.count;
+noop(read);
+</script>
+
+<button onclick={() => count++}>{count}</button>
+"#;
+    let result = crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-projection/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(result.js.code.contains("let count = $.state(0)"));
+    assert!(result.js.code.contains("=> $.get(count) + value.count"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 1));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 0));
+}
+
+#[test]
+fn projected_replacement_crossing_removed_typescript_falls_back() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let source = r#"<script lang="ts">
+let count = $state<number>(0);
+</script>
+
+<button onclick={() => count++}>{count}</button>
+"#;
+    let result = crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-partial/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(result.js.code.contains("let count = $.state(0)"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
+fn projected_typescript_semantic_assignment_falls_back() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let source = r#"<script lang="ts">
+let next: number = 1;
+let count: number = $state(0);
+count = next;
+</script>
+
+<p>{count}</p>
+"#;
+    let result = crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-semantic/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(result.js.code.contains("$.set(count, next)"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
+fn projected_typescript_wrapped_rune_initializer_falls_back() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let source = r#"<script lang="ts">
+let count = $state(1)!;
+let double = $derived(count! * 2)!;
+</script>
+
+<p>{count} {double}</p>
+"#;
+    let result = crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-wrapped-rune/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(result.js.code.contains("let count = 1"));
+    assert!(result.js.code.contains("$.derived(() => count * 2)"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
+fn projected_typescript_assertion_update_falls_back() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let result = crate::compiler::compile(
+        r#"<script lang="ts">
+let count: number = $state(0);
+function increment() { count!++; }
+</script>
+
+<button onclick={increment}>{count}</button>
+"#,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-assertion-update/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(result.js.code.contains("$.update(count)"));
+    assert!(!result.js.code.contains("$.get(count)++"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
+fn projected_fallback_restores_generated_name_counters() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let result = crate::compiler::compile(
+        r#"<script lang="ts">
+let { a }: { a: string } = $state({});
+let { b }: { b: string } = $derived(a);
+let [c]: [number] = $derived([1]);
+</script>
+
+<button onclick={() => a++}>{b}{c}</button>
+"#,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-state-typescript-counter-rollback/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!result.js.code.contains("tmp_1"));
+    assert!(!result.js.code.contains("$$d_1"));
+    assert!(!result.js.code.contains("$$array_1"));
+
+    let code_wrapper = crate::compiler::compile(
+        r#"<script lang="ts">
+interface Props {
+    children?: unknown;
+    codeblock?: unknown;
+    innerClass?: string;
+    class?: string;
+}
+let { children, codeblock, innerClass, class: classname }: Props = $props();
+const { base, inner } = $derived(codewrapper());
+</script>
+
+<div class={base({ class: classname })}>{innerClass}</div>
+"#,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("flowbite-code-wrapper-counter-rollback/index.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!code_wrapper.js.code.contains("$$d_1"));
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 2));
+}
+
+#[test]
+fn retained_typescript_projection_reduces_fixture_reparses_from_five_to_one() {
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    let projected_sources = [
+        r#"<script lang="ts">
+	const p = { m: 1 } satisfies Record<string, number>;
+	let count = $state(0);
+</script>
+<button onclick={() => count++}>{count}{p.m}</button>"#,
+        r#"<script module lang="ts">
+	export const K = 1;
+</script>
+<script>
+	const p = { m: 1 } satisfies Record<string, number>;
+	let count = $state(0);
+</script>
+<button onclick={() => count++}>{count}{p.m}</button>"#,
+        r#"<script lang="ts">
+	function f(a: boolean): boolean;
+	function f(a: string): number;
+	function f(a: any): any { return a; }
+	let count = $state(0);
+	const r = f(true);
+</script>
+<button onclick={() => count++}>{r}{count}</button>"#,
+        r#"<script lang="ts">
+	function f(a: number): number { return a + 1; }
+	let count = $state(0);
+	const r = f(1);
+</script>
+<button onclick={() => count++}>{r}{count}</button>"#,
+    ];
+
+    for (index, source) in projected_sources.iter().enumerate() {
+        crate::compiler::compile(
+            source,
+            crate::compiler::CompileOptions {
+                generate: crate::compiler::GenerateMode::Client,
+                filename: Some(format!("retained-typescript-fixture-{index}.svelte")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 4));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 0));
+
+    crate::compiler::compile(
+        r#"<script lang="ts">
+	let count = $state<number | null>(0);
+</script>
+<button onclick={() => { count = count! + 1; }}>{count}</button>"#,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some("retained-typescript-fallback-fixture.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 4));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1));
+}
+
+#[test]
 fn retained_instance_program_is_repeatable() {
     let source = "<script>let count = $state(0); const read = () => count;</script><p>{read()}</p>";
     let mut prepared = crate::toolchain::Toolchain::new()
@@ -143,31 +395,22 @@ fn retained_instance_program_is_repeatable() {
 
 #[test]
 fn changed_instance_source_falls_back_to_state_transform_reparse() {
-    for (filename, source) in [
-        (
-            "retained-state-class/index.svelte",
-            "<script>class Counter { value = $state(0); } let count = $state(0);</script><p>{count + new Counter().value}</p>",
-        ),
-        (
-            "retained-state-typescript/index.svelte",
-            r#"<script lang="ts">let count: number = $state(0);</script><button>{count}</button>"#,
-        ),
-    ] {
-        AST_STATE_REPARSES.with(|count| count.set(0));
-        AST_STATE_RETAINED_USES.with(|count| count.set(0));
-        crate::compiler::compile(
-            source,
-            crate::compiler::CompileOptions {
-                generate: crate::compiler::GenerateMode::Client,
-                filename: Some(filename.to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let filename = "retained-state-class/index.svelte";
+    let source = "<script>class Counter { value = $state(0); } let count = $state(0);</script><p>{count + new Counter().value}</p>";
+    AST_STATE_REPARSES.with(|count| count.set(0));
+    AST_STATE_RETAINED_USES.with(|count| count.set(0));
+    crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            generate: crate::compiler::GenerateMode::Client,
+            filename: Some(filename.to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
-        AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0, "{filename}"));
-        AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1, "{filename}"));
-    }
+    AST_STATE_RETAINED_USES.with(|count| assert_eq!(count.get(), 0, "{filename}"));
+    AST_STATE_REPARSES.with(|count| assert_eq!(count.get(), 1, "{filename}"));
 }
 
 #[test]
@@ -516,6 +759,32 @@ fn test_extract_imports_no_semicolon_side_effect() {
     let (imports, rest) = extract_imports(script);
     assert_eq!(imports, vec!["import \"./Inner.svelte\"".to_string()]);
     assert_eq!(rest, "let count = 1;");
+}
+
+#[test]
+fn projected_import_extraction_preserves_legacy_output() {
+    for script in [
+        "",
+        "let count = 1;\n",
+        "let count = 1;\r",
+        "import { x } from 'x';\nlet count = x;\n",
+        "import { x } from 'x';\r\n\r\nlet count = x;\r\n",
+        "import a from 'a';import b from 'b'; const value = a + b;",
+        "import {\n  first,\n  second\n} from 'pkg'; const value = first + second;",
+        "const text = `not an import\\nimport x from 'x'`;\nlet value = 1;",
+        "/*\nimport x from 'x';\n*/\nlet value = 1;",
+    ] {
+        let expected = extract_imports(script);
+        let (imports, body, copied_chunks) = extract_imports_with_projection(script);
+        assert_eq!((imports, body.clone()), expected, "{script:?}");
+        for chunk in copied_chunks {
+            assert_eq!(
+                &script[chunk.source.start as usize..chunk.source.end as usize],
+                &body[chunk.output.start as usize..chunk.output.end as usize],
+                "{script:?}"
+            );
+        }
+    }
 }
 
 #[test]
