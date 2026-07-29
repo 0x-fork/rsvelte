@@ -5,6 +5,7 @@ mod pattern;
 
 use crate::ast::template::{Attribute, AttributeValue, AttributeValuePart, Fragment, TemplateNode};
 use pattern::{collect_pattern_bindings, expand_object_shorthands};
+use rustc_hash::FxHashMap;
 
 use super::attributes::let_::get_let_directives;
 use super::nodes::slot_element::{get_slot_attr_value, slot_name_for_type};
@@ -443,34 +444,103 @@ fn node_slot_consumer_attributes<'a>(node: &'a TemplateNode<'a>) -> Option<&'a [
 /// type reflects the array element / forwarded type, both for a bare value
 /// (`{item}`) and inside an expression (`item={process(data)}`). Mirrors
 /// official `SlotHandler.resolveExpression`'s identifier overwrite pass.
+#[derive(Default)]
+struct ResolveMetrics {
+    identifier_tokens: usize,
+    linear_lookups: usize,
+    linear_probes: usize,
+    indexed_entries: usize,
+    indexed_lookups: usize,
+    replacements: usize,
+}
+
 fn resolve_in_scope(value: &str, scope: &[(String, String)]) -> String {
+    let mut metrics = ResolveMetrics::default();
+    resolve_in_scope_impl::<false>(value, scope, &mut metrics)
+}
+
+fn resolve_in_scope_impl<const TRACK: bool>(
+    value: &str,
+    scope: &[(String, String)],
+    metrics: &mut ResolveMetrics,
+) -> String {
     if scope.is_empty() {
         return value.to_string();
     }
-    let chars: Vec<char> = value.chars().collect();
     let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let mut out = String::with_capacity(value.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
+    let mut chars = value.char_indices().peekable();
+    let mut previous = None;
+    let mut identifier_tokens = 0usize;
+    let mut index: Option<FxHashMap<&str, &str>> = None;
+
+    while let Some((start, c)) = chars.next() {
         // Start of an identifier token (not a member-access tail or a
         // continuation of a longer identifier)?
         let starts_ident = (c.is_alphabetic() || c == '_' || c == '$')
-            && (i == 0 || (!is_ident(chars[i - 1]) && chars[i - 1] != '.'));
+            && previous.is_none_or(|previous| !is_ident(previous) && previous != '.');
         if starts_ident {
-            let mut j = i + 1;
-            while j < chars.len() && is_ident(chars[j]) {
-                j += 1;
+            let mut end = start + c.len_utf8();
+            let mut last = c;
+            while let Some(&(position, next)) = chars.peek() {
+                if !is_ident(next) {
+                    break;
+                }
+                chars.next();
+                end = position + next.len_utf8();
+                last = next;
             }
-            let token: String = chars[i..j].iter().collect();
-            match scope.iter().rev().find(|(name, _)| name == &token) {
-                Some((_, expr)) => out.push_str(expr),
-                None => out.push_str(&token),
+
+            identifier_tokens += 1;
+            if TRACK {
+                metrics.identifier_tokens += 1;
             }
-            i = j;
+            if index.is_none() && scope.len() >= 32 && identifier_tokens == 5 {
+                let mut built =
+                    FxHashMap::with_capacity_and_hasher(scope.len(), Default::default());
+                for (name, expression) in scope {
+                    built.insert(name.as_str(), expression.as_str());
+                }
+                if TRACK {
+                    metrics.indexed_entries += scope.len();
+                }
+                index = Some(built);
+            }
+
+            let token = &value[start..end];
+            let replacement = if let Some(index) = &index {
+                if TRACK {
+                    metrics.indexed_lookups += 1;
+                }
+                index.get(token).copied()
+            } else {
+                if TRACK {
+                    metrics.linear_lookups += 1;
+                }
+                let mut found = None;
+                for (name, expression) in scope.iter().rev() {
+                    if TRACK {
+                        metrics.linear_probes += 1;
+                    }
+                    if name == token {
+                        found = Some(expression.as_str());
+                        break;
+                    }
+                }
+                found
+            };
+            if let Some(replacement) = replacement {
+                out.push_str(replacement);
+                if TRACK {
+                    metrics.replacements += 1;
+                }
+            } else {
+                out.push_str(token);
+            }
+            previous = Some(last);
         } else {
             out.push(c);
-            i += 1;
+            previous = Some(c);
         }
     }
     out
@@ -560,5 +630,66 @@ fn expression_simple_identifier(expr: &crate::ast::js::Expression, source: &str)
         Some(text.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResolveMetrics, resolve_in_scope, resolve_in_scope_impl};
+
+    #[test]
+    fn resolves_unicode_identifiers_without_touching_member_access() {
+        let scope = vec![
+            ("π".to_string(), "PI".to_string()),
+            ("東京2".to_string(), "TOKYO".to_string()),
+            ("$値".to_string(), "DOLLAR".to_string()),
+            ("_名".to_string(), "UNDER".to_string()),
+            ("member".to_string(), "MEMBER".to_string()),
+        ];
+
+        assert_eq!(
+            resolve_in_scope("π + 東京2 + $値 + _名 + obj.π + obj.member + απ", &scope),
+            "PI + TOKYO + DOLLAR + UNDER + obj.π + obj.member + απ"
+        );
+    }
+
+    #[test]
+    fn resolves_the_last_scope_binding_in_source_order() {
+        let scope = vec![
+            ("item".to_string(), "OUTER".to_string()),
+            ("other".to_string(), "OTHER".to_string()),
+            ("item".to_string(), "INNER".to_string()),
+        ];
+
+        assert_eq!(
+            resolve_in_scope("item + other + obj.item + item2", &scope),
+            "INNER + OTHER + obj.item + item2"
+        );
+    }
+
+    #[test]
+    fn indexes_large_scopes_once_after_the_streaming_prefix() {
+        let mut scope = (0..256)
+            .map(|index| (format!("n{index:03}"), format!("R{index:03}")))
+            .collect::<Vec<_>>();
+        scope.push(("n128".to_string(), "SHADOW".to_string()));
+        let input = std::iter::repeat_n("n000 + n064 + n128 + n255 + obj.n000", 100)
+            .collect::<Vec<_>>()
+            .join(";");
+        let expected = std::iter::repeat_n("R000 + R064 + SHADOW + R255 + obj.n000", 100)
+            .collect::<Vec<_>>()
+            .join(";");
+        let mut metrics = ResolveMetrics::default();
+
+        assert_eq!(
+            resolve_in_scope_impl::<true>(&input, &scope, &mut metrics),
+            expected
+        );
+        assert_eq!(metrics.identifier_tokens, 500);
+        assert_eq!(metrics.linear_lookups, 4);
+        assert_eq!(metrics.linear_probes, 453);
+        assert_eq!(metrics.indexed_entries, 257);
+        assert_eq!(metrics.indexed_lookups, 496);
+        assert_eq!(metrics.replacements, 400);
     }
 }
