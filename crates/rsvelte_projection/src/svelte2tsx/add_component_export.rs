@@ -1,7 +1,7 @@
 //! Assemble the component export appended after the `$$render()` body —
 //! mirrors `svelte2tsx/addComponentExport.ts`.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use crate::ast::template::Root;
 
@@ -13,6 +13,18 @@ use super::nodes::generics::{compact_generic_params, split_generic_param_names};
 use super::nodes::slot::build_slots_str;
 use super::script::{ComponentEvents, ExportedNames};
 use super::template;
+
+const COMPONENT_SUFFIX: &str = "__SvelteComponent_";
+
+#[derive(Clone, Copy)]
+struct ComponentExportName<'a>(&'a str);
+
+impl fmt::Display for ComponentExportName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)?;
+        f.write_str(COMPONENT_SUFFIX)
+    }
+}
 
 /// Inputs for [`add_component_export`] — mirrors the JS reference's
 /// `addComponentExport(params)` object.
@@ -77,7 +89,7 @@ pub(crate) fn add_component_export(
         options.is_ts_file,
     );
     let bindings_str = exported_names.create_bindings_str(is_svelte5);
-    let safe_name = format!("{}__SvelteComponent_", component_name);
+    let safe_name = ComponentExportName(component_name);
 
     // Extract @component documentation from HTML comments
     let component_doc = extract_component_documentation(&ast.fragment);
@@ -306,7 +318,7 @@ pub(crate) fn add_component_export(
                     let props_has_no_props = exported_names.has_no_props();
                     emit_runes_generics_component(
                         &mut closing,
-                        &safe_name,
+                        safe_name,
                         &generics_params,
                         gn,
                         &raw_bindings,
@@ -529,7 +541,7 @@ pub(crate) fn add_component_export(
 #[allow(clippy::too_many_arguments)]
 fn emit_runes_generics_component(
     closing: &mut String,
-    safe_name: &str,
+    safe_name: ComponentExportName<'_>,
     gp: &str,
     gn: &str,
     raw_bindings: &str,
@@ -615,4 +627,36 @@ fn emit_runes_generics_component(
         closing,
         "/*\u{03A9}ignore_end\u{03A9}*/export default {safe_name};"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write;
+
+    use super::{COMPONENT_SUFFIX, ComponentExportName};
+
+    #[derive(Default)]
+    struct WriteProbe {
+        bytes: usize,
+        writes: usize,
+    }
+
+    impl Write for WriteProbe {
+        fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            self.bytes += value.len();
+            self.writes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn component_export_name_streams_borrowed_parts() {
+        let source_name = "Component".repeat(1024);
+        let mut probe = WriteProbe::default();
+
+        write!(&mut probe, "{}", ComponentExportName(&source_name)).unwrap();
+
+        assert_eq!(probe.bytes, source_name.len() + COMPONENT_SUFFIX.len());
+        assert_eq!(probe.writes, 2);
+    }
 }
