@@ -14,11 +14,12 @@ mod segs;
 mod utils;
 mod walk;
 
-use crate::ast::template::Fragment;
+use crate::ast::template::{Fragment, Root};
 
 use indexmap::IndexMap;
 
 use super::magic_string::MagicString;
+use super::nodes::runes_detection::TemplateRunesDetector;
 use super::svelte2tsx::Svelte2TsxOptions;
 use ctx::Counter;
 
@@ -42,6 +43,7 @@ pub struct TemplateInfo {
     /// concats into the existing entry (`unionType`).
     /// e.g., "click" -> "__sveltets_2_mapElementEvent('click')"
     pub element_events: Vec<(String, String, ForwardedEventKind)>,
+    pub uses_runes: bool,
 }
 
 /// How a forwarded event (`on:event` with no handler) combines with an existing
@@ -90,8 +92,13 @@ pub fn process_template_inplace(
 /// This is a pre-pass that walks the AST to collect:
 /// - Slot elements with their props (for the return statement `slots: {...}`)
 /// - Forwarded events (for the return statement `events: {...}`)
-pub fn collect_template_info(fragment: &Fragment, source: &str) -> TemplateInfo {
+pub fn collect_template_info(
+    ast: &Root,
+    source: &str,
+    instance_value_names: &std::collections::HashSet<String>,
+) -> TemplateInfo {
     let mut info = TemplateInfo::default();
+    let mut detector = TemplateRunesDetector::new(source, instance_value_names);
     // `scope` maps an in-scope template binding name (e.g. an `{#each}` context
     // variable) to the expression that types it at the top level — for an each
     // block, `__sveltets_2_unwrapArr(<collection>)`. Slot props referencing
@@ -99,7 +106,16 @@ pub fn collect_template_info(fragment: &Fragment, source: &str) -> TemplateInfo 
     // `slots: { … }` return reflects the element type. Mirrors official
     // `SlotHandler.getResolveExpressionStr` (EachBlock → unwrapArr).
     let mut scope: Vec<(String, String)> = Vec::new();
-    collect::collect_info_from_fragment(fragment, source, &mut info, &mut scope, None);
+    collect::collect_info_from_fragment(
+        &ast.fragment,
+        source,
+        &mut info,
+        &mut scope,
+        None,
+        &mut detector,
+        &ast.arena,
+    );
+    info.uses_runes = detector.uses_runes();
     info
 }
 
