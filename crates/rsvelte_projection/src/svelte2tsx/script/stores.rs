@@ -1,8 +1,6 @@
 //! Store auto-subscription: scanning `$name` references and injecting
 //! `let $name = __sveltets_2_store_get(name);` declarations.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use oxc_allocator::Allocator;
@@ -10,6 +8,7 @@ use oxc_ast::ast as oxc;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser as OxcParser;
 use oxc_span::SourceType;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ast_utils::{collect_binding_names, extract_all_names_from_binding_pattern};
 use super::reactive::extract_names_from_labeled_body;
@@ -178,13 +177,13 @@ fn blank_instance_script_comments(source: &str, buf: &mut [u8]) {
 /// name `X` for every `$X` token found, skipping only `$$`-prefixed forms and
 /// obvious non-identifiers (comments, strings, member accesses, etc.) but NOT
 /// applying the rune-name filter.
-pub(super) fn collect_loose_dollar_names_from_script(text: &str) -> HashSet<String> {
+pub(super) fn collect_loose_dollar_names_from_script(text: &str) -> FxHashSet<String> {
     let bytes = text.as_bytes();
     if memchr::memchr(b'$', bytes).is_none() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
     let len = bytes.len();
-    let mut names = HashSet::new();
+    let mut names = FxHashSet::default();
     let mut i = 0usize;
 
     // Simple comment/string skipper — matches the level of care in
@@ -275,19 +274,19 @@ pub(super) fn collect_loose_dollar_names_from_script(text: &str) -> HashSet<Stri
     names
 }
 
-pub(super) fn collect_store_references(source: &str) -> HashSet<String> {
+pub(super) fn collect_store_references(source: &str) -> FxHashSet<String> {
     // No parsed program here (import-only module path): there are no self-named
     // rune-call callees to exclude, so an empty position set is exact.
-    collect_store_references_with_shadow(source, &HashMap::new(), &HashSet::new())
+    collect_store_references_with_shadow(source, &FxHashMap::default(), &FxHashSet::default())
 }
 
 pub(super) fn collect_store_references_with_shadow(
     source: &str,
-    shadow: &HashMap<String, Vec<(u32, u32)>>,
-    self_named_rune_calls: &HashSet<u32>,
-) -> HashSet<String> {
+    shadow: &FxHashMap<String, Vec<(u32, u32)>>,
+    self_named_rune_calls: &FxHashSet<u32>,
+) -> FxHashSet<String> {
     if memchr::memchr(b'$', source.as_bytes()).is_none() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
 
     // Hand-rolled byte-level scan. The previous implementation compiled a
@@ -333,7 +332,7 @@ pub(super) fn collect_store_references_with_shadow(
     } else {
         source
     };
-    let mut stores = HashSet::new();
+    let mut stores = FxHashSet::default();
     let bytes = source.as_bytes();
     let len = bytes.len();
     let mut i = 0usize;
@@ -481,7 +480,7 @@ fn is_object_property_key(bytes: &[u8], pos: usize, end: usize) -> bool {
 /// True when `pos` (a source byte offset of a `$name` reference) falls inside a
 /// function span that binds `$name` as a parameter.
 fn is_dollar_binding_shadowed(
-    shadow: &HashMap<String, Vec<(u32, u32)>>,
+    shadow: &FxHashMap<String, Vec<(u32, u32)>>,
     name: &str,
     pos: usize,
 ) -> bool {
@@ -501,10 +500,10 @@ fn is_dollar_binding_shadowed(
 pub(super) fn collect_dollar_param_shadow(
     program: &oxc::Program,
     offset: u32,
-) -> HashMap<String, Vec<(u32, u32)>> {
+) -> FxHashMap<String, Vec<(u32, u32)>> {
     let mut collector = DollarParamShadowCollector {
         offset,
-        spans: HashMap::new(),
+        spans: FxHashMap::default(),
     };
     collector.visit_program(program);
     collector.spans
@@ -512,7 +511,7 @@ pub(super) fn collect_dollar_param_shadow(
 
 struct DollarParamShadowCollector {
     offset: u32,
-    spans: HashMap<String, Vec<(u32, u32)>>,
+    spans: FxHashMap<String, Vec<(u32, u32)>>,
 }
 
 impl DollarParamShadowCollector {
@@ -574,8 +573,8 @@ pub(super) fn create_store_declarations(store_names: &[&str]) -> String {
 pub(super) fn collect_self_named_rune_call_positions(
     program: &oxc::Program,
     offset: u32,
-) -> HashSet<u32> {
-    let mut positions = HashSet::new();
+) -> FxHashSet<u32> {
+    let mut positions = FxHashSet::default();
     let mut visit_var_decl = |var_decl: &oxc::VariableDeclaration| {
         for declarator in var_decl.declarations.iter() {
             let Some(init) = declarator.init.as_ref() else {
@@ -721,7 +720,8 @@ pub(super) fn inject_store_subscriptions_with_program(
     // order), which is exactly the collection order here (instance imports in
     // program order, then module imports). Just dedup preserving that order.
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen =
+            FxHashSet::with_capacity_and_hasher(import_store_names.len(), Default::default());
         import_store_names.retain(|n| seen.insert(n.clone()));
     }
     if !import_store_names.is_empty() {
@@ -737,7 +737,7 @@ pub(super) fn inject_store_subscriptions_with_program(
 /// it's a known rune function, not a store.
 fn collect_import_store_names(
     import: &oxc::ImportDeclaration,
-    accessed_stores: &HashSet<String>,
+    accessed_stores: &FxHashSet<String>,
     import_store_names: &mut Vec<String>,
 ) {
     // Skip type-only imports
@@ -787,7 +787,7 @@ fn collect_import_store_names(
 /// imports at the $$render function body start.
 fn collect_module_script_import_stores(
     source: &str,
-    accessed_stores: &HashSet<String>,
+    accessed_stores: &FxHashSet<String>,
     import_store_names: &mut Vec<String>,
 ) {
     // Fast path: no `<script` substring → no module script.
@@ -866,7 +866,7 @@ pub(super) fn inject_store_subscriptions_vars_only_with_program(
 
     let self_named_rune_calls = collect_self_named_rune_call_positions(program, offset);
     let accessed_stores =
-        collect_store_references_with_shadow(source, &HashMap::new(), &self_named_rune_calls);
+        collect_store_references_with_shadow(source, &FxHashMap::default(), &self_named_rune_calls);
     if accessed_stores.is_empty() {
         return;
     }
@@ -976,6 +976,43 @@ mod tests {
         assert!(
             store_sub_start > render_start,
             "store subscriptions should be inside $$render body"
+        );
+    }
+
+    #[test]
+    fn test_import_store_order_follows_declarations_and_repeated_accesses_deduplicate() {
+        let source = "<script>\n    import { zeta, alpha } from './stores';\n    import middle from './middle';\n</script>\n{$middle}{$alpha}{$zeta}{$middle}{$alpha}";
+        let result = run_svelte2tsx(source);
+        let ordered_declarations = "/*\u{03A9}ignore_start\u{03A9}*/;let $zeta = __sveltets_2_store_get(zeta);;let $alpha = __sveltets_2_store_get(alpha);;let $middle = __sveltets_2_store_get(middle);/*\u{03A9}ignore_end\u{03A9}*/";
+
+        assert!(
+            result.code.contains(ordered_declarations),
+            "store declarations should follow import declaration/specifier order"
+        );
+        for name in ["zeta", "alpha", "middle"] {
+            assert_eq!(
+                result
+                    .code
+                    .matches(&format!("__sveltets_2_store_get({name})"))
+                    .count(),
+                1,
+                "repeated accesses should emit one declaration for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_duplicate_instance_and_module_import_store_is_declared_once() {
+        let source = "<script module>\n    import shared from './module-store';\n</script>\n<script>\n    import shared from './instance-store';\n</script>\n{$shared}";
+        let result = run_svelte2tsx(source);
+
+        assert_eq!(
+            result
+                .code
+                .matches("__sveltets_2_store_get(shared)")
+                .count(),
+            1,
+            "the order-preserving import dedup should keep the first declaration only"
         );
     }
 
