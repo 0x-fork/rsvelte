@@ -274,8 +274,13 @@ pub fn svelte2tsx(
     // (`{@debug user.firstname}` / `{@debug a[0]}`) at PARSE time. rsvelte does
     // this in the analyze DebugTag visitor, which svelte2tsx never runs — so
     // replicate it here to preserve error-parity with official svelte2tsx.
-    validate_debug_tag_arguments(&ast, source)?;
-    validate_meta_element_placement(&ast, source)?;
+    let (has_debug_marker, has_meta_marker) = validation_markers(source);
+    if has_debug_marker {
+        validate_debug_tag_arguments(&ast, source)?;
+    }
+    if has_meta_marker {
+        validate_meta_element_placement(&ast, source)?;
+    }
 
     // Step 2: Determine component name from filename
     let component_name = derive_component_name(&options.filename);
@@ -648,4 +653,30 @@ pub fn svelte2tsx(
         events,
         forward_map,
     })
+}
+
+fn validation_markers(source: &str) -> (bool, bool) {
+    let bytes = source.as_bytes();
+    let mut has_debug = false;
+    let mut has_meta = false;
+
+    for index in memchr::memchr2_iter(b'@', b':', bytes) {
+        match bytes[index] {
+            b'@' => {
+                has_debug =
+                    index > 0 && bytes.get(index - 1..index + 6) == Some(b"{@debug".as_slice());
+            }
+            b':' => {
+                has_meta = (index >= 7
+                    && bytes.get(index - 7..=index) == Some(b"<svelte:".as_slice()))
+                    || (index >= 3 && bytes.get(index - 3..=index) == Some(b"use:".as_slice()));
+            }
+            _ => unreachable!(),
+        }
+        if has_debug && has_meta {
+            break;
+        }
+    }
+
+    (has_debug, has_meta)
 }
