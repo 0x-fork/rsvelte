@@ -212,9 +212,9 @@ fn vlq_encode(value: i64) -> String {
 
 /// A string manipulation class that preserves source positions for source-map
 /// generation.
-pub struct MagicString {
+pub struct MagicString<'source> {
     /// The original source string.
-    original: String,
+    original: &'source str,
     /// Arena of chunks (linked list stored in a Vec).
     chunks: Vec<Chunk>,
     /// Index of the first chunk in the linked list.
@@ -238,13 +238,13 @@ pub struct MagicString {
     outro: String,
 }
 
-impl MagicString {
+impl<'source> MagicString<'source> {
     // -----------------------------------------------------------------
     // Construction
     // -----------------------------------------------------------------
 
     /// Create a new `MagicString` from the given source.
-    pub fn new(source: &str) -> Self {
+    pub fn new(source: &'source str) -> Self {
         let chunk = Chunk::new(0, source.len() as u32);
         let mut by_start: std::collections::BTreeMap<u32, usize> =
             std::collections::BTreeMap::new();
@@ -253,7 +253,7 @@ impl MagicString {
         by_end.insert(source.len() as u32, 0);
 
         Self {
-            original: source.to_string(),
+            original: source,
             chunks: vec![chunk],
             first_chunk: 0,
             last_chunk: 0,
@@ -718,7 +718,7 @@ impl MagicString {
             file: options.file,
             sources: vec![source_name.clone()],
             sources_content: if options.include_content {
-                vec![self.original.clone()]
+                vec![self.original.to_string()]
             } else {
                 vec![]
             },
@@ -743,7 +743,7 @@ impl MagicString {
         let mut original_column: i64 = 0;
 
         // Pre-compute line starts for the original source.
-        let original_line_starts = line_starts(&self.original);
+        let original_line_starts = line_starts(self.original);
 
         // Helper closure: given an original byte offset, return (line, col) both 0-based.
         // Source-map columns are UTF-16 code units (source-map spec v3 / LSP), not
@@ -964,7 +964,7 @@ impl MagicString {
     }
 }
 
-impl fmt::Display for MagicString {
+impl fmt::Display for MagicString<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_string())
     }
@@ -1006,6 +1006,15 @@ mod tests {
     fn test_basic_to_string() {
         let s = MagicString::new("hello world");
         assert_eq!(s.to_string(), "hello world");
+    }
+
+    #[test]
+    fn borrows_original_source() {
+        let source = String::from("hello world");
+        let s = MagicString::new(&source);
+
+        assert_eq!(s.original.as_ptr(), source.as_ptr());
+        assert_eq!(s.original.len(), source.len());
     }
 
     #[test]
@@ -1157,6 +1166,31 @@ mod tests {
         assert_eq!(map.sources, vec!["input.js".to_string()]);
         assert_eq!(map.sources_content, vec!["hello world".to_string()]);
         assert!(!map.mappings.is_empty());
+    }
+
+    #[test]
+    fn generated_output_and_map_content_outlive_the_source() {
+        let (output, map) = {
+            let source = String::from("hello world");
+            let mut s = MagicString::new(&source);
+            s.overwrite(6, 11, "earth");
+
+            (
+                s.to_string(),
+                s.generate_map(GenerateMapOptions {
+                    file: None,
+                    source: Some("input.svelte".to_string()),
+                    include_content: true,
+                }),
+            )
+        };
+
+        assert_eq!(output, "hello earth");
+        assert_eq!(map.sources_content, vec!["hello world".to_string()]);
+        assert!(
+            map.to_json()
+                .contains("\"sourcesContent\":[\"hello world\"]")
+        );
     }
 
     #[test]

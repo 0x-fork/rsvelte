@@ -612,7 +612,7 @@ pub(super) fn inject_store_subscriptions_with_program(
     program: &oxc::Program,
     offset: u32,
     source: &str,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
 ) {
     // Exclude `$name` references that are shadowed by a `$`-prefixed function /
     // arrow parameter binding in the instance script (official `resolveStore`
@@ -847,7 +847,7 @@ pub(super) fn inject_store_subscriptions_vars_only_with_program(
     program: &oxc::Program,
     offset: u32,
     source: &str,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
 ) {
     let self_named_rune_calls = collect_self_named_rune_call_positions(program, offset);
     let accessed_stores =

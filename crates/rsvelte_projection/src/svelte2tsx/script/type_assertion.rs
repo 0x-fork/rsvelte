@@ -18,7 +18,7 @@ use super::super::magic_string::MagicString;
 pub(super) fn rewrite_type_assertions_with_program(
     program: &oxc::Program,
     content_offset: usize,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
 ) {
     let mut collector = TypeAssertionCollector { out: Vec::new() };
     collector.visit_program(program);
@@ -90,7 +90,7 @@ pub(super) fn disambiguate_arrow_type_params(
     program: &oxc::Program,
     offset: u32,
     raw_content: &str,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
 ) {
     let mut collector = ArrowGenericCommaCollector {
         raw_content,

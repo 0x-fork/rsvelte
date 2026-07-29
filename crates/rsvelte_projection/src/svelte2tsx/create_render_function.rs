@@ -23,7 +23,7 @@ pub(crate) fn create_render_function(
     ast: &Root,
     source: &str,
     options: &Svelte2TsxOptions,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
     dollar_decls: &str,
     has_instance_script: bool,
     has_module_script: bool,

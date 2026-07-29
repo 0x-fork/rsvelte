@@ -98,7 +98,7 @@ pub fn classify_kit_route_file(basename: &str) -> Option<bool> {
 pub fn process_instance_script(
     script: &Script,
     source: &str,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
     exported_names: &mut ExportedNames,
     _events: &mut ComponentEvents,
     is_ts: bool,
@@ -747,7 +747,7 @@ pub fn process_instance_script(
 pub fn process_module_script(
     script: &Script,
     source: &str,
-    str: &mut MagicString,
+    str: &mut MagicString<'_>,
     exported_names: &mut ExportedNames,
 ) {
     // Module script exports are kept as-is (with the export keyword).
