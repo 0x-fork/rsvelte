@@ -447,30 +447,35 @@ fn resolve_in_scope(value: &str, scope: &[(String, String)]) -> String {
     if scope.is_empty() {
         return value.to_string();
     }
-    let chars: Vec<char> = value.chars().collect();
     let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let mut out = String::with_capacity(value.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
+    let mut chars = value.char_indices().peekable();
+    let mut previous = None;
+    while let Some((start, c)) = chars.next() {
         // Start of an identifier token (not a member-access tail or a
         // continuation of a longer identifier)?
         let starts_ident = (c.is_alphabetic() || c == '_' || c == '$')
-            && (i == 0 || (!is_ident(chars[i - 1]) && chars[i - 1] != '.'));
+            && previous.is_none_or(|previous| !is_ident(previous) && previous != '.');
         if starts_ident {
-            let mut j = i + 1;
-            while j < chars.len() && is_ident(chars[j]) {
-                j += 1;
+            let mut end = start + c.len_utf8();
+            let mut last = c;
+            while let Some(&(position, next)) = chars.peek() {
+                if !is_ident(next) {
+                    break;
+                }
+                chars.next();
+                end = position + next.len_utf8();
+                last = next;
             }
-            let token: String = chars[i..j].iter().collect();
-            match scope.iter().rev().find(|(name, _)| name == &token) {
+            let token = &value[start..end];
+            match scope.iter().rev().find(|(name, _)| name == token) {
                 Some((_, expr)) => out.push_str(expr),
-                None => out.push_str(&token),
+                None => out.push_str(token),
             }
-            i = j;
+            previous = Some(last);
         } else {
             out.push(c);
-            i += 1;
+            previous = Some(c);
         }
     }
     out
@@ -560,5 +565,56 @@ fn expression_simple_identifier(expr: &crate::ast::js::Expression, source: &str)
         Some(text.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_in_scope;
+
+    #[test]
+    fn resolves_unicode_identifiers_without_touching_member_access() {
+        let scope = vec![
+            ("π".to_string(), "PI".to_string()),
+            ("東京2".to_string(), "TOKYO".to_string()),
+            ("$値".to_string(), "DOLLAR".to_string()),
+            ("_名".to_string(), "UNDER".to_string()),
+            ("member".to_string(), "MEMBER".to_string()),
+        ];
+
+        assert_eq!(
+            resolve_in_scope("π + 東京2 + $値 + _名 + obj.π + obj.member + απ", &scope),
+            "PI + TOKYO + DOLLAR + UNDER + obj.π + obj.member + απ"
+        );
+    }
+
+    #[test]
+    fn resolves_the_last_scope_binding_in_source_order() {
+        let scope = vec![
+            ("item".to_string(), "OUTER".to_string()),
+            ("other".to_string(), "OTHER".to_string()),
+            ("item".to_string(), "INNER".to_string()),
+        ];
+
+        assert_eq!(
+            resolve_in_scope("item + other + obj.item + item2", &scope),
+            "INNER + OTHER + obj.item + item2"
+        );
+    }
+
+    #[test]
+    fn streams_large_expressions_exactly() {
+        let scope = vec![
+            ("π".to_string(), "PI".to_string()),
+            ("item".to_string(), "VALUE".to_string()),
+        ];
+        let input = std::iter::repeat_n("π + item + obj.item", 1_000)
+            .collect::<Vec<_>>()
+            .join(";");
+        let expected = std::iter::repeat_n("PI + VALUE + obj.item", 1_000)
+            .collect::<Vec<_>>()
+            .join(";");
+
+        assert_eq!(resolve_in_scope(&input, &scope), expected);
     }
 }
