@@ -62,6 +62,15 @@ fn create_source_map_heavy_file() -> Sample {
     Sample::synthetic("synthetic-source-map-heavy", source)
 }
 
+fn create_named_slots_file() -> Sample {
+    let mut source = String::from("<Component let:item>\n");
+    for i in 0..128 {
+        let _ = writeln!(source, r#"    <div slot="slot-{i}">{{item}}</div>"#);
+    }
+    source.push_str("</Component>\n");
+    Sample::synthetic("synthetic-named-slots", source)
+}
+
 fn workload() -> Vec<Sample> {
     let mut files = corpus::load();
     files.push(Sample::synthetic(
@@ -81,6 +90,7 @@ fn workload() -> Vec<Sample> {
     ));
     files.push(create_script_heavy_file());
     files.push(create_source_map_heavy_file());
+    files.push(create_named_slots_file());
     files
 }
 
