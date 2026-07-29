@@ -65,5 +65,9 @@ required-features = ["native"]
 name = "compiler"
 harness = false
 
+[[bench]]
+name = "svelte2tsx"
+harness = false
+
 [lints]
 workspace = true

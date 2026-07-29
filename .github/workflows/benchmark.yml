@@ -95,7 +95,7 @@ jobs:
         # defaults and renders the HTML reports.
         run: >-
           cargo bench -p rsvelte_devtools -p rsvelte_formatter
-          --bench parser --bench compiler --bench formatter --
+          --bench parser --bench compiler --bench svelte2tsx --bench formatter --
           --save-baseline pr --noplot
           --warm-up-time 1 --measurement-time 2 --sample-size 10
         # Cold-cache flake guard, not an expected duration: oxc-from-git deps

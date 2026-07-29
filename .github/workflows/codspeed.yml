@@ -61,7 +61,7 @@ jobs:
       - name: Build the benchmark targets
         run: >-
           cargo codspeed build -p rsvelte_devtools -p rsvelte_formatter
-          --bench parser --bench compiler --bench formatter
+          --bench parser --bench compiler --bench svelte2tsx --bench formatter
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@88472375d0a4572cf70a9f1fe3a4e0ab8da1b924 # v5.0.1
