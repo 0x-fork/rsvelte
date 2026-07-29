@@ -663,13 +663,17 @@ fn validation_markers(source: &str) -> (bool, bool) {
     for index in memchr::memchr2_iter(b'@', b':', bytes) {
         match bytes[index] {
             b'@' => {
-                has_debug =
-                    index > 0 && bytes.get(index - 1..index + 6) == Some(b"{@debug".as_slice());
+                if !has_debug {
+                    has_debug =
+                        index > 0 && bytes.get(index - 1..index + 6) == Some(b"{@debug".as_slice());
+                }
             }
             b':' => {
-                has_meta = (index >= 7
-                    && bytes.get(index - 7..=index) == Some(b"<svelte:".as_slice()))
-                    || (index >= 3 && bytes.get(index - 3..=index) == Some(b"use:".as_slice()));
+                if !has_meta {
+                    has_meta = (index >= 7
+                        && bytes.get(index - 7..=index) == Some(b"<svelte:".as_slice()))
+                        || (index >= 3 && bytes.get(index - 3..=index) == Some(b"use:".as_slice()));
+                }
             }
             _ => unreachable!(),
         }
@@ -679,4 +683,18 @@ fn validation_markers(source: &str) -> (bool, bool) {
     }
 
     (has_debug, has_meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validation_markers;
+
+    #[test]
+    fn validation_markers_remain_set_after_unrelated_candidates() {
+        assert_eq!(validation_markers("{@debug user.name} @"), (true, false));
+        assert_eq!(
+            validation_markers("<div><svelte:window /></div>:"),
+            (false, true)
+        );
+    }
 }
