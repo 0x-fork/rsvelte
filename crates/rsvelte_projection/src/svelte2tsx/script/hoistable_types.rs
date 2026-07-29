@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use rustc_hash::FxHashSet;
+
 use super::super::magic_string::MagicString;
 use super::ExportedNames;
 
@@ -34,16 +36,18 @@ pub(super) fn is_special_type_name(name: &str) -> bool {
 /// actually matter for the hoist decision. The JS reference uses TS AST
 /// walking to be exact; this lexical filter matches its decisions on the
 /// fixtures the rsvelte port currently cares about.
-pub(super) fn collect_type_body_deps(
-    body: &str,
+pub(super) fn collect_type_body_deps<'a>(
+    body: &'a str,
     candidate_names: &HashSet<String>,
     self_name: &str,
-    generics: &HashSet<String>,
+    generics: &FxHashSet<&str>,
+    script_generic_names: &HashSet<String>,
     instance_value_names: &HashSet<String>,
     instance_import_names: &HashSet<String>,
-) -> (HashSet<String>, HashSet<String>) {
-    let mut value_deps: HashSet<String> = HashSet::new();
+) -> (FxHashSet<&'a str>, HashSet<String>, bool) {
+    let mut value_deps = FxHashSet::default();
     let mut type_deps: HashSet<String> = HashSet::new();
+    let mut references_script_generic = false;
     let bytes = body.as_bytes();
     let len = bytes.len();
     let mut i = 0usize;
@@ -126,9 +130,11 @@ pub(super) fn collect_type_body_deps(
                 && (bytes[k] == b':' || (bytes[k] == b'?' && k + 1 < len && bytes[k + 1] == b':'));
 
             if preceded_by_typeof {
-                value_deps.insert(ident.to_string());
+                value_deps.insert(ident);
             } else if is_property_key {
                 // skip — property keys aren't dependencies
+            } else if script_generic_names.contains(ident) {
+                references_script_generic = true;
             } else if candidate_names.contains(ident) {
                 type_deps.insert(ident.to_string());
             } else if instance_value_names.contains(ident) && !instance_import_names.contains(ident)
@@ -138,13 +144,13 @@ pub(super) fn collect_type_body_deps(
                 // import. Even outside a `typeof`, mentioning such a name
                 // inside a type body forbids hoisting because hoisting would
                 // place the type at module scope where the binding is gone.
-                value_deps.insert(ident.to_string());
+                value_deps.insert(ident);
             }
             continue;
         }
         i += 1;
     }
-    (value_deps, type_deps)
+    (value_deps, type_deps, references_script_generic)
 }
 
 /// Returns `true` for TypeScript / JavaScript reserved keywords that can
@@ -271,10 +277,10 @@ pub(super) fn resolve_hoistable_type_decls(
     let candidate_names: HashSet<String> = candidates.iter().map(|c| c.name.clone()).collect();
     // Per-candidate: collect generic parameter names (so `interface Props<T>`
     // doesn't see `T` as a dependency).
-    let generics: Vec<HashSet<String>> = candidates
+    let generics: Vec<FxHashSet<&str>> = candidates
         .iter()
         .map(|c| {
-            let mut g = HashSet::new();
+            let mut g = FxHashSet::default();
             // Look at the text between `name` and the first `{` / `=`. If a
             // `<...>` block exists in that range, parse comma-separated entries
             // and take their leading identifier.
@@ -288,8 +294,16 @@ pub(super) fn resolve_hoistable_type_decls(
                 .map(|p| s + p)
                 .unwrap_or(e);
             let header = &raw_content[s..header_end];
-            if let (Some(lt), Some(gt)) = (header.find('<'), header.rfind('>'))
+            let generic_start = header.find(&c.name).map(|name_start| {
+                let mut position = name_start + c.name.len();
+                while position < header.len() && header.as_bytes()[position].is_ascii_whitespace() {
+                    position += 1;
+                }
+                position
+            });
+            if let (Some(lt), Some(gt)) = (generic_start, header.rfind('>'))
                 && lt < gt
+                && header.as_bytes()[lt] == b'<'
             {
                 let inner = &header[lt + 1..gt];
                 for part in inner.split(',') {
@@ -299,7 +313,7 @@ pub(super) fn resolve_hoistable_type_decls(
                         .find(|s| !s.is_empty())
                         .unwrap_or("");
                     if !name.is_empty() {
-                        g.insert(name.to_string());
+                        g.insert(name);
                     }
                 }
                 // type_deps are limited to candidate_names by
@@ -311,7 +325,7 @@ pub(super) fn resolve_hoistable_type_decls(
         .collect();
 
     // Pre-compute deps for each candidate.
-    let deps: Vec<(HashSet<String>, HashSet<String>)> = candidates
+    let deps: Vec<(FxHashSet<&str>, HashSet<String>, bool)> = candidates
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -323,6 +337,7 @@ pub(super) fn resolve_hoistable_type_decls(
                 &candidate_names,
                 &c.name,
                 &generics[i],
+                script_generic_names,
                 &exported_names.instance_value_names,
                 &exported_names.instance_import_names,
             )
@@ -345,31 +360,16 @@ pub(super) fn resolve_hoistable_type_decls(
     // parameter name. Hoisting them out of `function $$render<T>(){...}` would
     // put them at module scope where `T` no longer exists.
     if !script_generic_names.is_empty() {
-        for (i, c) in candidates.iter().enumerate() {
-            if blocked[i] {
-                continue;
-            }
-            let s = c.rel_start as usize;
-            let e = c.rel_end.min(raw_content.len() as u32) as usize;
-            if s >= e {
-                continue;
-            }
-            let body = &raw_content[s..e];
-            for name in script_generic_names.iter() {
-                if has_whole_ident(body, name) {
-                    blocked[i] = true;
-                    break;
-                }
-                // A type dep that isn't a local candidate is an outside
-                // reference (import / global) — fine to reference from a hoisted
-                // declaration.
+        for (i, (_, _, references_script_generic)) in deps.iter().enumerate() {
+            if !blocked[i] && *references_script_generic {
+                blocked[i] = true;
             }
         }
     }
     // Initial blocked: candidates with a value_dep that isn't allowed.
     // "Allowed" = NOT in instance_value_names except imports, OR in any
     // module-script set (module-script bindings are stable references).
-    for (i, (value_deps, _)) in deps.iter().enumerate() {
+    for (i, (value_deps, _, _)) in deps.iter().enumerate() {
         if blocked[i] {
             continue;
         }
@@ -381,10 +381,10 @@ pub(super) fn resolve_hoistable_type_decls(
                 if !stripped.is_empty() && !stripped.starts_with('$') {
                     stripped
                 } else {
-                    v.as_str()
+                    v
                 }
             } else {
-                v.as_str()
+                v
             };
             let in_instance_value = exported_names.instance_value_names.contains(resolved);
             let in_instance_import = exported_names.instance_import_names.contains(resolved);
@@ -421,7 +421,7 @@ pub(super) fn resolve_hoistable_type_decls(
             if hoistable[i] || blocked[i] {
                 continue;
             }
-            let (_, type_deps) = &deps[i];
+            let (_, type_deps, _) = &deps[i];
             let mut can_hoist = true;
             for dep in type_deps {
                 let dep_idx = candidates.iter().position(|c| &c.name == dep);
@@ -470,26 +470,18 @@ pub(super) fn resolve_hoistable_type_decls(
         // hoistable iff every type dependency is a hoistable candidate (or an
         // outside reference such as an import) AND it doesn't reference a
         // `<script generics=...>` parameter and has no disallowed value deps.
-        let (value_deps, type_deps) = collect_type_body_deps(
+        let (value_deps, type_deps, references_script_generic) = collect_type_body_deps(
             inline,
             &candidate_names,
             // No self-name for the synthetic interface.
             "",
             // No own generics on the synthetic props interface.
-            &HashSet::new(),
+            &FxHashSet::default(),
+            script_generic_names,
             &exported_names.instance_value_names,
             &exported_names.instance_import_names,
         );
-        let mut ok = true;
-        // Generic references make the synthetic props interface non-hoistable.
-        if !script_generic_names.is_empty() {
-            for g in script_generic_names.iter() {
-                if has_whole_ident(inline, g) {
-                    ok = false;
-                    break;
-                }
-            }
-        }
+        let mut ok = !references_script_generic;
         if ok {
             for dep in &type_deps {
                 if let Some(idx) = candidates.iter().position(|c| &c.name == dep)
@@ -679,32 +671,6 @@ fn find_line_comment_start(line: &[u8]) -> Option<usize> {
     None
 }
 
-/// Return true if `text` contains `name` as a whole identifier (not as a
-/// substring of a longer one).
-fn has_whole_ident(text: &str, name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let nbytes = name.as_bytes();
-    if nbytes.len() > bytes.len() {
-        return false;
-    }
-    let mut i = 0usize;
-    while i + nbytes.len() <= bytes.len() {
-        if &bytes[i..i + nbytes.len()] == nbytes {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_idx = i + nbytes.len();
-            let after_ok = after_idx == bytes.len() || !is_ident_byte(bytes[after_idx]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
 /// Rewrite a top-level `interface X { ... }` (with optional `extends Y, Z`)
 /// into `type X = Y & Z & { ... }` for dts-mode output. Indirectly using
 /// interfaces inside the return type of a function is forbidden by the
@@ -799,6 +765,8 @@ pub(super) fn rewrite_interface_to_type_dts(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::svelte2tsx::svelte2tsx::{Svelte2TsxOptions, svelte2tsx};
 
@@ -843,12 +811,109 @@ mod tests {
             \u{20}\u{20}/** \u{753B}\u{50CF} (content='image' \u{306E}\u{5834}\u{5408}\u{306B}\u{5FC5}\u{9808}) */\n\
             \u{20}\u{20}imageSrc?: string;\n}";
         let candidates: HashSet<String> = HashSet::new();
-        let generics: HashSet<String> = HashSet::new();
+        let generics = FxHashSet::default();
+        let script_generics = HashSet::new();
         let values: HashSet<String> = HashSet::new();
         let imports: HashSet<String> = HashSet::new();
         // Must not panic.
-        let (_value_deps, _type_deps) =
-            collect_type_body_deps(body, &candidates, "Props", &generics, &values, &imports);
+        let (_value_deps, _type_deps, _references_script_generic) = collect_type_body_deps(
+            body,
+            &candidates,
+            "Props",
+            &generics,
+            &script_generics,
+            &values,
+            &imports,
+        );
+    }
+
+    #[test]
+    fn dependency_tokens_ignore_unicode_trivia_keys_keywords_and_candidate_generics() {
+        let body = "type Props<Local> = {\n\
+            /** 日本語 T type */\n\
+            T: 'T';\n\
+            type: Local;\n\
+            wrapped: Wrapper;\n\
+            value: typeof local_value;\n\
+        }";
+        let candidates = HashSet::from(["Props".to_string(), "Wrapper".to_string()]);
+        let generics = FxHashSet::from_iter(["Local"]);
+        let script_generics = HashSet::from(["T".to_string(), "type".to_string()]);
+        let values = HashSet::from(["local_value".to_string()]);
+        let imports = HashSet::new();
+
+        let (value_deps, type_deps, references_script_generic) = collect_type_body_deps(
+            body,
+            &candidates,
+            "Props",
+            &generics,
+            &script_generics,
+            &values,
+            &imports,
+        );
+
+        assert_eq!(value_deps, FxHashSet::from_iter(["local_value"]));
+        assert_eq!(type_deps, HashSet::from(["Wrapper".to_string()]));
+        assert!(!references_script_generic);
+        let value = value_deps.iter().next().unwrap();
+        let body_start = body.as_ptr() as usize;
+        let value_start = value.as_ptr() as usize;
+        assert!((body_start..body_start + body.len()).contains(&value_start));
+    }
+
+    #[test]
+    fn candidate_generic_shadows_script_generic_when_hoisting() {
+        let source = "<script lang=\"ts\" generics=\"T\">\n\
+            type Local<T> = { value: T };\n\
+            type Props = { item: Local<string> };\n\
+            let { item }: Props = $props();\n\
+            </script>\n\
+            <p>{item.value}</p>";
+        let out = svelte2tsx(source, Svelte2TsxOptions::default())
+            .expect("svelte2tsx ok")
+            .code;
+        let local = out.find("type Local").expect("emits Local");
+        let props = out.find("type Props").expect("emits Props");
+        let render = out.find("function $$render").expect("has $$render");
+        assert!(local < props && props < render, "{out}");
+    }
+
+    #[test]
+    fn large_reverse_dependency_graph_keeps_official_order_with_unicode_trivia() {
+        const TYPE_COUNT: usize = 256;
+        let mut source = String::from("<script lang=\"ts\" generics=\"T\">\n");
+        for index in 0..TYPE_COUNT - 1 {
+            writeln!(
+                source,
+                "// 日本語 T appears only in trivia\ntype T{index} = {{ value: T{} }};\n",
+                index + 1
+            )
+            .unwrap();
+        }
+        write!(
+            source,
+            "// 日本語 T appears only in trivia\ntype T{} = string;\n\
+             type Props = {{ value: T0 }};\n\
+             let {{ value }}: Props = $props();\n\
+             </script>\n<p>{{value}}</p>",
+            TYPE_COUNT - 1
+        )
+        .unwrap();
+
+        let out = svelte2tsx(&source, Svelte2TsxOptions::default())
+            .expect("svelte2tsx ok")
+            .code;
+        let render = out.find("function $$render").expect("has $$render");
+        let mut previous = 0;
+        for index in (0..TYPE_COUNT).rev() {
+            let position = out
+                .find(&format!("type T{index} ="))
+                .unwrap_or_else(|| panic!("missing T{index}"));
+            assert!(position > previous && position < render, "T{index}: {out}");
+            previous = position;
+        }
+        let props = out.find("type Props").expect("emits Props");
+        assert!(props > previous && props < render, "{out}");
     }
 
     #[test]
