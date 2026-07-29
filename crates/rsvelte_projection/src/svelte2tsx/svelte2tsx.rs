@@ -262,13 +262,14 @@ pub fn svelte2tsx(
         modern: true,
         loose: false,
         skip_expression_loc: false,
-        defer_script_parse: false,
+        defer_script_parse: true,
         force_typescript: false,
         lenient_script: false,
         skip_non_css_lang_style: false,
         capture_comments: false,
     };
-    let ast = phase1_parse::parse_script_ts(&parse_source, parse_options)?;
+    let mut ast = phase1_parse::parse_script_ts(&parse_source, parse_options)?;
+    let parsed_scripts = super::script::ParsedScripts::new(&mut ast);
 
     // svelte rejects `{@debug expr}` whose arguments are not plain identifiers
     // (`{@debug user.firstname}` / `{@debug a[0]}`) at PARSE time. rsvelte does
@@ -300,8 +301,8 @@ pub fn svelte2tsx(
     }
 
     // Step 6: Process module script (<script context="module">)
-    if let Some(ref module) = ast.module {
-        super::script::process_module_script(module, source, &mut str, &mut exported_names);
+    if let (Some(module), Some(parsed)) = (&ast.module, &parsed_scripts.module) {
+        super::script::process_module_script(module, parsed, source, &mut str, &mut exported_names);
     }
 
     // Step 7: Process instance script (<script>)
@@ -328,9 +329,14 @@ pub fn svelte2tsx(
                 .collect::<std::collections::HashSet<String>>()
         })
         .unwrap_or_default();
-    if let Some(ref instance) = ast.instance {
+    if let (Some(instance), Some(parsed)) = (&ast.instance, &parsed_scripts.instance) {
         super::script::process_instance_script(
             instance,
+            parsed,
+            parsed_scripts
+                .module
+                .as_ref()
+                .map(|script| script.program()),
             source,
             &mut str,
             &mut exported_names,
@@ -546,6 +552,11 @@ pub fn svelte2tsx(
     if has_instance_script {
         has_top_level_await = process_instance_script_tag(
             &ast,
+            parsed_scripts
+                .instance
+                .as_ref()
+                .expect("instance script")
+                .program(),
             source,
             &options,
             &mut str,
@@ -586,6 +597,10 @@ pub fn svelte2tsx(
 
     create_render_function(
         &ast,
+        parsed_scripts
+            .module
+            .as_ref()
+            .map(|script| script.program()),
         source,
         &options,
         &mut str,
@@ -596,6 +611,7 @@ pub fn svelte2tsx(
         &hoistable_snippet_ranges,
         &embedded_script_content,
     );
+    drop(parsed_scripts);
 
     let closing = add_component_export(
         ComponentExportParams {
