@@ -90,7 +90,7 @@ pub(crate) fn handle_if_block(
                 str.append_left(consequent_start, ")");
             }
         } else {
-            str.overwrite(block.start, consequent_start, &format!("if({})", test_text));
+            str.overwrite_owned(block.start, consequent_start, format!("if({})", test_text));
         }
         // Insert opening brace
         str.append_left(consequent_start, "{");

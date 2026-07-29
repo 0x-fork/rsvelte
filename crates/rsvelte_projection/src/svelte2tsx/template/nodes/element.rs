@@ -253,7 +253,7 @@ pub(crate) fn handle_regular_element(
         .ends_with("/>");
     let is_void = crate::compiler::utils::is_void_element(&el.name);
     if is_void || is_self_closing_source {
-        str.append_left(el.end, &format!("}}{}", extra_close));
+        str.append_left_owned(el.end, format!("}}{}", extra_close));
     } else {
         let closing_tag_start = find_closing_tag_start(source, el.end);
         // An auto-closed element (`<p><p>`, `<li><li>`, …) has NO `</name>` at
@@ -265,9 +265,9 @@ pub(crate) fn handle_regular_element(
             && closing_tag_name_matches(source, closing_tag_start, &el.name)
         {
             // Non-self-closing: preserve space before closing brace
-            str.overwrite(closing_tag_start, el.end, &format!(" }}{}", extra_close));
+            str.overwrite_owned(closing_tag_start, el.end, format!(" }}{}", extra_close));
         } else {
-            str.append_left(el.end, &format!("}}{}", extra_close));
+            str.append_left_owned(el.end, format!("}}{}", extra_close));
         }
     }
     // Restore the slot context for following siblings (this element's own

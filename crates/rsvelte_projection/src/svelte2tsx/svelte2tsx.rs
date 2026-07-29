@@ -610,7 +610,7 @@ pub fn svelte2tsx(
         &mut str,
     );
 
-    str.append_str(&closing);
+    str.append_str_owned(closing);
 
     let source_map = str
         .generate_map(GenerateMapOptions {

@@ -429,6 +429,14 @@ impl<'source> MagicString<'source> {
         if start >= end {
             return self;
         }
+        self.overwrite_owned(start, end, content.to_string())
+    }
+
+    /// Owned-buffer variant of [`MagicString::overwrite`].
+    pub fn overwrite_owned(&mut self, start: u32, end: u32, content: String) -> &mut Self {
+        if start >= end {
+            return self;
+        }
         assert!(
             (end as usize) <= self.original.len(),
             "overwrite: end ({}) > source length ({})",
@@ -446,7 +454,7 @@ impl<'source> MagicString<'source> {
             .expect("overwrite: no chunk at start");
 
         // Set the content of the first chunk and blank out subsequent ones.
-        self.chunks[first].content = Some(content.to_string());
+        self.chunks[first].content = Some(content);
         // Preserve intro of first chunk, but clear its outro – the last chunk's outro is kept.
         self.chunks[first].outro.clear();
 
@@ -518,6 +526,16 @@ impl<'source> MagicString<'source> {
         self
     }
 
+    /// Append owned content at the very end of the output.
+    pub fn append_str_owned(&mut self, content: String) -> &mut Self {
+        if self.outro.is_empty() {
+            self.outro = content;
+            self
+        } else {
+            self.append_str(&content)
+        }
+    }
+
     /// Insert `content` before the character at `index`, after any previously
     /// prepended content at this position. In the JS API this is called
     /// `appendLeft`.
@@ -539,6 +557,27 @@ impl<'source> MagicString<'source> {
             .get(&index)
             .expect("append_left: no chunk ending at index");
         self.chunks[chunk_idx].outro.push_str(content);
+        self
+    }
+
+    /// Owned variant of [`MagicString::append_left`].
+    pub fn append_left_owned(&mut self, index: u32, content: String) -> &mut Self {
+        assert!(
+            (index as usize) <= self.original.len(),
+            "append_left: index out of range"
+        );
+
+        if index == 0 {
+            append_owned(&mut self.intro, content);
+            return self;
+        }
+
+        self.split_at(index);
+        let chunk_idx = *self
+            .by_end
+            .get(&index)
+            .expect("append_left: no chunk ending at index");
+        append_owned(&mut self.chunks[chunk_idx].outro, content);
         self
     }
 
@@ -565,6 +604,27 @@ impl<'source> MagicString<'source> {
             .get(&index)
             .expect("prepend_right: no chunk at index");
         self.chunks[chunk_idx].intro.insert_str(0, content);
+        self
+    }
+
+    /// Owned variant of [`MagicString::prepend_right`].
+    pub fn prepend_right_owned(&mut self, index: u32, content: String) -> &mut Self {
+        assert!(
+            (index as usize) <= self.original.len(),
+            "prepend_right: index out of range"
+        );
+
+        if index == self.original.len() as u32 {
+            prepend_owned(&mut self.outro, content);
+            return self;
+        }
+
+        self.split_at(index);
+        let chunk_idx = *self
+            .by_start
+            .get(&index)
+            .expect("prepend_right: no chunk at index");
+        prepend_owned(&mut self.chunks[chunk_idx].intro, content);
         self
     }
 
@@ -1031,6 +1091,22 @@ fn checked_source_len(len: usize) -> u32 {
     u32::try_from(len).expect("MagicString source length exceeds u32::MAX bytes")
 }
 
+fn append_owned(target: &mut String, content: String) {
+    if target.is_empty() {
+        *target = content;
+    } else {
+        target.push_str(&content);
+    }
+}
+
+fn prepend_owned(target: &mut String, content: String) {
+    if target.is_empty() {
+        *target = content;
+    } else {
+        target.insert_str(0, &content);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1124,6 +1200,74 @@ mod tests {
         let mut s = MagicString::new("hello world");
         s.overwrite(0, 5, "goodbye");
         assert_eq!(s.to_string(), "goodbye world");
+    }
+
+    #[test]
+    fn owned_mutations_preserve_empty_target_buffers() {
+        let mut s = MagicString::new("hello world");
+        let replacement = String::from("goodbye");
+        let replacement_ptr = replacement.as_ptr();
+        s.overwrite_owned(0, 5, replacement);
+        assert_eq!(
+            s.chunks[*s.by_start.get(&0).unwrap()]
+                .content
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
+            replacement_ptr
+        );
+
+        let closing = String::from("!");
+        let closing_ptr = closing.as_ptr();
+        s.append_str_owned(closing);
+        assert_eq!(s.outro.as_ptr(), closing_ptr);
+
+        let insertion = String::from(" ");
+        let insertion_ptr = insertion.as_ptr();
+        s.append_left_owned(5, insertion);
+        let chunk = &s.chunks[*s.by_end.get(&5).unwrap()];
+        assert_eq!(chunk.outro.as_ptr(), insertion_ptr);
+
+        let prefix = String::from("^");
+        let prefix_ptr = prefix.as_ptr();
+        s.prepend_right_owned(6, prefix);
+        let chunk = &s.chunks[*s.by_start.get(&6).unwrap()];
+        assert_eq!(chunk.intro.as_ptr(), prefix_ptr);
+    }
+
+    #[test]
+    fn owned_mutations_match_borrowed_output_and_maps() {
+        let source = "abcdefgh";
+        let mut borrowed = MagicString::new(source);
+        borrowed.overwrite(1, 3, "XX");
+        borrowed.append_left(4, "A");
+        borrowed.append_left(4, "B");
+        borrowed.prepend_right(4, "C");
+        borrowed.prepend_right(4, "D");
+        borrowed.append_str("!");
+
+        let mut owned = MagicString::new(source);
+        owned.overwrite_owned(1, 3, String::from("XX"));
+        owned.append_left_owned(4, String::from("A"));
+        owned.append_left_owned(4, String::from("B"));
+        owned.prepend_right_owned(4, String::from("C"));
+        owned.prepend_right_owned(4, String::from("D"));
+        owned.append_str_owned(String::from("!"));
+
+        assert_eq!(owned.to_string(), borrowed.to_string());
+        assert_eq!(owned.forward_segments(), borrowed.forward_segments());
+
+        let borrowed_map = borrowed.generate_map(GenerateMapOptions {
+            file: Some("out.ts".to_string()),
+            source: Some("in.svelte".to_string()),
+            include_content: true,
+        });
+        let owned_map = owned.generate_map(GenerateMapOptions {
+            file: Some("out.ts".to_string()),
+            source: Some("in.svelte".to_string()),
+            include_content: true,
+        });
+        assert_eq!(owned_map.to_json(), borrowed_map.to_json());
     }
 
     #[test]

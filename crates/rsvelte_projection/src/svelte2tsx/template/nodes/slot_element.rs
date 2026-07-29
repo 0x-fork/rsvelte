@@ -97,10 +97,10 @@ pub(crate) fn handle_slot_element(
     if closing_tag_start < el.end {
         if let Some(ref bind_expr) = bind_this_expr {
             // For bind:this, assign the slot variable: `s = $$_slot0;}
-            str.overwrite(
+            str.overwrite_owned(
                 closing_tag_start,
                 el.end,
-                &format!(
+                format!(
                     "{} = $$_slot{};}}",
                     bind_expr,
                     counter
@@ -123,10 +123,10 @@ pub(crate) fn handle_slot_element(
                 .copied()
                 .unwrap_or(0)
                 .saturating_sub(1);
-            str.overwrite(
+            str.overwrite_owned(
                 el.end - 2, // rewrite the `/>` portion
                 el.end,
-                &format!("{} = $$_slot{};}}", bind_expr, slot_idx),
+                format!("{} = $$_slot{};}}", bind_expr, slot_idx),
             );
         } else {
             // Self-closing without bind:this - just close the block

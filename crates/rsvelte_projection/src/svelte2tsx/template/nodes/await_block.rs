@@ -114,7 +114,7 @@ pub(crate) fn handle_await_block(
                 } else {
                     ");".to_string()
                 };
-                str.append_left(expr_end, &suffix);
+                str.append_left_owned(expr_end, suffix);
                 if prev_end < then_start {
                     str.overwrite(prev_end, then_start, "");
                 }
@@ -127,19 +127,19 @@ pub(crate) fn handle_await_block(
                 // `try { ` wrapper when a catch/error is present (see above).
                 let try_prefix = if has_catch { "try { " } else { "" };
                 if !value_text.is_empty() {
-                    str.overwrite(
+                    str.overwrite_owned(
                         prev_end,
                         then_start,
-                        &format!(
+                        format!(
                             "{}const $$_value = await ({});{{ const {} = $$_value; ",
                             try_prefix, expr_text, value_text
                         ),
                     );
                 } else {
-                    str.overwrite(
+                    str.overwrite_owned(
                         prev_end,
                         then_start,
-                        &format!("{}const $$_value = await ({});{{ ", try_prefix, expr_text),
+                        format!("{}const $$_value = await ({});{{ ", try_prefix, expr_text),
                     );
                 }
             }
@@ -164,19 +164,19 @@ pub(crate) fn handle_await_block(
                 // `{:then value}` binding opened one), then open the catch.
                 let close_before_catch = if value_text.is_empty() { "}" } else { "}}" };
                 if !error_text.is_empty() {
-                    str.overwrite(
+                    str.overwrite_owned(
                         then_end,
                         catch_start,
-                        &format!(
+                        format!(
                             "{} catch($$_e) {{ const {} = __sveltets_2_any();",
                             close_before_catch, error_text
                         ),
                     );
                 } else {
-                    str.overwrite(
+                    str.overwrite_owned(
                         then_end,
                         catch_start,
-                        &format!("{} catch($$_e) {{ ", close_before_catch),
+                        format!("{} catch($$_e) {{ ", close_before_catch),
                     );
                 }
 
@@ -239,9 +239,9 @@ pub(crate) fn handle_await_block(
                     format!("try {{ await ({});}} catch($$_e) {{ ", expr_text)
                 };
                 if pending_end < catch_start {
-                    str.overwrite(pending_end, catch_start, &header);
+                    str.overwrite_owned(pending_end, catch_start, header);
                 } else {
-                    str.append_left(pending_end, &header);
+                    str.append_left_owned(pending_end, header);
                 }
                 process_fragment_inplace(catch, source, options, str, counter, depth);
                 let catch_end = if !catch.nodes.is_empty() {
@@ -253,7 +253,7 @@ pub(crate) fn handle_await_block(
                     str.overwrite(catch_end, block.end, "}}");
                 }
             } else if pending_end < block.end {
-                str.overwrite(pending_end, block.end, &format!("await ({});}}", expr_text));
+                str.overwrite_owned(pending_end, block.end, format!("await ({});}}", expr_text));
             }
         }
     } else if has_then {
@@ -315,10 +315,10 @@ pub(crate) fn handle_await_block(
                 str.append_left(expr_end, &header_suffix);
             }
         } else {
-            str.overwrite(
+            str.overwrite_owned(
                 block.start,
                 then_start,
-                &format!("{}{}{}", header_prefix, expr_text, header_suffix),
+                format!("{}{}{}", header_prefix, expr_text, header_suffix),
             );
         }
 
@@ -340,10 +340,10 @@ pub(crate) fn handle_await_block(
             };
 
             if !error_text.is_empty() {
-                str.overwrite(
+                str.overwrite_owned(
                     then_end,
                     catch_start,
-                    &format!(
+                    format!(
                         "{}}} catch($$_e) {{ const {} = __sveltets_2_any();",
                         value_close, error_text
                     ),
@@ -351,10 +351,10 @@ pub(crate) fn handle_await_block(
             } else {
                 // Close the value block (only when there's a `{:then value}`
                 // binding) + `try`, then open the catch. Always emit `($$_e)`.
-                str.overwrite(
+                str.overwrite_owned(
                     then_end,
                     catch_start,
-                    &format!("{}}} catch($$_e) {{ ", value_close),
+                    format!("{}}} catch($$_e) {{ ", value_close),
                 );
             }
 
@@ -411,19 +411,19 @@ pub(crate) fn handle_await_block(
                 str.append_left(expr_end, &header_suffix);
             }
         } else if !error_text.is_empty() {
-            str.overwrite(
+            str.overwrite_owned(
                 block.start,
                 catch_start,
-                &format!(
+                format!(
                     "   {{ try {{ await ({});}} catch($$_e) {{ const {} = __sveltets_2_any();",
                     expr_text, error_text
                 ),
             );
         } else {
-            str.overwrite(
+            str.overwrite_owned(
                 block.start,
                 catch_start,
-                &format!("   {{ try {{ await ({});}} catch($$_e) {{ ", expr_text),
+                format!("   {{ try {{ await ({});}} catch($$_e) {{ ", expr_text),
             );
         }
 
@@ -451,10 +451,10 @@ pub(crate) fn handle_await_block(
                 str.append_left(expr_end, ");}");
             }
         } else {
-            str.overwrite(
+            str.overwrite_owned(
                 block.start,
                 block.end,
-                &format!("{{ await ({});}}", expr_text),
+                format!("{{ await ({});}}", expr_text),
             );
         }
     }

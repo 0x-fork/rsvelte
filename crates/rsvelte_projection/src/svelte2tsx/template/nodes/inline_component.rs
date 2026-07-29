@@ -409,12 +409,12 @@ pub(crate) fn handle_component(
         // Close the props object right after the last relocated snippet.
         match last_snippet_end {
             Some(end) => {
-                str.append_left(end, &closing);
+                str.append_left_owned(end, closing);
             }
             None => {
                 // No usable snippet after all (e.g. only empty-named blocks);
                 // close the props object at the opening-tag boundary.
-                str.prepend_right(opening_tag_end, &closing);
+                str.prepend_right_owned(opening_tag_end, closing);
             }
         }
     } else {
@@ -454,10 +454,10 @@ pub(crate) fn handle_component(
             // the component-name reference + the named-slot-block close after.
             str.overwrite(closing_tag_start, comp.end, " }");
         } else {
-            str.overwrite(closing_tag_start, comp.end, &format!(" {}}}", comp.name));
+            str.overwrite_owned(closing_tag_start, comp.end, format!(" {}}}", comp.name));
         }
     } else if needs_inline_block {
-        str.append_left(comp.end, &format!("{}{}}}", inline_block, comp.name));
+        str.append_left_owned(comp.end, format!("{}{}}}", inline_block, comp.name));
     } else {
         str.append_left(comp.end, "}");
     }

@@ -589,7 +589,7 @@ pub(crate) fn handle_named_slot_component(
     // close the named-slot block.
     let closing_tag_start = find_closing_tag_start(source, comp.end);
     if closing_tag_start < comp.end {
-        str.append_left(comp.end, &format!(" {}}}", comp.name));
+        str.append_left_owned(comp.end, format!(" {}}}", comp.name));
     } else {
         str.append_left(comp.end, "}");
     }
