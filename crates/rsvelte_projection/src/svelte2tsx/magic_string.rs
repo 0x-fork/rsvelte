@@ -83,11 +83,6 @@ impl Chunk {
         self.next.map(ChunkId::index)
     }
 
-    #[inline]
-    fn previous_index(&self) -> Option<usize> {
-        self.previous.map(ChunkId::index)
-    }
-
     /// Split this chunk at `index` (an original-source position). Returns the new
     /// chunk that covers `[index, self.end)`. `self` is trimmed to `[self.start, index)`.
     ///
@@ -250,9 +245,9 @@ pub struct MagicString {
     /// Arena of chunks (linked list stored in a Vec).
     chunks: Vec<Chunk>,
     /// Index of the first chunk in the linked list.
-    first_chunk: usize,
+    first_chunk: ChunkId,
     /// Index of the last chunk in the linked list.
-    last_chunk: usize,
+    last_chunk: ChunkId,
     /// Map from original-source position → chunk index that *starts* at that position.
     /// Populated lazily via `split_at`. A `BTreeMap` (not a hash map) so
     /// `split_at` can locate the chunk containing an arbitrary position with an
@@ -261,9 +256,9 @@ pub struct MagicString {
     /// large edited file O(n²) (the dominant svelte2tsx hotspot). Every chunk's
     /// start is kept here and entries are never removed, so the greatest start
     /// `<= index` is always the chunk that contains `index`.
-    by_start: std::collections::BTreeMap<u32, usize>,
+    by_start: std::collections::BTreeMap<u32, ChunkId>,
     /// Map from original-source position → chunk index that *ends* at that position.
-    by_end: HashMap<u32, usize>,
+    by_end: HashMap<u32, ChunkId>,
     /// Content prepended before everything.
     intro: String,
     /// Content appended after everything.
@@ -279,17 +274,18 @@ impl MagicString {
     pub fn new(source: &str) -> Self {
         let source_len = checked_source_len(source.len());
         let chunk = Chunk::new(0, source_len);
-        let mut by_start: std::collections::BTreeMap<u32, usize> =
+        let first_chunk = ChunkId::from_index(0);
+        let mut by_start: std::collections::BTreeMap<u32, ChunkId> =
             std::collections::BTreeMap::new();
-        let mut by_end: HashMap<u32, usize> = HashMap::default();
-        by_start.insert(0, 0);
-        by_end.insert(source_len, 0);
+        let mut by_end: HashMap<u32, ChunkId> = HashMap::default();
+        by_start.insert(0, first_chunk);
+        by_end.insert(source_len, first_chunk);
 
         Self {
             original: source.to_string(),
             chunks: vec![chunk],
-            first_chunk: 0,
-            last_chunk: 0,
+            first_chunk,
+            last_chunk: first_chunk,
             by_start,
             by_end,
             intro: String::new(),
@@ -328,8 +324,8 @@ impl MagicString {
     /// crashing the entire compiler in release builds. Debug builds print a
     /// diagnostic so the upstream bug is still surfaced during development.
     fn split_at(&mut self, index: u32) -> usize {
-        if let Some(&chunk_idx) = self.by_start.get(&index) {
-            return chunk_idx;
+        if let Some(&chunk_id) = self.by_start.get(&index) {
+            return chunk_id.index();
         }
 
         // If index is at the very end of the source, there is nothing to split.
@@ -353,8 +349,8 @@ impl MagicString {
         // above already handled the case where `index` is itself a boundary,
         // so here `start < index`.) This replaces an O(n) walk from the head
         // that made repeated splits O(n²).
-        let cur = match self.by_start.range(..=index).next_back() {
-            Some((_, &chunk_idx)) => chunk_idx,
+        let cur_id = match self.by_start.range(..=index).next_back() {
+            Some((_, &chunk_id)) => chunk_id,
             None => {
                 #[cfg(debug_assertions)]
                 eprintln!(
@@ -365,6 +361,7 @@ impl MagicString {
                 return usize::MAX;
             }
         };
+        let cur = cur_id.index();
         // Defensive: confirm `index` really falls strictly inside `cur`. With a
         // well-formed chunk list this always holds; if not, fall back to the
         // sentinel rather than producing a corrupt split.
@@ -381,7 +378,7 @@ impl MagicString {
         }
 
         // `cur` is the chunk that contains `index` strictly inside it.
-        let old_next = self.chunks[cur].next_index();
+        let old_next = self.chunks[cur].next;
         let mut new_chunk = self.chunks[cur].split(index);
 
         let new_idx = self.chunks.len();
@@ -390,31 +387,31 @@ impl MagicString {
         self.chunks.push(new_chunk);
 
         self.chunks[cur].next = Some(new_id);
-        if let Some(old_next_idx) = old_next {
-            self.chunks[old_next_idx].previous = Some(new_id);
+        if let Some(old_next) = old_next {
+            self.chunks[old_next.index()].previous = Some(new_id);
         }
-        if self.last_chunk == cur {
-            self.last_chunk = new_idx;
+        if self.last_chunk == cur_id {
+            self.last_chunk = new_id;
         }
 
         // Update indices.
-        self.by_start.insert(index, new_idx);
-        self.by_end.insert(index, cur);
+        self.by_start.insert(index, new_id);
+        self.by_end.insert(index, cur_id);
         // The end of the new chunk is the old end – already in by_end pointing to cur,
         // but it should now point to new_idx.
         let new_end = self.chunks[new_idx].end;
-        self.by_end.insert(new_end, new_idx);
+        self.by_end.insert(new_end, new_id);
 
         new_idx
     }
 
     /// Internal: link chunk `a` → `b` in the linked list.
-    fn link(&mut self, a: Option<usize>, b: Option<usize>) {
-        if let Some(ai) = a {
-            self.chunks[ai].next = b.map(ChunkId::from_index);
+    fn link(&mut self, a: Option<ChunkId>, b: Option<ChunkId>) {
+        if let Some(a) = a {
+            self.chunks[a.index()].next = b;
         }
-        if let Some(bi) = b {
-            self.chunks[bi].previous = a.map(ChunkId::from_index);
+        if let Some(b) = b {
+            self.chunks[b.index()].previous = a;
         }
     }
 
@@ -440,10 +437,11 @@ impl MagicString {
         self.split_at(start);
         self.split_at(end);
 
-        let first = *self
+        let first = self
             .by_start
             .get(&start)
-            .expect("overwrite: no chunk at start");
+            .expect("overwrite: no chunk at start")
+            .index();
 
         // Set the content of the first chunk and blank out subsequent ones.
         self.chunks[first].content = Some(content.to_string());
@@ -460,7 +458,7 @@ impl MagicString {
         let mut cur_end = self.chunks[first].end;
         while cur_end < end {
             let ci = match self.by_start.get(&cur_end) {
-                Some(&i) => i,
+                Some(&id) => id.index(),
                 None => break,
             };
             self.chunks[ci].content = Some(String::new());
@@ -494,7 +492,7 @@ impl MagicString {
         let mut cur_start = start;
         while cur_start < end {
             let ci = match self.by_start.get(&cur_start) {
-                Some(&i) => i,
+                Some(&id) => id.index(),
                 None => break,
             };
             self.chunks[ci].content = Some(String::new());
@@ -534,10 +532,11 @@ impl MagicString {
         }
 
         self.split_at(index);
-        let chunk_idx = *self
+        let chunk_idx = self
             .by_end
             .get(&index)
-            .expect("append_left: no chunk ending at index");
+            .expect("append_left: no chunk ending at index")
+            .index();
         self.chunks[chunk_idx].outro.push_str(content);
         self
     }
@@ -560,10 +559,11 @@ impl MagicString {
         }
 
         self.split_at(index);
-        let chunk_idx = *self
+        let chunk_idx = self
             .by_start
             .get(&index)
-            .expect("prepend_right: no chunk at index");
+            .expect("prepend_right: no chunk at index")
+            .index();
         self.chunks[chunk_idx].intro.insert_str(0, content);
         self
     }
@@ -583,10 +583,11 @@ impl MagicString {
         }
 
         self.split_at(index);
-        let chunk_idx = *self
+        let chunk_idx = self
             .by_end
             .get(&index)
-            .expect("prepend_left: no chunk ending at index");
+            .expect("prepend_left: no chunk ending at index")
+            .index();
         self.chunks[chunk_idx].outro.insert_str(0, content);
         self
     }
@@ -605,10 +606,11 @@ impl MagicString {
         }
 
         self.split_at(index);
-        let chunk_idx = *self
+        let chunk_idx = self
             .by_start
             .get(&index)
-            .expect("append_right: no chunk at index");
+            .expect("append_right: no chunk at index")
+            .index();
         self.chunks[chunk_idx].intro.push_str(content);
         self
     }
@@ -633,8 +635,8 @@ impl MagicString {
             .expect("move_range: no chunk at start");
         let last_in_range = *self.by_end.get(&end).expect("move_range: no chunk at end");
 
-        let before_range = self.chunks[first_in_range].previous_index();
-        let after_range = self.chunks[last_in_range].next_index();
+        let before_range = self.chunks[first_in_range.index()].previous;
+        let after_range = self.chunks[last_in_range.index()].next;
 
         // Detach the range from its current position.
         self.link(before_range, after_range);
@@ -656,13 +658,13 @@ impl MagicString {
             // Insert before the current first chunk.
             let old_first = self.first_chunk;
             self.link(Some(last_in_range), Some(old_first));
-            self.chunks[first_in_range].previous = None;
+            self.chunks[first_in_range.index()].previous = None;
             self.first_chunk = first_in_range;
         } else if index == self.original.len() as u32 {
             // Insert after the current last chunk.
             let old_last = self.last_chunk;
             self.link(Some(old_last), Some(first_in_range));
-            self.chunks[last_in_range].next = None;
+            self.chunks[last_in_range.index()].next = None;
             self.last_chunk = last_in_range;
         } else {
             // Insert before the chunk that starts at `index`.
@@ -670,7 +672,7 @@ impl MagicString {
                 .by_start
                 .get(&index)
                 .expect("move_range: no chunk at target index");
-            let before_target = self.chunks[target].previous_index();
+            let before_target = self.chunks[target.index()].previous;
             self.link(before_target, Some(first_in_range));
             self.link(Some(last_in_range), Some(target));
             if self.first_chunk == target && before_range.is_none() {
@@ -691,7 +693,7 @@ impl MagicString {
         let mut result = String::with_capacity(self.original.len());
         result.push_str(&self.intro);
 
-        let mut cur = Some(self.first_chunk);
+        let mut cur = Some(self.first_chunk.index());
         while let Some(ci) = cur {
             let chunk = &self.chunks[ci];
             result.push_str(&chunk.intro);
@@ -726,7 +728,7 @@ impl MagicString {
     pub fn forward_segments(&self) -> Vec<(u32, u32, u32)> {
         let mut segments = Vec::new();
         let mut generated: u32 = self.intro.len() as u32;
-        let mut cur = Some(self.first_chunk);
+        let mut cur = Some(self.first_chunk.index());
         while let Some(ci) = cur {
             let chunk = &self.chunks[ci];
             generated += chunk.intro.len() as u32;
@@ -842,7 +844,7 @@ impl MagicString {
         }
 
         // Walk chunks.
-        let mut cur = Some(self.first_chunk);
+        let mut cur = Some(self.first_chunk.index());
         while let Some(ci) = cur {
             let chunk = &self.chunks[ci];
 
@@ -1046,14 +1048,15 @@ mod tests {
         let mut expected_previous = None;
         let mut current = Some(s.first_chunk);
 
-        while let Some(index) = current {
+        while let Some(id) = current {
+            let index = id.index();
             assert!(!visited[index], "cycle at chunk {index}");
             visited[index] = true;
             let chunk = &s.chunks[index];
-            assert_eq!(chunk.previous_index(), expected_previous);
-            forward.push(index);
-            expected_previous = Some(index);
-            current = chunk.next_index();
+            assert_eq!(chunk.previous, expected_previous);
+            forward.push(id);
+            expected_previous = Some(id);
+            current = chunk.next;
         }
 
         assert_eq!(forward.len(), s.chunks.len());
@@ -1062,25 +1065,55 @@ mod tests {
         let mut backward = Vec::with_capacity(s.chunks.len());
         let mut expected_next = None;
         current = Some(s.last_chunk);
-        while let Some(index) = current {
-            let chunk = &s.chunks[index];
-            assert_eq!(chunk.next_index(), expected_next);
-            backward.push(index);
-            expected_next = Some(index);
-            current = chunk.previous_index();
+        while let Some(id) = current {
+            let chunk = &s.chunks[id.index()];
+            assert_eq!(chunk.next, expected_next);
+            backward.push(id);
+            expected_next = Some(id);
+            current = chunk.previous;
         }
 
         assert_eq!(forward.iter().copied().rev().collect::<Vec<_>>(), backward);
+        assert_eq!(s.by_start.len(), s.chunks.len());
+        assert_eq!(s.by_end.len(), s.chunks.len());
+        for (&start, &id) in &s.by_start {
+            assert_eq!(s.chunks[id.index()].start, start);
+        }
+        for (&end, &id) in &s.by_end {
+            assert_eq!(s.chunks[id.index()].end, end);
+        }
     }
 
     #[test]
-    fn chunk_links_have_compact_layout() {
+    fn chunk_indices_have_compact_layout() {
         assert_eq!(size_of::<ChunkId>(), 4);
         assert_eq!(size_of::<Option<ChunkId>>(), 4);
         assert_eq!(size_of::<[Option<ChunkId>; 2]>(), 8);
+        assert_eq!(size_of::<(u32, ChunkId)>(), 8);
 
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(size_of::<Chunk>(), 88);
+        {
+            assert_eq!(size_of::<(u32, usize)>(), 16);
+            assert_eq!(size_of::<Chunk>(), 88);
+            assert_eq!(size_of::<MagicString>(), 160);
+        }
+    }
+
+    #[test]
+    fn compact_indices_track_split_boundaries_and_moves() {
+        let mut s = MagicString::new("abcdefgh");
+        for index in 1..8 {
+            s.append_left(index, "");
+        }
+
+        assert_eq!(s.chunks.len(), 8);
+        assert_bidirectional_links(&s);
+
+        s.move_range(6, 8, 0);
+        assert_eq!(s.to_string(), "ghabcdef");
+        assert_eq!(s.first_chunk, s.by_start[&6]);
+        assert_eq!(s.last_chunk, s.by_end[&6]);
+        assert_bidirectional_links(&s);
     }
 
     #[test]
