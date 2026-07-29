@@ -9,6 +9,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rsvelte_projection::svelte2tsx::RewriteExternalImportsOptions;
 use rsvelte_projection::svelte2tsx::{Svelte2TsxOptions, svelte2tsx};
 use std::fmt::Write as _;
 use std::hint::black_box;
@@ -91,6 +92,17 @@ fn options(sample: &Sample) -> Svelte2TsxOptions {
     }
 }
 
+fn rewrite_options(sample: &Sample) -> Svelte2TsxOptions {
+    Svelte2TsxOptions {
+        rewrite_external_imports: Some(RewriteExternalImportsOptions {
+            source_path: "/workspace/src/routes/Component.svelte".to_string(),
+            generated_path: "/workspace/.generated/src/routes/Component.svelte.tsx".to_string(),
+            workspace_path: "/workspace".to_string(),
+        }),
+        ..options(sample)
+    }
+}
+
 fn bench_files(c: &mut Criterion) {
     let files = workload();
     let mut group = c.benchmark_group("svelte2tsx");
@@ -128,5 +140,59 @@ fn bench_corpus(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_files, bench_corpus);
+fn bench_external_import_rewrites(c: &mut Criterion) {
+    let samples = [
+        Sample::synthetic(
+            "no-op",
+            r#"<script lang="ts">
+    import type { Shared } from '../shared.js';
+    export let value: Shared;
+</script>
+
+<p>{value}</p>
+"#
+            .to_string(),
+        ),
+        Sample::synthetic(
+            "rewritten",
+            r#"<script lang="ts">
+    import type { External } from '../../../outside.js';
+    export let value: External;
+</script>
+
+<p>{value}</p>
+"#
+            .to_string(),
+        ),
+    ];
+    let mut group = c.benchmark_group("svelte2tsx_external_imports");
+
+    for sample in &samples {
+        svelte2tsx(&sample.source, rewrite_options(sample))
+            .unwrap_or_else(|error| panic!("bench sample `{}` failed: {error}", sample.id));
+        group.throughput(Throughput::Bytes(sample.bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(&sample.id),
+            sample,
+            |b, sample| {
+                b.iter(|| {
+                    svelte2tsx(
+                        black_box(&sample.source),
+                        black_box(rewrite_options(sample)),
+                    )
+                    .expect("validated benchmark input")
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_files,
+    bench_corpus,
+    bench_external_import_rewrites
+);
 criterion_main!(benches);
