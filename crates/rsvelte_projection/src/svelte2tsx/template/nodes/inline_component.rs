@@ -38,8 +38,8 @@ use crate::svelte2tsx::template::utils::source::{
 use crate::svelte2tsx::template::walk::{process_fragment_inplace, process_node_inplace};
 
 use super::component_slots::{
-    handle_named_slot_component, has_component_slot_children, has_default_slot_let_children,
-    has_named_slot_children, process_component_children_with_slots,
+    ComponentSlotFacts, handle_named_slot_component, has_component_slot_children,
+    process_component_children_with_slots,
 };
 use super::slot_element::get_slot_attr_value;
 use super::snippet_block::handle_snippet_block_as_component_prop;
@@ -114,11 +114,9 @@ pub(crate) fn handle_component(
     };
     let has_lets = !let_directives.is_empty();
 
-    // Check if component has meaningful children
-    let has_children = has_component_slot_children(&comp.fragment, source);
-
-    // Check if any children have named slots with let: directives
-    let children_have_named_slots = has_named_slot_children(&comp.fragment, source);
+    let slot_facts = ComponentSlotFacts::collect(&comp.fragment);
+    let has_children = slot_facts.has_default_content();
+    let children_have_named_slots = slot_facts.has_named_slot();
 
     // A default-slot child carrying `let:` directives (e.g.
     // `<svelte:fragment let:a={x}>…`) destructures from
@@ -126,7 +124,7 @@ pub(crate) fn handle_component(
     // it likewise needs the `const $$_inst = new …` form. Mirrors official's
     // `Element.addSlotLet` → `performTransformation` referencing
     // `this.parent.name`.
-    let children_have_default_slot_lets = has_default_slot_let_children(&comp.fragment, source);
+    let children_have_default_slot_lets = slot_facts.has_default_slot_let();
 
     // Named `{#snippet}` blocks that are direct children of a component are
     // passed as *implicit props* (`props: { name: (params) => … }`), not as
@@ -138,11 +136,7 @@ pub(crate) fn handle_component(
     // which owns its own block scoping, so the snippets stay standalone there.
     let use_snippet_props =
         !(has_lets || children_have_named_slots || children_have_default_slot_lets)
-            && comp
-                .fragment
-                .nodes
-                .iter()
-                .any(|n| matches!(n, TemplateNode::SnippetBlock(_)));
+            && slot_facts.has_direct_snippet();
 
     // An instance variable is needed when:
     // - there are on: directives
@@ -506,8 +500,8 @@ pub(crate) fn handle_svelte_component(
         }
     }
 
-    // Check if component has meaningful children for Svelte 5 children prop
-    let has_children = has_component_slot_children(&comp.fragment, source);
+    let slot_facts = ComponentSlotFacts::collect(&comp.fragment);
+    let has_children = slot_facts.has_default_content();
     let is_svelte5 = matches!(options.version, SvelteVersion::V5);
     let let_directives_scomp = get_let_directives(&comp.attributes);
     let has_lets_scomp = !let_directives_scomp.is_empty();
@@ -576,8 +570,8 @@ pub(crate) fn handle_svelte_component(
     // Need an instance variable when there are `on:` events, `let:` directives,
     // `bind:` directives, or children that reference the instance's slot defs
     // (named-slot children anywhere in blocks, or default-slot `let:` receivers).
-    let children_have_named_slots = has_named_slot_children(&comp.fragment, source);
-    let children_have_default_slot_lets = has_default_slot_let_children(&comp.fragment, source);
+    let children_have_named_slots = slot_facts.has_named_slot();
+    let children_have_default_slot_lets = slot_facts.has_default_slot_let();
     let needs_inst = has_events
         || has_lets_scomp
         || has_binds

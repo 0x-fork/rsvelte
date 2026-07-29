@@ -52,6 +52,226 @@ pub(crate) fn has_non_default_slot_attr(attributes: &[Attribute], _source: &str)
     false
 }
 
+const HAS_DEFAULT_CONTENT: u8 = 1 << 0;
+const HAS_NAMED_SLOT: u8 = 1 << 1;
+const HAS_DEFAULT_SLOT_LET: u8 = 1 << 2;
+const HAS_DIRECT_SNIPPET: u8 = 1 << 3;
+const ALL_SLOT_FACTS: u8 =
+    HAS_DEFAULT_CONTENT | HAS_NAMED_SLOT | HAS_DEFAULT_SLOT_LET | HAS_DIRECT_SNIPPET;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ComponentSlotFacts {
+    bits: u8,
+    #[cfg(test)]
+    nodes_visited: usize,
+}
+
+impl ComponentSlotFacts {
+    pub(crate) fn collect(fragment: &Fragment) -> Self {
+        let mut facts = Self::default();
+        facts.collect_direct(fragment);
+        facts
+    }
+
+    #[inline]
+    pub(crate) fn has_default_content(self) -> bool {
+        self.bits & HAS_DEFAULT_CONTENT != 0
+    }
+
+    #[inline]
+    pub(crate) fn has_named_slot(self) -> bool {
+        self.bits & HAS_NAMED_SLOT != 0
+    }
+
+    #[inline]
+    pub(crate) fn has_default_slot_let(self) -> bool {
+        self.bits & HAS_DEFAULT_SLOT_LET != 0
+    }
+
+    #[inline]
+    pub(crate) fn has_direct_snippet(self) -> bool {
+        self.bits & HAS_DIRECT_SNIPPET != 0
+    }
+
+    fn collect_direct(&mut self, fragment: &Fragment) {
+        for node in &fragment.nodes {
+            self.record_visit();
+
+            if matches!(node, TemplateNode::SnippetBlock(_)) {
+                self.bits |= HAS_DIRECT_SNIPPET;
+            }
+
+            let (attributes, filters_default_content, can_be_named, can_have_default_let) =
+                match node {
+                    TemplateNode::RegularElement(el) => (Some(&el.attributes), true, true, true),
+                    TemplateNode::Component(el) => (Some(&el.attributes), true, true, false),
+                    TemplateNode::SvelteFragment(el) => (Some(&el.attributes), true, true, true),
+                    TemplateNode::SvelteElement(el) => (Some(&el.attributes), true, true, true),
+                    TemplateNode::SlotElement(el) => (Some(&el.attributes), false, true, false),
+                    TemplateNode::SvelteSelf(el) => (Some(&el.attributes), true, false, false),
+                    TemplateNode::SvelteComponent(el) => (Some(&el.attributes), true, false, false),
+                    _ => (None, false, false, false),
+                };
+            let attr_facts = attributes.map_or_else(SlotAttributeFacts::default, |attributes| {
+                collect_slot_attribute_facts(attributes)
+            });
+
+            if can_be_named && attr_facts.has_named_slot {
+                self.bits |= HAS_NAMED_SLOT;
+            }
+            if can_have_default_let && attr_facts.has_let {
+                self.bits |= HAS_DEFAULT_SLOT_LET;
+            }
+
+            let has_default_content = match node {
+                TemplateNode::Text(text) => text.data.chars().any(|c| !c.is_whitespace()),
+                TemplateNode::SnippetBlock(_)
+                | TemplateNode::Comment(_)
+                | TemplateNode::SlotElement(_) => false,
+                _ if filters_default_content && attr_facts.has_non_default_slot => false,
+                _ => true,
+            };
+            if has_default_content {
+                self.bits |= HAS_DEFAULT_CONTENT;
+            }
+
+            if self.bits & HAS_NAMED_SLOT == 0 {
+                self.collect_named_slots_in_control_flow(node);
+            }
+            if self.bits == ALL_SLOT_FACTS {
+                return;
+            }
+        }
+    }
+
+    fn collect_named_slots(&mut self, fragment: &Fragment) {
+        for node in &fragment.nodes {
+            self.record_visit();
+            let attributes = match node {
+                TemplateNode::RegularElement(el) => Some(&el.attributes),
+                TemplateNode::Component(el) => Some(&el.attributes),
+                TemplateNode::SvelteFragment(el) => Some(&el.attributes),
+                TemplateNode::SlotElement(el) => Some(&el.attributes),
+                TemplateNode::SvelteElement(el) => Some(&el.attributes),
+                _ => None,
+            };
+            if attributes.is_some_and(|attributes| has_named_slot_attr(attributes)) {
+                self.bits |= HAS_NAMED_SLOT;
+                return;
+            }
+            self.collect_named_slots_in_control_flow(node);
+            if self.bits & HAS_NAMED_SLOT != 0 {
+                return;
+            }
+        }
+    }
+
+    fn collect_named_slots_in_control_flow(&mut self, node: &TemplateNode) {
+        match node {
+            TemplateNode::IfBlock(block) => {
+                self.collect_named_slots(&block.consequent);
+                if self.bits & HAS_NAMED_SLOT == 0
+                    && let Some(alternate) = &block.alternate
+                {
+                    self.collect_named_slots(alternate);
+                }
+            }
+            TemplateNode::EachBlock(block) => {
+                self.collect_named_slots(&block.body);
+                if self.bits & HAS_NAMED_SLOT == 0
+                    && let Some(fallback) = &block.fallback
+                {
+                    self.collect_named_slots(fallback);
+                }
+            }
+            TemplateNode::AwaitBlock(block) => {
+                if let Some(pending) = &block.pending {
+                    self.collect_named_slots(pending);
+                }
+                if self.bits & HAS_NAMED_SLOT == 0
+                    && let Some(then) = &block.then
+                {
+                    self.collect_named_slots(then);
+                }
+                if self.bits & HAS_NAMED_SLOT == 0
+                    && let Some(catch) = &block.catch
+                {
+                    self.collect_named_slots(catch);
+                }
+            }
+            TemplateNode::KeyBlock(block) => self.collect_named_slots(&block.fragment),
+            _ => {}
+        }
+    }
+
+    #[inline]
+    fn record_visit(&mut self) {
+        #[cfg(test)]
+        {
+            self.nodes_visited += 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct SlotAttributeFacts {
+    has_named_slot: bool,
+    has_non_default_slot: bool,
+    has_let: bool,
+}
+
+fn collect_slot_attribute_facts(attributes: &[Attribute]) -> SlotAttributeFacts {
+    let mut facts = SlotAttributeFacts::default();
+    let mut found_slot = false;
+    for attribute in attributes {
+        match attribute {
+            Attribute::Attribute(attribute) if attribute.name == "slot" => {
+                if !found_slot {
+                    facts.has_non_default_slot = match &attribute.value {
+                        AttributeValue::Sequence(parts) => !matches!(
+                            parts.first(),
+                            Some(AttributeValuePart::Text(text)) if text.raw == "default"
+                        ),
+                        _ => true,
+                    };
+                    found_slot = true;
+                }
+                facts.has_named_slot |= match &attribute.value {
+                    AttributeValue::Sequence(parts) => parts.iter().any(
+                        |part| matches!(part, AttributeValuePart::Text(text) if !text.raw.is_empty()),
+                    ),
+                    _ => false,
+                };
+            }
+            Attribute::LetDirective(_) => facts.has_let = true,
+            _ => {}
+        }
+        if found_slot && facts.has_named_slot && facts.has_let {
+            break;
+        }
+    }
+    facts
+}
+
+#[inline]
+fn has_named_slot_attr(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(
+            attribute,
+            Attribute::Attribute(attribute)
+                if attribute.name == "slot"
+                    && matches!(
+                        &attribute.value,
+                        AttributeValue::Sequence(parts)
+                            if parts.iter().any(|part| matches!(
+                                part,
+                                AttributeValuePart::Text(text) if !text.raw.is_empty()
+                            ))
+                    )
+        )
+    })
+}
+
 /// Check if a component's fragment has meaningful children for slot purposes.
 ///
 /// Returns true if the component has any non-text children, or text children
@@ -97,123 +317,6 @@ pub(crate) fn has_component_slot_children(fragment: &Fragment, source: &str) -> 
             TemplateNode::SvelteComponent(sc)
                 if has_non_default_slot_attr(&sc.attributes, source) => {}
             _ => return true,
-        }
-    }
-    false
-}
-
-/// Check if any *direct* child carries `let:` directives that destructure from
-/// THIS component's `$$slot_def` — i.e. a default-slot let receiver that is an
-/// *element* such as `<svelte:fragment let:a={x}>`, `<div let:foo>` or
-/// `<svelte:element let:foo>`. Such an element child references the parent
-/// component (`Element.addSlotLet` → `this.parent.name`), so the parent needs
-/// the `const $$_inst = new …` form.
-///
-/// Component-kind children (`<Child let:foo>`, `<svelte:component let:foo>`,
-/// `<svelte:self let:foo>`) are excluded: their `let:` belongs to their OWN
-/// slot (`InlineComponent.addSlotLet` → `this.name`), so they do NOT force the
-/// parent's instance const. `let:` directives are only meaningful on direct
-/// children of a component, so this does not recurse.
-pub(crate) fn has_default_slot_let_children(fragment: &Fragment, _source: &str) -> bool {
-    fragment.nodes.iter().any(|node| {
-        // Only NON-component default-slot children forward their `let:` bindings
-        // to the enclosing component's `$$slot_def.default`. A component child
-        // (`<Child let:x>` / `<svelte:component let:x>` / `<svelte:self let:x>`)
-        // binds `let:x` from its OWN `$$slot_def.default` — its own
-        // `handle_component` emits that destructure — so it must not mark the
-        // parent as needing an instance var. Mirrors official svelte2tsx, where
-        // only `Element`/`SlotElement`/`InlineComponent` *slot content* (not the
-        // inline component's own lets) routes through the parent slot.
-        let attrs = match node {
-            TemplateNode::RegularElement(el) => &el.attributes,
-            TemplateNode::SvelteFragment(f) => &f.attributes,
-            TemplateNode::SvelteElement(e) => &e.attributes,
-            _ => return false,
-        };
-        !get_let_directives(attrs).is_empty()
-    })
-}
-
-/// Check if any children have `slot="name"` attributes (named slots).
-pub(crate) fn has_named_slot_children(fragment: &Fragment, source: &str) -> bool {
-    for node in &fragment.nodes {
-        match node {
-            TemplateNode::RegularElement(el)
-                if get_slot_attr_value(&el.attributes, source).is_some() =>
-            {
-                return true;
-            }
-            TemplateNode::Component(comp)
-                if get_slot_attr_value(&comp.attributes, source).is_some() =>
-            {
-                return true;
-            }
-            // `<svelte:fragment slot="name" let:foo>` is the Svelte 4 idiom
-            // for distributing children into a named slot — it shows up here
-            // as `SvelteFragment`. Treat it like the others.
-            TemplateNode::SvelteFragment(el)
-                if get_slot_attr_value(&el.attributes, source).is_some() =>
-            {
-                return true;
-            }
-            // `<slot slot="name">` forwards a `<slot>` into the parent
-            // component's named slot.
-            TemplateNode::SlotElement(el)
-                if get_slot_attr_value(&el.attributes, source).is_some() =>
-            {
-                return true;
-            }
-            // `<svelte:element this={tag} slot="name">` targets a named slot.
-            TemplateNode::SvelteElement(el)
-                if get_slot_attr_value(&el.attributes, source).is_some() =>
-            {
-                return true;
-            }
-            // Control-flow blocks are transparent to slot distribution: a
-            // `<div slot="foo">` nested inside `{#if}` / `{#each}` / `{#await}`
-            // / `{#key}` still targets the component's named slot (official
-            // svelte2tsx keeps `parent` pointing at the enclosing component
-            // across blocks). Recurse into their fragments — but NOT into
-            // nested elements/components (which own their own slot scope) or
-            // `{#snippet}` bodies (snippet props, not slots).
-            TemplateNode::IfBlock(block)
-                if has_named_slot_children(&block.consequent, source)
-                    || block
-                        .alternate
-                        .as_ref()
-                        .is_some_and(|alt| has_named_slot_children(alt, source)) =>
-            {
-                return true;
-            }
-            TemplateNode::EachBlock(block)
-                if has_named_slot_children(&block.body, source)
-                    || block
-                        .fallback
-                        .as_ref()
-                        .is_some_and(|fb| has_named_slot_children(fb, source)) =>
-            {
-                return true;
-            }
-            TemplateNode::AwaitBlock(block)
-                if block
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| has_named_slot_children(p, source))
-                    || block
-                        .then
-                        .as_ref()
-                        .is_some_and(|t| has_named_slot_children(t, source))
-                    || block
-                        .catch
-                        .as_ref()
-                        .is_some_and(|c| has_named_slot_children(c, source)) =>
-            {
-                return true;
-            }
-            TemplateNode::KeyBlock(block) if has_named_slot_children(&block.fragment, source) => {
-                return true;
-            }
-            _ => {}
         }
     }
     false
@@ -647,5 +750,53 @@ pub(crate) fn build_named_slot_element_attrs(attributes: &[Attribute], source: &
         result
     } else {
         format!(" {}", result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oxc_allocator::Allocator;
+
+    use crate::ast::template::TemplateNode;
+    use crate::compiler::phases::phase1_parse::{ParseOptions, parse};
+
+    use super::ComponentSlotFacts;
+
+    fn first_component(source: &str) -> crate::ast::template::Component<'_> {
+        let root = parse(source, &Allocator::default(), ParseOptions::default()).expect("parse");
+        let TemplateNode::Component(component) = root
+            .fragment
+            .nodes
+            .into_iter()
+            .next()
+            .expect("root component")
+        else {
+            panic!("expected component");
+        };
+        *component
+    }
+
+    #[test]
+    fn component_slot_facts_cover_direct_and_transparent_children() {
+        let source = "<C>{#if ok}<div slot=\"named\" let:item />{/if}{#snippet row()}x{/snippet}<span let:value>text</span></C>";
+        let component = first_component(source);
+        let facts = ComponentSlotFacts::collect(&component.fragment);
+
+        assert!(facts.has_default_content());
+        assert!(facts.has_named_slot());
+        assert!(facts.has_default_slot_let());
+        assert!(facts.has_direct_snippet());
+    }
+
+    #[test]
+    fn component_slot_facts_visit_each_direct_child_once() {
+        const CHILDREN: usize = 1_024;
+        let source = format!("<C>{}</C>", "<!--ignored-->".repeat(CHILDREN));
+        let component = first_component(&source);
+        let facts = ComponentSlotFacts::collect(&component.fragment);
+
+        assert_eq!(component.fragment.nodes.len(), CHILDREN);
+        assert_eq!(facts.nodes_visited, CHILDREN);
+        assert_eq!(facts.bits, 0);
     }
 }
