@@ -168,7 +168,7 @@ pub fn process_instance_script(
                                 }
                             });
                             possible_exports.insert(
-                                name,
+                                name.to_owned(),
                                 PossibleExport {
                                     is_let,
                                     has_init: declarator.init.is_some(),
@@ -305,7 +305,7 @@ pub fn process_instance_script(
                                                 }
                                             });
                                         possible_exports.insert(
-                                            name,
+                                            name.to_owned(),
                                             PossibleExport {
                                                 is_let,
                                                 has_init: declarator.init.is_some(),
@@ -540,7 +540,7 @@ pub fn process_instance_script(
                             // Match through aliases: `export { v1 as a1 }` keys
                             // the entry by `a1`, so `has(v1)` is false — check
                             // the local name too.
-                            exported_names.has(&name) || exported_names.has_local(&name)
+                            exported_names.has(name) || exported_names.has_local(name)
                         } else {
                             false
                         }
@@ -567,7 +567,7 @@ pub fn process_instance_script(
                             let Some(name) = binding_pattern_simple_name(&d.id) else {
                                 continue;
                             };
-                            if exported_names.has(&name) || exported_names.has_local(&name) {
+                            if exported_names.has(name) || exported_names.has_local(name) {
                                 continue;
                             }
                             // Match handleTypeAssertion's widening condition:
