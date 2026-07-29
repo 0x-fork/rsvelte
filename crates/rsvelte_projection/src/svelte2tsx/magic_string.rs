@@ -1141,12 +1141,22 @@ impl<'source> MagicString<'source> {
     }
 
     /// Generate code and both mapping directions in one chunk traversal.
+    #[allow(dead_code, reason = "preserved as the owned bundle API")]
     pub fn generate_bundle(&self, options: GenerateMapOptions) -> GeneratedBundle {
         let GenerateMapOptions {
             file,
             source,
             include_content,
         } = options;
+        self.generate_bundle_with_metadata(file.as_deref(), source.as_deref(), include_content)
+    }
+
+    pub(super) fn generate_bundle_with_metadata(
+        &self,
+        file: Option<&str>,
+        source: Option<&str>,
+        include_content: bool,
+    ) -> GeneratedBundle {
         let source = source.unwrap_or_default();
         let estimate = self.estimate_outputs();
         let code_capacity = self
@@ -1155,8 +1165,7 @@ impl<'source> MagicString<'source> {
             .saturating_add(self.intro.len())
             .saturating_add(self.outro.len());
         let metadata_bytes = file
-            .as_ref()
-            .map_or(0, String::len)
+            .map_or(0, str::len)
             .saturating_add(source.len())
             .saturating_add(usize::from(include_content).saturating_mul(self.original.len()));
         let mut source_map = String::with_capacity(
@@ -1168,8 +1177,8 @@ impl<'source> MagicString<'source> {
         let initial_source_map_capacity = source_map.capacity();
         push_source_map_json_prefix(
             &mut source_map,
-            file.as_deref(),
-            &source,
+            file,
+            source,
             include_content.then_some(self.original),
         );
 
@@ -1835,6 +1844,32 @@ mod tests {
         assert_eq!(map.sources, vec!["input.js".to_string()]);
         assert_eq!(map.sources_content, vec!["hello world".to_string()]);
         assert!(!map.mappings.is_empty());
+    }
+
+    #[test]
+    fn borrowed_bundle_metadata_matches_owned_options_and_outlives_inputs() {
+        let mut value = MagicString::new("hello world");
+        value.overwrite(6, 11, "earth");
+
+        let borrowed = {
+            let file = String::from("out\"\\雪\n.tsx");
+            let source = String::from("src\"\\é.svelte");
+            value.generate_bundle_with_metadata(Some(&file), Some(&source), true)
+        };
+        let owned = value.generate_bundle(GenerateMapOptions {
+            file: Some(String::from("out\"\\雪\n.tsx")),
+            source: Some(String::from("src\"\\é.svelte")),
+            include_content: true,
+        });
+
+        assert_eq!(borrowed, owned);
+        assert_eq!(borrowed.code, "hello earth");
+        assert!(borrowed.source_map.contains(r#""file":"out\"\\雪\n.tsx""#));
+        assert!(
+            borrowed
+                .source_map
+                .contains(r#""sources":["src\"\\é.svelte"]"#)
+        );
     }
 
     #[test]

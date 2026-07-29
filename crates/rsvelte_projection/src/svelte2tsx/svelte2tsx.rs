@@ -9,7 +9,7 @@ use sourcemap::SourceMapBuilder;
 use super::add_component_export::{ComponentExportParams, add_component_export};
 use super::create_render_function::{build_dollar_declarations, create_render_function};
 use super::helpers::rewrite_external_imports::{TextEdit, rewrite_external_specifiers_in_text};
-use super::magic_string::{GenerateMapOptions, MagicString};
+use super::magic_string::MagicString;
 use super::nodes::component_name::derive_component_name;
 use super::nodes::generics::{extract_generics_from_script_tag, split_generic_param_names};
 use super::nodes::runes_detection::detect_runes_mode;
@@ -782,11 +782,7 @@ pub fn svelte2tsx(
 
     str.append_str_owned(closing);
 
-    let generated = str.generate_bundle(GenerateMapOptions {
-        file: None,
-        source: Some(options.filename.clone()),
-        include_content: false,
-    });
+    let generated = str.generate_bundle_with_metadata(None, Some(options.filename.as_str()), false);
     let code = generated.code;
     let source_map = generated.source_map;
     let forward_map = generated.forward_segments;
