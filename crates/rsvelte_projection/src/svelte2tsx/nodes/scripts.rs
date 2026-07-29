@@ -44,11 +44,6 @@ pub(crate) fn find_instance_imports(
     script: &crate::ast::template::Script,
     source: &str,
 ) -> Vec<(u32, u32, u32)> {
-    use oxc_allocator::Allocator;
-    use oxc_ast::ast as oxc;
-    use oxc_parser::Parser as OxcParser;
-    use oxc_span::SourceType;
-
     let content_start = script.content_offset as usize;
     let script_source = slice_src(source, script.start as usize, script.end as usize);
     let close_tag_offset = script_source
@@ -58,11 +53,26 @@ pub(crate) fn find_instance_imports(
     let content_end = script.start as usize + close_tag_offset;
     let raw_content = &source[content_start..content_end];
 
+    find_imports_in_content(raw_content)
+}
+
+fn find_imports_in_content(raw_content: &str) -> Vec<(u32, u32, u32)> {
+    find_imports_in_content_impl::<false>(raw_content).0
+}
+
+fn find_imports_in_content_impl<const COUNT_INSPECTIONS: bool>(
+    raw_content: &str,
+) -> (Vec<(u32, u32, u32)>, usize) {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast as oxc;
+    use oxc_parser::Parser as OxcParser;
+    use oxc_span::SourceType;
+
     // Fast path: an `import` substring is required for any import
     // declaration to exist. Skip the OXC parse entirely for the majority
     // of scripts that have no imports.
     if !contains_word(raw_content.as_bytes(), b"import") {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let allocator = Allocator::default();
@@ -74,21 +84,17 @@ pub(crate) fn find_instance_imports(
     let parser = OxcParser::new(&allocator, raw_content, source_type);
     let result = parser.parse();
 
-    // Comment spans (start, end) discovered by the parser, sorted by end. Used
-    // to compute each import's leading-comment region the way TS
+    // Parser comments are source-ordered. Keep a monotonic cursor over them to
+    // compute each import's leading-comment region the way TS
     // `getLeadingCommentRanges(node.getFullText())` does — including a TRAILING
     // line comment on the PREVIOUS statement's line (it is leading trivia of the
     // following import and moves up with it). The parser already tokenised
     // strings/regex correctly, so `// …` inside a string is never misread.
-    let comment_spans: Vec<(u32, u32)> = result
-        .program
-        .comments
-        .iter()
-        .map(|c| (c.span.start, c.span.end))
-        .collect();
-
     let mut imports = Vec::new();
     let bytes = raw_content.as_bytes();
+    let comments = &result.program.comments;
+    let mut comment_cursor = 0;
+    let mut comment_inspections = 0;
     for stmt in result.program.body.iter() {
         if let oxc::Statement::ImportDeclaration(import) = stmt {
             // All import declarations (including side-effect imports like `import ''`)
@@ -96,39 +102,66 @@ pub(crate) fn find_instance_imports(
             // valid `import` statements with a source clause.
             let start = import.span.start;
             let end = import.span.end;
+            while comment_cursor < comments.len() && comments[comment_cursor].span.end <= start {
+                if COUNT_INSPECTIONS {
+                    comment_inspections += 1;
+                }
+                comment_cursor += 1;
+            }
 
             // Walk backwards over leading trivia, pulling in every comment whose
             // end is reachable from the current start via whitespace only, and
             // stopping at the first non-comment code (the previous token). This
             // mirrors `getLeadingCommentRanges` and pulls a trailing line comment
             // (`import …; // TODO`) into the FOLLOWING import's leading region.
-            let new_start = scan_back_leading_comments(bytes, start as usize, &comment_spans);
+            let new_start = scan_back_leading_comments::<COUNT_INSPECTIONS>(
+                bytes,
+                start as usize,
+                comments,
+                comment_cursor,
+                &mut comment_inspections,
+            );
 
             imports.push((new_start, start, end));
         }
     }
-    imports.sort_by_key(|&(s, _, _)| s);
-    imports
+    (imports, comment_inspections)
 }
 
 /// Walk backwards from `pos` over leading trivia (whitespace + comments),
-/// returning the start of the earliest comment reachable via whitespace-only
-/// gaps. Stops at the first non-comment code. `comment_spans` are parser-
-/// discovered `(start, end)` pairs (so strings/regex never produce false `//`).
-fn scan_back_leading_comments(bytes: &[u8], pos: usize, comment_spans: &[(u32, u32)]) -> u32 {
+/// returning the start of the earliest reachable parser-discovered comment.
+fn scan_back_leading_comments<const COUNT_INSPECTIONS: bool>(
+    bytes: &[u8],
+    pos: usize,
+    comments: &[oxc_ast::ast::Comment],
+    comment_cursor: usize,
+    comment_inspections: &mut usize,
+) -> u32 {
     let mut cstart = pos as u32;
+    let mut comment_index = comment_cursor;
     loop {
         // Skip whitespace backward.
         let mut p = cstart as usize;
         while p > 0 && matches!(bytes[p - 1], b' ' | b'\t' | b'\n' | b'\r') {
             p -= 1;
         }
-        // A comment ending exactly at `p` is leading trivia of this import.
-        if let Some(&(cs, _)) = comment_spans.iter().find(|&&(_, ce)| ce as usize == p) {
+
+        while comment_index > 0 && comments[comment_index - 1].span.end as usize > p {
+            if COUNT_INSPECTIONS {
+                *comment_inspections += 1;
+            }
+            comment_index -= 1;
+        }
+        if comment_index > 0 && COUNT_INSPECTIONS {
+            *comment_inspections += 1;
+        }
+        if comment_index > 0 && comments[comment_index - 1].span.end as usize == p {
+            let cs = comments[comment_index - 1].span.start;
             if cs >= cstart {
                 break;
             }
             cstart = cs;
+            comment_index -= 1;
         } else {
             break;
         }
@@ -304,5 +337,69 @@ pub(crate) fn expr_contains_await_deep(expr: &oxc_ast::ast::Expression) -> bool 
 
         // Everything else (literals, identifiers, `this`, …) cannot contain await.
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write as _;
+
+    #[test]
+    fn import_ranges_preserve_order_and_attached_trivia() {
+        let source = concat!(
+            "const text = \"import /* not trivia */\";\n",
+            "// first\n",
+            "/* second */\n",
+            "import type { Foo } from './foo'; // belongs to Bar\n",
+            "import Bar, { type Baz } from './bar'\n",
+        );
+
+        let imports = find_imports_in_content(source);
+        assert_eq!(imports.len(), 2);
+        assert_eq!(
+            &source[imports[0].0 as usize..imports[0].1 as usize],
+            "// first\n/* second */\n"
+        );
+        assert_eq!(
+            &source[imports[0].1 as usize..imports[0].2 as usize],
+            "import type { Foo } from './foo';"
+        );
+        assert_eq!(
+            &source[imports[1].0 as usize..imports[1].1 as usize],
+            "// belongs to Bar\n"
+        );
+        assert_eq!(
+            &source[imports[1].1 as usize..imports[1].2 as usize],
+            "import Bar, { type Baz } from './bar'"
+        );
+        assert!(imports[0].0 < imports[1].0);
+    }
+
+    #[test]
+    fn comment_cursor_visits_scale_linearly() {
+        const IMPORTS: usize = 2_048;
+        let mut source = String::with_capacity(IMPORTS * 48);
+        for index in 0..IMPORTS {
+            writeln!(source, "// import {index}").unwrap();
+            writeln!(source, "import v{index} from './m{index}';").unwrap();
+        }
+
+        let (ranges, comment_inspections) = find_imports_in_content_impl::<true>(source.as_str());
+        assert_eq!(ranges.len(), IMPORTS);
+        assert!(
+            comment_inspections <= IMPORTS * 4,
+            "{comment_inspections} comment inspections for {IMPORTS} imports"
+        );
+        for (index, &(comments_start, import_start, import_end)) in ranges.iter().enumerate() {
+            assert_eq!(
+                &source[comments_start as usize..import_start as usize],
+                format!("// import {index}\n")
+            );
+            assert_eq!(
+                &source[import_start as usize..import_end as usize],
+                format!("import v{index} from './m{index}';")
+            );
+        }
     }
 }

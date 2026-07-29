@@ -443,7 +443,10 @@ fn collect_lifted_imports(
     content_start: u32,
     str: &mut MagicString,
 ) -> String {
-    let mut import_text = String::new();
+    let capacity = imports.iter().fold(imports.len(), |capacity, range| {
+        capacity.saturating_add((range.2 - range.0) as usize)
+    });
+    let mut import_text = String::with_capacity(capacity);
     for (i, &(comments_start, import_start_rel, import_end)) in imports.iter().enumerate() {
         let abs_comments_start = comments_start + content_start;
         let abs_import_start = import_start_rel + content_start;
@@ -464,44 +467,6 @@ fn collect_lifted_imports(
         );
         let import_raw = slice_src(source, abs_import_start as usize, abs_end as usize);
 
-        // Collect leading comment lines while preserving block-comment
-        // interior indentation verbatim.  The JS reference (`moveNode`)
-        // uses `str.move()` which copies source text byte-for-byte, so
-        // `/* … */` inner lines must retain their original leading spaces.
-        // Only the opener line (`/*...`) is fully trimmed (leading indent
-        // is dropped; trailing spaces after `/*` are stripped); all other
-        // block-comment lines are preserved as-is.  Lines that are purely
-        // whitespace outside a block comment are filtered out.
-        let comment_lines: Vec<String> = {
-            let mut lines: Vec<String> = Vec::new();
-            let mut in_block = false;
-            for line in comments_raw.lines() {
-                if in_block {
-                    // Preserve interior indentation verbatim.
-                    if line.contains("*/") {
-                        in_block = false;
-                    }
-                    lines.push(line.to_string());
-                } else {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue; // skip whitespace-only lines
-                    }
-                    if trimmed.starts_with("/*") {
-                        // Block-comment opener: trim fully so the
-                        // leading indent and any trailing spaces after
-                        // `/*` are dropped (e.g. `  /*  ` → `/*`).
-                        in_block = !trimmed.contains("*/");
-                        lines.push(trimmed.to_string());
-                    } else {
-                        // Line comment (`//`) or other: fully trim.
-                        lines.push(trimmed.to_string());
-                    }
-                }
-            }
-            lines
-        };
-
         // Was the last comment on the same line as the `import`
         // keyword? True when `comments_raw`'s final line is not
         // whitespace-only — e.g. `/*hi*/import X` keeps the comment
@@ -512,51 +477,73 @@ fn collect_lifted_imports(
                 .last()
                 .is_some_and(|l| !l.trim().is_empty());
 
-        let import_text_clean: String = import_raw
-            .lines()
-            .map(|line| line.trim_start())
-            .collect::<Vec<_>>()
-            .join("\n");
-
         // Preserve gap when this import is part of a separate group
         // (a blank line in the source between this import and the
         // previous one).
         if i > 0 {
             let prev_end = imports[i - 1].2 + content_start;
             let between = slice_src(source, prev_end as usize, abs_comments_start as usize);
-            let newline_count = between.chars().filter(|&c| c == '\n').count();
-            if newline_count >= 2 {
+            if between.bytes().filter(|&b| b == b'\n').take(2).count() == 2 {
                 import_text.push('\n');
             }
         }
 
-        let first_comment_is_block = comment_lines.first().is_some_and(|c| c.starts_with("/*"));
-        let needs_leading_newline = i == 0 && (comment_lines.is_empty() || first_comment_is_block);
-
-        if needs_leading_newline {
+        let mut in_block = false;
+        let mut emitted_comment = false;
+        let mut first_comment_is_block = false;
+        for line in comments_raw.lines() {
+            let line = if in_block {
+                if line.contains("*/") {
+                    in_block = false;
+                }
+                line
+            } else {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.starts_with("/*") {
+                    in_block = !trimmed.contains("*/");
+                }
+                trimmed
+            };
+            if !emitted_comment {
+                first_comment_is_block = line.starts_with("/*");
+                if i == 0 && first_comment_is_block {
+                    import_text.push('\n');
+                }
+                emitted_comment = true;
+            }
+            import_text.push_str(line);
             import_text.push('\n');
         }
-        for (idx, line) in comment_lines.iter().enumerate() {
-            import_text.push_str(line);
-            let is_last = idx + 1 == comment_lines.len();
-            if !(is_last && last_comment_inline) {
-                import_text.push('\n');
-            }
+        if emitted_comment && last_comment_inline {
+            import_text.pop();
+        } else if i == 0 && !emitted_comment {
+            import_text.push('\n');
         }
-        if i == 0 && !first_comment_is_block && !comment_lines.is_empty() {
+        if i == 0 && !first_comment_is_block && emitted_comment {
             // `appendRight(firstImport.getStart(), '\n')` —
             // separating the trailing leading-line-comment from the
             // import keyword with an explicit blank line.
             import_text.push('\n');
         }
 
-        import_text.push_str(&import_text_clean);
+        let import_text_start = import_text.len();
+        for (line_index, line) in import_raw.lines().enumerate() {
+            if line_index > 0 {
+                import_text.push('\n');
+            }
+            import_text.push_str(line.trim_start());
+        }
+        let import_ends_with_semicolon =
+            import_text.len() > import_text_start && import_text.as_bytes().last() == Some(&b';');
 
         // Add semicolon to the last import if it doesn't have one
         if i == imports.len() - 1 {
             // `.last()` avoids a `len() - 1` underflow when the cleaned
             // import text is empty (zero-length span edge case).
-            if import_text_clean.as_bytes().last() != Some(&b';') {
+            if !import_ends_with_semicolon {
                 import_text.push_str(";\n");
             } else {
                 import_text.push('\n');
@@ -572,4 +559,72 @@ fn collect_lifted_imports(
     }
 
     import_text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(source: &str, text: &str) -> (u32, u32) {
+        let start = source.find(text).unwrap() as u32;
+        (start, start + text.len() as u32)
+    }
+
+    #[test]
+    fn lifted_imports_keep_comment_trivia_and_group_order() {
+        let source = concat!(
+            "  // line\n",
+            "  /* block\n",
+            "      kept\n",
+            "   */\n",
+            "  import type { A } from 'a';\n",
+            "\n",
+            "\t/*inline*/ import B from 'b'\n",
+        );
+        let (first_start, first_end) = range(source, "import type { A } from 'a';");
+        let (second_start, second_end) = range(source, "import B from 'b'");
+        let imports = [
+            (
+                source.find("// line").unwrap() as u32,
+                first_start,
+                first_end,
+            ),
+            (
+                source.find("/*inline*/").unwrap() as u32,
+                second_start,
+                second_end,
+            ),
+        ];
+        let mut magic = MagicString::new(source);
+
+        let lifted = collect_lifted_imports(&imports, source, 0, &mut magic);
+
+        assert_eq!(
+            lifted,
+            concat!(
+                "// line\n",
+                "/* block\n",
+                "      kept\n",
+                "   */\n",
+                "\n",
+                "import type { A } from 'a';\n",
+                "\n",
+                "/*inline*/import B from 'b';\n",
+            )
+        );
+        assert_eq!(magic.to_string(), "  \n\n\t\n");
+    }
+
+    #[test]
+    fn lifted_multiline_import_is_trimmed_without_temporary_lines() {
+        let source = " import {\n    A,\n      type B,\n  } from 'x'\n";
+        let import = "import {\n    A,\n      type B,\n  } from 'x'";
+        let (start, end) = range(source, import);
+        let mut magic = MagicString::new(source);
+
+        let lifted = collect_lifted_imports(&[(start, start, end)], source, 0, &mut magic);
+
+        assert_eq!(lifted, "\nimport {\nA,\ntype B,\n} from 'x';\n");
+        assert_eq!(magic.to_string(), " \n");
+    }
 }
