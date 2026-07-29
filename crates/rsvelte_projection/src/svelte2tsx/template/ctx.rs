@@ -81,6 +81,7 @@ impl TemplateNodeExt for TemplateNode<'_> {
 /// Uses per-name counters so each unique component/element name gets its own counter.
 pub(super) struct Counter {
     pub(super) counters: std::collections::HashMap<String, u32>,
+    pub(super) element_opener_comments: ElementOpenerCommentIndex,
     /// When set (to a component instance var), a `slot="name"` element/component
     /// encountered while processing that component's children — at any depth
     /// inside `{#each}`/`{#if}`/etc. control-flow blocks — is lowered to the
@@ -106,9 +107,10 @@ pub(super) struct Counter {
 }
 
 impl Counter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(element_opener_comments: impl IntoIterator<Item = (u32, u32)>) -> Self {
         Self {
             counters: std::collections::HashMap::new(),
+            element_opener_comments: ElementOpenerCommentIndex::new(element_opener_comments),
             slot_inst: None,
             named_slot_component_close: false,
             suppress_component_lets: false,
@@ -129,10 +131,13 @@ impl Counter {
 #[derive(Default)]
 pub(super) struct ElementOpenerCommentIndex {
     ranges: Vec<(u32, u32)>,
+    #[cfg(test)]
+    range_visits: std::cell::Cell<usize>,
 }
 
 impl ElementOpenerCommentIndex {
-    fn new(mut ranges: Vec<(u32, u32)>) -> Self {
+    pub(super) fn new(ranges: impl IntoIterator<Item = (u32, u32)>) -> Self {
+        let mut ranges: Vec<_> = ranges.into_iter().collect();
         if !ranges.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
             ranges.sort_unstable_by_key(|&(start, _)| start);
         }
@@ -140,7 +145,11 @@ impl ElementOpenerCommentIndex {
             ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0),
             "element-opener comment ranges must not overlap"
         );
-        Self { ranges }
+        Self {
+            ranges,
+            #[cfg(test)]
+            range_visits: std::cell::Cell::new(0),
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -173,48 +182,19 @@ impl ElementOpenerCommentIndex {
         }
         &self.ranges[from..to]
     }
-}
 
-thread_local! {
-    /// Source ranges of comments found inside element opening tags (between
-    /// attributes), set per-compile so attribute emission can re-attach them as
-    /// leading comments. Mirrors official `attr.leadingComments`.
-    static ELEMENT_OPENER_COMMENTS: std::cell::RefCell<ElementOpenerCommentIndex> =
-        std::cell::RefCell::new(ElementOpenerCommentIndex::default());
     #[cfg(test)]
-    static ELEMENT_OPENER_COMMENT_RANGE_VISITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
+    pub(super) fn record_range_visits(&self, count: usize) {
+        self.range_visits.set(self.range_visits.get() + count);
+    }
 
-/// Set the element-opener comment ranges for the current compile (read-only).
-pub(crate) fn set_element_opener_comments(ranges: Vec<(u32, u32)>) {
-    ELEMENT_OPENER_COMMENTS.with(|comments| {
-        *comments.borrow_mut() = ElementOpenerCommentIndex::new(ranges);
-    });
-}
+    #[cfg(test)]
+    pub(super) fn reset_range_visits(&self) {
+        self.range_visits.set(0);
+    }
 
-/// Clear the element-opener comment ranges after a compile.
-pub(crate) fn clear_element_opener_comments() {
-    ELEMENT_OPENER_COMMENTS.with(|comments| comments.borrow_mut().ranges.clear());
-}
-
-pub(super) fn with_element_opener_comments<T>(
-    f: impl FnOnce(&ElementOpenerCommentIndex) -> T,
-) -> T {
-    ELEMENT_OPENER_COMMENTS.with(|comments| f(&comments.borrow()))
-}
-
-#[cfg(test)]
-pub(super) fn record_element_opener_comment_range_visits(count: usize) {
-    ELEMENT_OPENER_COMMENT_RANGE_VISITS.with(|visits| visits.set(visits.get() + count));
-}
-
-#[cfg(test)]
-pub(super) fn reset_element_opener_comment_range_visits() {
-    ELEMENT_OPENER_COMMENT_RANGE_VISITS.with(|visits| visits.set(0));
-}
-
-#[cfg(test)]
-pub(super) fn element_opener_comment_range_visits() -> usize {
-    ELEMENT_OPENER_COMMENT_RANGE_VISITS.with(std::cell::Cell::get)
+    #[cfg(test)]
+    pub(super) fn range_visits(&self) -> usize {
+        self.range_visits.get()
+    }
 }
