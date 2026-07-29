@@ -188,7 +188,11 @@ pub(crate) fn handle_component(
             let total_spaces = extra_spaces + 1;
             segs_trim_start(&mut attr_segs);
             let mut padded: Vec<Seg> = Vec::with_capacity(attr_segs.len() + 1);
-            padded.push(Seg::Lit(" ".repeat(total_spaces)));
+            padded.push(Seg::Lit(compact_str::format_compact!(
+                "{:width$}",
+                "",
+                width = total_spaces
+            )));
             padded.extend(attr_segs);
             attr_segs = padded;
         }
@@ -200,12 +204,16 @@ pub(crate) fn handle_component(
     if is_svelte5 && has_children {
         let children_text = "children:() => { return __sveltets_2_any(0); },";
         if segs_is_empty(&attr_segs) {
-            attr_segs = vec![Seg::Lit(children_text.to_string())];
+            attr_segs = vec![Seg::Lit(compact_str::CompactString::const_new(
+                children_text,
+            ))];
         } else if has_lets || children_have_named_slots {
             // Slot let-forwarding owns the leading whitespace already.
             segs_trim_start(&mut attr_segs);
             let mut prefixed: Vec<Seg> = Vec::with_capacity(attr_segs.len() + 1);
-            prefixed.push(Seg::Lit(children_text.to_string()));
+            prefixed.push(Seg::Lit(compact_str::CompactString::const_new(
+                children_text,
+            )));
             prefixed.extend(attr_segs);
             attr_segs = prefixed;
         } else {
@@ -215,13 +223,17 @@ pub(crate) fn handle_component(
             if let Some(Seg::Lit(first)) = attr_segs.first_mut() {
                 let trimmed = first.trim_start_matches(|c: char| c.is_whitespace());
                 leading_ws.push_str(&first[..first.len() - trimmed.len()]);
-                *first = trimmed.to_string();
+                *first = trimmed.into();
                 if first.is_empty() {
                     attr_segs.remove(0);
                 }
             }
             let mut prefixed: Vec<Seg> = Vec::with_capacity(attr_segs.len() + 2);
-            prefixed.push(Seg::Lit(format!("{}{}", leading_ws, children_text)));
+            prefixed.push(Seg::Lit(compact_str::format_compact!(
+                "{}{}",
+                leading_ws,
+                children_text
+            )));
             prefixed.extend(attr_segs);
             attr_segs = prefixed;
         }
@@ -299,19 +311,24 @@ pub(crate) fn handle_component(
             String::new()
         };
         (
-            format!(
+            compact_str::format_compact!(
                 " {{ const {} = __sveltets_2_ensureComponent({}); const {} = new {}({{ target: __sveltets_2_any(), props: {{",
-                ctor_var, comp.name, inst_var, ctor_var,
+                ctor_var,
+                comp.name,
+                inst_var,
+                ctor_var,
             ),
-            format!("}}}});{}{}", component_bind_suffix, on_calls),
+            compact_str::format_compact!("}}}});{}{}", component_bind_suffix, on_calls),
         )
     } else {
         (
-            format!(
+            compact_str::format_compact!(
                 " {{ const {} = __sveltets_2_ensureComponent({}); new {}({{ target: __sveltets_2_any(), props: {{",
-                ctor_var, comp.name, ctor_var,
+                ctor_var,
+                comp.name,
+                ctor_var,
             ),
-            "}});".to_string(),
+            "}});".into(),
         )
     };
     let mut opener_segs: Vec<Seg> = Vec::with_capacity(attr_segs.len() + 2);

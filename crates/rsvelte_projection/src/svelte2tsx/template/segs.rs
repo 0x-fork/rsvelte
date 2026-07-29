@@ -20,15 +20,18 @@
 
 use crate::svelte2tsx::magic_string::MagicString;
 use crate::svelte2tsx::svelte2tsx::slice_src;
+use compact_str::CompactString;
 use std::fmt::{self, Write as _};
 
 /// A piece of the structured bake output. `Lit` is generated text; `Src`
 /// names a source byte range that should be kept as-is.
 #[derive(Debug, Clone)]
 pub(super) enum Seg {
-    Lit(String),
+    Lit(CompactString),
     Src(u32, u32),
 }
+
+const _: () = assert!(std::mem::size_of::<Seg>() <= std::mem::size_of::<String>());
 
 /// Push a literal segment, merging with the previous Lit when adjacent.
 pub(super) fn segs_push_lit(segs: &mut Vec<Seg>, s: &str) {
@@ -38,7 +41,7 @@ pub(super) fn segs_push_lit(segs: &mut Vec<Seg>, s: &str) {
     if let Some(Seg::Lit(last)) = segs.last_mut() {
         last.push_str(s);
     } else {
-        segs.push(Seg::Lit(s.to_string()));
+        segs.push(Seg::Lit(CompactString::new(s)));
     }
 }
 
@@ -47,7 +50,8 @@ pub(super) fn segs_push_fmt(segs: &mut Vec<Seg>, args: fmt::Arguments<'_>) {
     if let Some(Seg::Lit(last)) = segs.last_mut() {
         let _ = last.write_fmt(args);
     } else {
-        let text = fmt::format(args);
+        let mut text = CompactString::new("");
+        let _ = text.write_fmt(args);
         if !text.is_empty() {
             segs.push(Seg::Lit(text));
         }
@@ -98,7 +102,7 @@ pub(super) fn segs_trim_start(segs: &mut Vec<Seg>) {
                     continue;
                 }
                 if trimmed.len() != s.len() {
-                    *s = trimmed.to_string();
+                    *s = trimmed.into();
                 }
                 break;
             }
@@ -127,8 +131,8 @@ pub(super) fn bake_out_of_order_src(segs: Vec<Seg>, source: &str) -> Vec<Seg> {
                 out.push(Seg::Src(s, e));
             }
             Seg::Src(s, e) => {
-                let text = source.get(s as usize..e as usize).unwrap_or("").to_string();
-                out.push(Seg::Lit(text));
+                let text = source.get(s as usize..e as usize).unwrap_or("");
+                out.push(Seg::Lit(CompactString::new(text)));
             }
             lit => out.push(lit),
         }
@@ -209,7 +213,7 @@ mod tests {
 
     #[test]
     fn formatted_literal_appends_to_existing_segment() {
-        let mut segs = vec![Seg::Lit("prefix".to_string())];
+        let mut segs = vec![Seg::Lit("prefix".into())];
 
         segs_push_fmt(&mut segs, format_args!(":{}={}", "name", 42));
 
@@ -221,10 +225,30 @@ mod tests {
     fn formatted_literal_creates_segment_after_source() {
         let mut segs = vec![Seg::Src(2, 4)];
 
-        segs_push_fmt(&mut segs, format_args!("\"{}\":{},", "value", true));
+        segs_push_fmt(&mut segs, format_args!("{}={}", "x", 7));
 
         assert_eq!(segs.len(), 2);
-        assert!(matches!(&segs[1], Seg::Lit(text) if text == "\"value\":true,"));
+        assert!(matches!(&segs[1], Seg::Lit(text) if text == "x=7" && !text.is_heap_allocated()));
+    }
+
+    #[test]
+    fn literal_representation_stays_dense_and_inlines_short_text() {
+        assert_eq!(std::mem::size_of::<Seg>(), std::mem::size_of::<String>());
+
+        let mut segs = Vec::new();
+        let inline = "x".repeat(std::mem::size_of::<String>());
+        segs_push_lit(&mut segs, &inline);
+        let Seg::Lit(text) = &segs[0] else {
+            panic!("expected literal segment");
+        };
+        assert!(!text.is_heap_allocated());
+
+        segs_push_lit(&mut segs, "x");
+        let Seg::Lit(text) = &segs[0] else {
+            panic!("expected literal segment");
+        };
+        assert!(text.is_heap_allocated());
+        assert_eq!(text.len(), inline.len() + 1);
     }
 
     #[test]
@@ -237,9 +261,9 @@ mod tests {
         let source = "<X attr={WXYZ}>tail";
         let mut s = MagicString::new(source);
         let segs = vec![
-            Seg::Lit("OPEN(".to_string()),
+            Seg::Lit("OPEN(".into()),
             Seg::Src(9, 13),
-            Seg::Lit(")".to_string()),
+            Seg::Lit(")".into()),
         ];
         emit_segmented_overwrite(&mut s, 0, 15, &segs);
         assert_eq!(s.to_string(), "OPEN(WXYZ)tail");
@@ -251,11 +275,7 @@ mod tests {
         // `prepend_right` must place the pending literal before it.
         let source = "ABCDE";
         let mut s = MagicString::new(source);
-        let segs = vec![
-            Seg::Lit("[".to_string()),
-            Seg::Src(0, 3),
-            Seg::Lit("]".to_string()),
-        ];
+        let segs = vec![Seg::Lit("[".into()), Seg::Src(0, 3), Seg::Lit("]".into())];
         emit_segmented_overwrite(&mut s, 0, 5, &segs);
         // 'D' and 'E' (positions 3..5) are cleared by the final
         // overwrite of pending = "]" over [3, 5).
@@ -268,7 +288,7 @@ mod tests {
         // overwrite — the structured bake is a strict superset.
         let source = "ABCDE";
         let mut s = MagicString::new(source);
-        emit_segmented_overwrite(&mut s, 1, 4, &[Seg::Lit("xyz".to_string())]);
+        emit_segmented_overwrite(&mut s, 1, 4, &[Seg::Lit("xyz".into())]);
         assert_eq!(s.to_string(), "AxyzE");
     }
 }

@@ -125,7 +125,7 @@ pub(crate) fn handle_regular_element(
     if !el.attributes.is_empty() && !attrs_empty_before_pad {
         segs_trim_start(&mut attr_segs);
         let mut padded: Vec<Seg> = Vec::with_capacity(attr_segs.len() + 1);
-        padded.push(Seg::Lit(" ".to_string()));
+        padded.push(Seg::Lit(" ".into()));
         padded.extend(attr_segs);
         attr_segs = padded;
     }
@@ -203,14 +203,19 @@ pub(crate) fn handle_regular_element(
         String::new()
     };
     let header_lit = if !directive_prefix.is_empty() {
-        format!(
+        compact_str::format_compact!(
             " {{{}{{ {}svelteHTML.createElement(\"{}\"{}, {{",
-            directive_prefix, element_var_decl, el.name, actions_arg,
+            directive_prefix,
+            element_var_decl,
+            el.name,
+            actions_arg,
         )
     } else {
-        format!(
+        compact_str::format_compact!(
             " {{ {}svelteHTML.createElement(\"{}\"{}, {{",
-            element_var_decl, el.name, actions_arg,
+            element_var_decl,
+            el.name,
+            actions_arg,
         )
     };
     // The trailer closes the props object + createElement call (`}});`), then
@@ -223,7 +228,7 @@ pub(crate) fn handle_regular_element(
     // Close the props object + createElement call: `});` (one `}` for the
     // props brace, then `)` + `;`). The outer block `{` is closed after the
     // children by the closing-tag overwrite.
-    opener_segs.push(Seg::Lit("});".to_string()));
+    opener_segs.push(Seg::Lit("});".into()));
     // The post-`createElement` suffix statements are already assembled in
     // source-attribute order by `build_element_directive_suffix_segments`.
     opener_segs.extend(suffix_segs);

@@ -24,6 +24,7 @@ default = []
 
 [dependencies]
 rsvelte_core = { version = "=0.9.5", path = "../rsvelte_core", default-features = false }
+compact_str = "0.10"
 indexmap = "2.13.0"
 memchr = "2.7"
 oxc_allocator = "0.142"

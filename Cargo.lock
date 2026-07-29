@@ -2643,6 +2643,7 @@ dependencies = [
 name = "rsvelte_projection"
 version = "0.9.5"
 dependencies = [
+ "compact_str 0.10.0",
  "indexmap",
  "memchr",
  "oxc_allocator",

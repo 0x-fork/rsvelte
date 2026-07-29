@@ -85,10 +85,10 @@ fn splice_trailing_segs(segs: &mut Vec<Seg>, trailing: &[Seg]) {
         return;
     };
     let (head, tail) = last.split_at(last.len() - suffix_len);
-    let tail = tail.to_string();
+    let tail = tail.into();
     segs.pop();
     if !head.is_empty() {
-        segs.push(Seg::Lit(head.to_string()));
+        segs.push(Seg::Lit(head.into()));
     }
     segs.extend(trailing.iter().cloned());
     segs.push(Seg::Lit(tail));
@@ -275,7 +275,7 @@ pub(super) fn build_attribute_segments(
         // Inserted as a fresh first Lit so callers can replace/pad it
         // without disturbing the inner segments.
         let mut padded: Vec<Seg> = Vec::with_capacity(segs.len() + 1);
-        padded.push(Seg::Lit(" ".to_string()));
+        padded.push(Seg::Lit(" ".into()));
         padded.extend(segs);
         padded
     } else {
@@ -526,10 +526,10 @@ pub(super) fn build_component_props_segments(
         splice_trailing_segs(&mut inner, &trailing);
     }
 
-    let let_spaces = " ".repeat(let_count as usize);
+    let let_spaces = compact_str::format_compact!("{:width$}", "", width = let_count as usize);
     if segs_is_empty(&inner) {
         if has_on_directives && let_count == 0 {
-            vec![Seg::Lit(" ".to_string())]
+            vec![Seg::Lit(" ".into())]
         } else if let_count > 0 {
             vec![Seg::Lit(let_spaces)]
         } else {
@@ -537,7 +537,7 @@ pub(super) fn build_component_props_segments(
         }
     } else {
         let mut out: Vec<Seg> = Vec::with_capacity(inner.len() + 1);
-        out.push(Seg::Lit(format!(" {}", let_spaces)));
+        out.push(Seg::Lit(compact_str::format_compact!(" {}", let_spaces)));
         out.extend(inner);
         out
     }
