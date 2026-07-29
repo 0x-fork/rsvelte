@@ -31,30 +31,35 @@ use walk::process_fragment_inplace;
 
 /// Information collected during template processing.
 #[derive(Debug, Default)]
-pub struct TemplateInfo {
+pub struct TemplateInfo<'a> {
     /// Slots used in the component: slot_name -> list of prop strings.
     /// e.g., "default" -> ["a:b", "c:d"]
     pub slots: IndexMap<String, Vec<String>>,
     /// Events forwarded from elements / components (on:event without handler),
-    /// in template-walk order. Each entry carries the kind so the assembly can
+    /// in template-walk order. Each entry carries its source so the assembly can
     /// mirror the official `EventHandler` bubbled-events `Map` semantics: an
     /// `Element` forward does a plain `set` (overwrite), a `Component` forward
     /// concats into the existing entry (`unionType`).
-    /// e.g., "click" -> "__sveltets_2_mapElementEvent('click')"
-    pub element_events: Vec<(String, String, ForwardedEventKind)>,
+    pub element_events: Vec<ForwardedEvent<'a>>,
 }
 
-/// How a forwarded event (`on:event` with no handler) combines with an existing
-/// entry for the same event name, mirroring the official
-/// `event-handler.ts` `EventHandler` map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForwardedEventKind {
-    /// Element / `svelte:window` / `svelte:body` / `svelte:element` etc. —
-    /// official `bubbledEvents.set(name, expr)` (plain overwrite).
+pub struct ForwardedEvent<'a> {
+    pub name: &'a str,
+    pub source: ForwardedEventSource<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardedEventSource<'a> {
+    Mapped(ForwardedEventMapper),
+    Component(&'a str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardedEventMapper {
     Element,
-    /// Component / `svelte:component` — official `handleEventHandlerBubble`
-    /// concats into the existing entry.
-    Component,
+    Body,
+    Window,
 }
 
 // =============================================================================
@@ -90,7 +95,7 @@ pub fn process_template_inplace(
 /// This is a pre-pass that walks the AST to collect:
 /// - Slot elements with their props (for the return statement `slots: {...}`)
 /// - Forwarded events (for the return statement `events: {...}`)
-pub fn collect_template_info(fragment: &Fragment, source: &str) -> TemplateInfo {
+pub fn collect_template_info<'a>(fragment: &'a Fragment<'_>, source: &'a str) -> TemplateInfo<'a> {
     let mut info = TemplateInfo::default();
     // `scope` maps an in-scope template binding name (e.g. an `{#each}` context
     // variable) to the expression that types it at the top level — for an each
