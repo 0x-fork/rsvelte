@@ -29,6 +29,7 @@ use super::svelte2tsx::slice_src;
 )]
 pub(crate) fn process_instance_script_tag(
     ast: &Root,
+    instance_program: &oxc_ast::ast::Program,
     source: &str,
     options: &Svelte2TsxOptions,
     str: &mut MagicString,
@@ -55,7 +56,8 @@ pub(crate) fn process_instance_script_tag(
     // official does NOT detect its top-level `await` / wrap `$$render` in
     // `async`; mirror that (the awaits stay in the raw, oxfmt-skipped output).
     let script_parse_failed = !instance.raw_content.is_empty();
-    let has_top_level_await = !script_parse_failed && detect_top_level_await(raw_content);
+    let has_top_level_await =
+        !script_parse_failed && detect_top_level_await(raw_content, instance_program);
     if has_top_level_await {
         exported_names.set_uses_runes(true);
     }
@@ -121,7 +123,7 @@ pub(crate) fn process_instance_script_tag(
     };
 
     // Find import declarations in the instance script content
-    let imports = find_instance_imports(instance, source);
+    let imports = find_instance_imports(instance, source, instance_program);
 
     let has_imports = !imports.is_empty();
     // Lift imports above $$render(): each import is collected individually

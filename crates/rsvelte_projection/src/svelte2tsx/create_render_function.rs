@@ -21,6 +21,7 @@ use super::svelte2tsx::slice_src;
 )]
 pub(crate) fn create_render_function(
     ast: &Root,
+    module_program: Option<&oxc_ast::ast::Program>,
     source: &str,
     options: &Svelte2TsxOptions,
     str: &mut MagicString,
@@ -55,7 +56,8 @@ pub(crate) fn create_render_function(
         // ? lastImport.end + moduleAst.astOffset : moduleAst.astOffset` and the
         // accompanying `appendLeft(target, '\n')` for the no-imports case.
         if !hoistable_snippet_ranges.is_empty() {
-            let module_imports = find_instance_imports(module, source);
+            let module_imports =
+                find_instance_imports(module, source, module_program.expect("module script"));
             let module_hoist_target = match module_imports.last() {
                 Some(&(_, _, last_end)) => mod_content_start + last_end,
                 None => mod_content_start,
@@ -70,7 +72,8 @@ pub(crate) fn create_render_function(
 
         // For module-script-only components, inject store subscriptions for
         // module-level imports at the start of the $$render async wrapper.
-        let store_decls = super::script::collect_module_import_store_declarations(source);
+        let store_decls =
+            super::script::collect_module_import_store_declarations(source, module_program);
         // Suppress the `__sveltets_createSlot` binding in dts mode; matches
         // `createRenderFunction.ts`'s `slots.size > 0 && mode !== 'dts'` gate.
         let slot_decl_mod = if has_slot_elements && !is_dts_mode {

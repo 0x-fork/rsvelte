@@ -43,11 +43,9 @@ pub(crate) fn find_script_close_tag_start(source: &str, script_end: u32) -> u32 
 pub(crate) fn find_instance_imports(
     script: &crate::ast::template::Script,
     source: &str,
+    program: &oxc_ast::ast::Program,
 ) -> Vec<(u32, u32, u32)> {
-    use oxc_allocator::Allocator;
     use oxc_ast::ast as oxc;
-    use oxc_parser::Parser as OxcParser;
-    use oxc_span::SourceType;
 
     let content_start = script.content_offset as usize;
     let script_source = slice_src(source, script.start as usize, script.end as usize);
@@ -65,23 +63,13 @@ pub(crate) fn find_instance_imports(
         return Vec::new();
     }
 
-    let allocator = Allocator::default();
-    // Always use TypeScript source type for import detection.
-    // TypeScript is a superset of JavaScript, so TS parsing handles
-    // both `import type` (TS syntax) and regular imports correctly,
-    // even when the script doesn't have `lang="ts"`.
-    let source_type = SourceType::ts();
-    let parser = OxcParser::new(&allocator, raw_content, source_type);
-    let result = parser.parse();
-
     // Comment spans (start, end) discovered by the parser, sorted by end. Used
     // to compute each import's leading-comment region the way TS
     // `getLeadingCommentRanges(node.getFullText())` does — including a TRAILING
     // line comment on the PREVIOUS statement's line (it is leading trivia of the
     // following import and moves up with it). The parser already tokenised
     // strings/regex correctly, so `// …` inside a string is never misread.
-    let comment_spans: Vec<(u32, u32)> = result
-        .program
+    let comment_spans: Vec<(u32, u32)> = program
         .comments
         .iter()
         .map(|c| (c.span.start, c.span.end))
@@ -89,7 +77,7 @@ pub(crate) fn find_instance_imports(
 
     let mut imports = Vec::new();
     let bytes = raw_content.as_bytes();
-    for stmt in result.program.body.iter() {
+    for stmt in program.body.iter() {
         if let oxc::Statement::ImportDeclaration(import) = stmt {
             // All import declarations (including side-effect imports like `import ''`)
             // should be lifted. The parser only creates ImportDeclaration nodes for
@@ -138,24 +126,15 @@ fn scan_back_leading_comments(bytes: &[u8], pos: usize, comment_spans: &[(u32, u
 
 /// Detect whether a script content contains top-level `await` expressions.
 ///
-/// Uses OXC to parse the content as a module (which allows top-level await)
-/// and checks for AwaitExpression at the top level of the program body.
-pub(crate) fn detect_top_level_await(content: &str) -> bool {
-    use oxc_allocator::Allocator;
+/// Checks the retained OXC program for AwaitExpression at the top level.
+pub(crate) fn detect_top_level_await(content: &str, program: &oxc_ast::ast::Program) -> bool {
     use oxc_ast::ast as oxc;
-    use oxc_parser::Parser as OxcParser;
-    use oxc_span::SourceType;
 
     // Fast path: an `await` substring is required for any top-level await
-    // to exist. Skip the OXC parse entirely when the keyword is absent.
+    // to exist. Skip the AST walk when the keyword is absent.
     if !contains_word(content.as_bytes(), b"await") {
         return false;
     }
-
-    let allocator = Allocator::default();
-    let source_type = SourceType::ts().with_module(true);
-    let parser = OxcParser::new(&allocator, content, source_type);
-    let result = parser.parse();
 
     // Mirror upstream `processInstanceScriptContent.ts` which sets
     // `hasTopLevelAwait = true` whenever an AwaitExpression is visited at the
@@ -174,7 +153,7 @@ pub(crate) fn detect_top_level_await(content: &str) -> bool {
     // For both, we use a deep recursive scan that stops at function
     // boundaries (`FunctionExpression` / `ArrowFunctionExpression`) — those
     // introduce a new scope and their inner `await` is NOT top-level.
-    for stmt in result.program.body.iter() {
+    for stmt in program.body.iter() {
         match stmt {
             oxc::Statement::VariableDeclaration(decl) => {
                 for declarator in decl.declarations.iter() {
