@@ -185,6 +185,20 @@ pub fn materialize_overlay_with(
     // self-contained overlay has no path aliases to resolve).
     let svelte_resolver = build_svelte_import_resolver(tsconfig_path);
 
+    // External (workspace-sibling) `.svelte` packages reachable via
+    // node_modules symlinks or a tsconfig `paths` alias: emit shadows into
+    // per-package cache mirrors and collect the (real-dir, mirror-dir)
+    // `rootDirs`/alias-rewrite pairs that bridge them (#782). Must run BEFORE
+    // the per-file loop below, since `rewrite_aliased_svelte_imports` needs
+    // the mirrors to already exist to re-point an aliased cross-package
+    // import at its shadow.
+    let external = discover_external_svelte_packages(workspace, &cache_dir, tsconfig_path);
+    let mut ext_root_dir_pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(external.len());
+    for pkg in &external {
+        emit_external_shadows(pkg)?;
+        ext_root_dir_pairs.push((pkg.real_dir.clone(), pkg.mirror_dir.clone()));
+    }
+
     let mut entries = Vec::with_capacity(files.len());
     let mut augments: Vec<CompanionAugment> = Vec::new();
     for abs_source in &abs_files {
@@ -266,7 +280,13 @@ pub fn materialize_overlay_with(
             // concrete shadow-relative path that tsgo resolves directly.
             if let Some(resolver) = svelte_resolver.as_ref() {
                 tsx_code = rewrite_aliased_svelte_imports(
-                    &tsx_code, abs_source, &tsx_path, workspace, &emit_dir, resolver,
+                    &tsx_code,
+                    abs_source,
+                    &tsx_path,
+                    workspace,
+                    &emit_dir,
+                    resolver,
+                    &ext_root_dir_pairs,
                 );
             }
             fs::write(&tsx_path, &tsx_code)?;
@@ -333,16 +353,6 @@ pub fn materialize_overlay_with(
         fs::write(cache_dir.join(name), contents)?;
     }
 
-    // External (workspace-sibling) `.svelte` packages reachable via node_modules
-    // symlinks: emit shadows into per-package cache mirrors and collect the
-    // (real-dir, mirror-dir) `rootDirs` pairs that bridge them (#782).
-    let external = discover_external_svelte_packages(workspace, &cache_dir);
-    let mut ext_root_dir_pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(external.len());
-    for pkg in &external {
-        emit_external_shadows(pkg)?;
-        ext_root_dir_pairs.push((pkg.real_dir.clone(), pkg.mirror_dir.clone()));
-    }
-
     let overlay_tsconfig = cache_dir.join("tsconfig.json");
     let tsconfig_json = build_overlay_tsconfig(
         &cache_dir,
@@ -385,11 +395,20 @@ struct ExternalPackage {
 
 /// Discover workspace-sibling packages reachable through the project's
 /// `node_modules` symlinks (pnpm / npm / yarn link a monorepo package's real
-/// source dir into `node_modules/<name>`). Registry deps — whose realpath stays
+/// source dir into `node_modules/<name>`), OR through a `tsconfig.json`
+/// `compilerOptions.paths` alias that maps straight onto a sibling package's
+/// source tree with no `node_modules` entry at all (common with SvelteKit's
+/// `kit.alias` / bundler `resolve.alias`, e.g. `$libs` → `../../libs`) —
+/// #782's fix only covered the former, leaving the alias case still resolving
+/// to the ambient `*.svelte` wildcard. Registry deps — whose realpath stays
 /// inside a `node_modules` store — and in-workspace targets are skipped; only
 /// packages that actually contain `.svelte` files are returned. Each gets a
 /// distinct `<cache>/ext/<n>` mirror dir.
-fn discover_external_svelte_packages(workspace: &Path, cache_dir: &Path) -> Vec<ExternalPackage> {
+fn discover_external_svelte_packages(
+    workspace: &Path,
+    cache_dir: &Path,
+    tsconfig_path: Option<&Path>,
+) -> Vec<ExternalPackage> {
     let nm = workspace.join("node_modules");
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = fs::read_dir(&nm) {
@@ -412,6 +431,9 @@ fn discover_external_svelte_packages(workspace: &Path, cache_dir: &Path) -> Vec<
             }
         }
     }
+    if let Some(tsconfig_path) = tsconfig_path {
+        candidates.extend(resolve_paths_alias_dirs_abs(tsconfig_path));
+    }
     let ws_real = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let mut out: Vec<ExternalPackage> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -427,6 +449,13 @@ fn discover_external_svelte_packages(workspace: &Path, cache_dir: &Path) -> Vec<
         }
         // In-workspace targets are already covered by the primary overlay.
         if real.starts_with(&ws_real) {
+            continue;
+        }
+        // A `paths` alias can name any directory, including one that CONTAINS
+        // the workspace (`"@/*": ["../../*"]` in a monorepo). Mirroring a tree
+        // the workspace itself lives in is never right, and it would walk the
+        // whole repository looking for `.svelte` files.
+        if ws_real.starts_with(&real) {
             continue;
         }
         if !seen.insert(real.clone()) {
@@ -1238,6 +1267,104 @@ fn resolve_root_dirs_abs(tsconfig_path: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// Resolve a tsconfig's `compilerOptions.paths` alias targets to absolute
+/// directories, following the `extends` chain (same nearest-definition-wins
+/// rule as [`resolve_root_dirs_abs`]) — a child `compilerOptions.paths`
+/// replaces the parent's wholesale, mirroring TypeScript.
+///
+/// Each target glob (`"../../../libs/*"`) has its trailing `/*` (or bare `*`)
+/// stripped and is resolved against `baseUrl` when one is set anywhere in the
+/// chain (nearest wins, itself resolved against the config that declared it),
+/// else against the directory of the config that declared `paths` —
+/// TypeScript's default since `paths` stopped requiring `baseUrl`. A target
+/// that names a file contributes that file's parent directory; one that does
+/// not exist is skipped rather than widened to its parent. Used to extend
+/// [`discover_external_svelte_packages`] to sibling packages reached through a
+/// bundler/tsconfig alias rather than a `node_modules` symlink (#782's fix
+/// only covers the latter).
+fn resolve_paths_alias_dirs_abs(tsconfig_path: &Path) -> Vec<PathBuf> {
+    // A relative path would otherwise compound through every `extends` hop
+    // (`file.parent()` staying relative at each step) into an unresolvable
+    // target — the same class of bug `build_svelte_import_resolver` guards
+    // against for the same reason.
+    let mut current = Some(absolutize(tsconfig_path));
+    let mut hops = 0;
+    let mut paths: Option<(serde_json::Map<String, serde_json::Value>, PathBuf)> = None;
+    let mut base_url: Option<PathBuf> = None;
+    while let Some(file) = current {
+        hops += 1;
+        if hops > 32 {
+            break;
+        }
+        let Ok(raw) = fs::read_to_string(&file) else {
+            break;
+        };
+        let stripped = strip_jsonc_comments(&raw);
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stripped) else {
+            break;
+        };
+        let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let compiler_opts = parsed.get("compilerOptions");
+        if paths.is_none()
+            && let Some(p) = compiler_opts
+                .and_then(|c| c.get("paths"))
+                .and_then(|v| v.as_object())
+        {
+            paths = Some((p.clone(), dir.clone()));
+        }
+        if base_url.is_none()
+            && let Some(b) = compiler_opts
+                .and_then(|c| c.get("baseUrl"))
+                .and_then(|v| v.as_str())
+        {
+            base_url = Some(dir.join(b));
+        }
+        if paths.is_some() && base_url.is_some() {
+            break;
+        }
+        match parsed.get("extends").and_then(|v| v.as_str()) {
+            Some(ext) if ext.starts_with('.') => current = Some(resolve_extends_path(&dir, ext)),
+            _ => break,
+        }
+    }
+    let Some((paths, paths_dir)) = paths else {
+        return Vec::new();
+    };
+    let base = base_url.unwrap_or(paths_dir);
+
+    let mut out = Vec::new();
+    for targets in paths.values() {
+        let Some(targets) = targets.as_array() else {
+            continue;
+        };
+        for target in targets.iter().filter_map(|v| v.as_str()) {
+            let trimmed = target
+                .strip_suffix("/*")
+                .or_else(|| target.strip_suffix('*'))
+                .unwrap_or(target);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let resolved = base.join(trimmed);
+            // A missing target must not widen to its parent: `"$types/*":
+            // ["../../shared/types/*"]` with `shared/types` not generated yet
+            // would otherwise nominate all of `shared/` as a package to mirror.
+            let resolved = if resolved.is_dir() {
+                resolved
+            } else if resolved.is_file() {
+                match resolved.parent() {
+                    Some(parent) => parent.to_path_buf(),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            out.push(resolved);
+        }
+    }
+    out
+}
+
 /// Sibling companion module (`Foo.svelte.ts` / `Foo.svelte.js`) of a
 /// `…/Foo.svelte` component source, when one exists on disk.
 fn find_companion_module(abs_source: &Path) -> Option<PathBuf> {
@@ -1488,6 +1615,17 @@ fn build_svelte_import_resolver(tsconfig: Option<&Path>) -> Option<oxc_resolver:
         ResolveOptions, Resolver, TsconfigDiscovery, TsconfigOptions, TsconfigReferences,
     };
     let tsconfig = tsconfig?;
+    // With a relative `config_file`, oxc_resolver's tsconfig discovery returns
+    // `NotFound` (no error surfaced) for any `paths` target that resolves
+    // outside the current working directory via `..` — which is exactly
+    // every cross-package alias (a sibling package is reached by climbing up
+    // and over). `--tsconfig ./tsconfig.json` is the CLI's own documented
+    // usage, so this silently defeated alias rewriting for precisely the
+    // cross-package case this module exists to handle. Anchor on the CWD,
+    // matching how the rest of the CLI resolves relative paths passed on the
+    // command line.
+    let tsconfig = absolutize(tsconfig);
+    let tsconfig = tsconfig.as_path();
     Some(Resolver::new(ResolveOptions {
         extensions: vec![
             ".svelte".into(),
@@ -1512,9 +1650,14 @@ fn build_svelte_import_resolver(tsconfig: Option<&Path>) -> Option<oxc_resolver:
 /// imports are left as-is — the overlay's `rootDirs` already bridges those to
 /// shadows, and TS only applies `rootDirs` to relative specifiers.
 ///
-/// Only specifiers that oxc_resolver maps to a `.svelte` file UNDER the
-/// workspace are rewritten; bare packages, `.svelte.ts` companions and
-/// cross-package components are untouched.
+/// Specifiers that oxc_resolver maps to a `.svelte` file UNDER the workspace
+/// are rewritten to that file's shadow under `emit_dir`. A specifier that
+/// resolves OUTSIDE the workspace but under one of `ext_pairs`' real dirs (a
+/// sibling package discovered by [`discover_external_svelte_packages`], via
+/// either a `node_modules` symlink or a `paths` alias) is rewritten to that
+/// package's mirror shadow instead — `rootDirs` cannot bridge a non-relative
+/// alias (#782), so the specifier itself has to point at the shadow. Bare
+/// packages and anything resolving outside both are left untouched.
 fn rewrite_aliased_svelte_imports(
     tsx: &str,
     abs_source: &Path,
@@ -1522,6 +1665,7 @@ fn rewrite_aliased_svelte_imports(
     workspace: &Path,
     emit_dir: &Path,
     resolver: &oxc_resolver::Resolver,
+    ext_pairs: &[(PathBuf, PathBuf)],
 ) -> String {
     let (Some(source_dir), Some(generated_dir)) = (abs_source.parent(), tsx_path.parent()) else {
         return tsx.to_string();
@@ -1533,6 +1677,18 @@ fn rewrite_aliased_svelte_imports(
     let workspace_canon = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
+    // Pre-canonicalise the external pairs once; `real_dir` already came from
+    // `fs::canonicalize` in `discover_external_svelte_packages`, but doing it
+    // again here is cheap and keeps this function's invariants self-contained.
+    let ext_pairs_canon: Vec<(PathBuf, &Path)> = ext_pairs
+        .iter()
+        .map(|(real_dir, mirror_dir)| {
+            (
+                real_dir.canonicalize().unwrap_or_else(|_| real_dir.clone()),
+                mirror_dir.as_path(),
+            )
+        })
+        .collect();
 
     let decide = |spec: &str| -> Option<String> {
         if spec.starts_with('.') {
@@ -1550,8 +1706,20 @@ fn rewrite_aliased_svelte_imports(
         let resolved_canon = resolved
             .canonicalize()
             .unwrap_or_else(|_| resolved.to_path_buf());
-        let rel = resolved_canon.strip_prefix(&workspace_canon).ok()?;
-        let shadow = append_extension(&emit_dir.join(rel), ".tsx");
+
+        let shadow = if let Ok(rel) = resolved_canon.strip_prefix(&workspace_canon) {
+            append_extension(&emit_dir.join(rel), ".tsx")
+        } else {
+            // Not under the workspace — try the longest-matching external
+            // package root so a nested alias (`$libs/*` and a more specific
+            // `$libs/components/*`) resolves to the more specific mirror.
+            let (real_dir, mirror_dir) = ext_pairs_canon
+                .iter()
+                .filter(|(real_dir, _)| resolved_canon.starts_with(real_dir))
+                .max_by_key(|(real_dir, _)| real_dir.as_os_str().len())?;
+            let rel = resolved_canon.strip_prefix(real_dir).ok()?;
+            append_extension(&mirror_dir.join(rel), ".tsx")
+        };
         let mut rewritten = lexical_relative_posix(generated_dir, &shadow);
         if !rewritten.starts_with('.') {
             rewritten = format!("./{rewritten}");
@@ -1720,6 +1888,10 @@ fn path_relative(from_dir: &Path, to_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The current directory is process-wide while tests run in parallel, so
+    /// every test that has to exercise a CLI-relative path takes this first.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use std::fs;
     use std::io::Write;
 
@@ -2210,6 +2382,167 @@ mod tests {
         assert!(
             !app_tsx.contains("$lib/Button.svelte"),
             "alias was not rewritten:\n{app_tsx}"
+        );
+        assert!(
+            app_tsx.contains("Button.svelte.tsx"),
+            "rewrite did not point at the shadow:\n{app_tsx}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Regression test for #782's uncovered case: a sibling package reached
+    /// through a `paths` alias with NO `node_modules` entry at all (a plain
+    /// SvelteKit `kit.alias` / bundler `resolve.alias`, not a package
+    /// `exports` barrel resolved via a symlink). Named `<script module>`
+    /// exports must resolve through the alias just like the in-workspace case
+    /// above, not fall back to the ambient default-only `*.svelte` wildcard.
+    #[test]
+    fn cross_package_paths_alias_named_export_resolves_to_its_shadow() {
+        let tmp = std::env::temp_dir().join(format!("svc_xpkg_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("pkg-a/src")).unwrap();
+        fs::create_dir_all(tmp.join("pkg-libs/components")).unwrap();
+        // No `node_modules` anywhere — `libs` is not even a declared
+        // dependency of `pkg-a`; resolution goes entirely through `paths`.
+        fs::write(
+            tmp.join("pkg-a/tsconfig.json"),
+            "{\"compilerOptions\":{\"paths\":{\"$libs/*\":[\"../pkg-libs/*\"]}}}",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("pkg-libs/components/survey-options.svelte"),
+            "<script module lang=\"ts\">export type WithOther<T extends string> = T | `OTHER: ${string}`;</script>\n<script lang=\"ts\">let { id }: { id: string } = $props();</script>\n<div>{id}</div>\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("pkg-a/src/consumer.svelte"),
+            "<script lang=\"ts\">\nimport SurveyOptions, { type WithOther } from '$libs/components/survey-options.svelte';\ntype X = WithOther<'a' | 'b'>;\n</script>\n<SurveyOptions id=\"a\" />\n",
+        )
+        .unwrap();
+
+        let workspace = tmp.join("pkg-a");
+        let files = vec![workspace.join("src/consumer.svelte")];
+        let tsconfig = workspace.join("tsconfig.json");
+        materialize_overlay_with(&workspace, &files, Some(&tsconfig), false).unwrap();
+
+        let consumer_tsx =
+            fs::read_to_string(workspace.join(".svelte-check/svelte/src/consumer.svelte.tsx"))
+                .unwrap();
+        assert!(
+            !consumer_tsx.contains("$libs/components/survey-options.svelte"),
+            "cross-package alias was not rewritten:\n{consumer_tsx}"
+        );
+        assert!(
+            consumer_tsx.contains("survey-options.svelte.tsx"),
+            "rewrite did not point at the external mirror's shadow:\n{consumer_tsx}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A `paths` alias that names a directory CONTAINING the workspace
+    /// (`"@/*": ["../../*"]`, an ordinary monorepo shape) must not be mirrored
+    /// as an external package — the workspace's own files are already covered,
+    /// and the mirror walk would cover the whole repository. A `baseUrl`-based
+    /// alias in the same config must still resolve through `baseUrl`.
+    #[test]
+    fn paths_alias_naming_an_ancestor_of_the_workspace_is_not_mirrored() {
+        let tmp = std::env::temp_dir().join(format!("svc_alias_ancestor_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("apps/web/src")).unwrap();
+        fs::create_dir_all(tmp.join("libs")).unwrap();
+        fs::write(
+            tmp.join("apps/web/tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\"../..\",\"paths\":{\"@/*\":[\"./*\"],\"$libs/*\":[\"libs/*\"]}}}",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("libs/Shared.svelte"),
+            "<script lang=\"ts\">let { n }: { n: number } = $props();</script>\n<i>{n}</i>\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("apps/web/src/App.svelte"),
+            "<script lang=\"ts\">import Shared from '$libs/Shared.svelte';</script>\n<Shared n={1} />\n",
+        )
+        .unwrap();
+
+        let workspace = tmp.join("apps/web");
+        let files = vec![workspace.join("src/App.svelte")];
+        let tsconfig = workspace.join("tsconfig.json");
+        materialize_overlay_with(&workspace, &files, Some(&tsconfig), false).unwrap();
+
+        let ext_root = workspace.join(".svelte-check/ext");
+        let mirrored: Vec<String> = fs::read_dir(&ext_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            mirrored.len(),
+            1,
+            "only the `$libs` sibling should be mirrored, got {mirrored:?}"
+        );
+        assert!(
+            ext_root.join("0/Shared.svelte.tsx").is_file(),
+            "the `$libs` sibling (resolved through baseUrl) should have a shadow"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Regression test: a relative `--tsconfig` path (`./tsconfig.json`, the
+    /// CLI's own documented usage) must not silently disable alias rewriting
+    /// for a `paths` target that climbs outside the CWD via `..` — exactly
+    /// what every cross-package alias does. `oxc_resolver`'s tsconfig
+    /// discovery returns `NotFound` for such a target when `config_file` is
+    /// relative; `build_svelte_import_resolver` has to absolutise it first.
+    #[test]
+    fn relative_tsconfig_path_still_resolves_paths_aliases_that_escape_cwd() {
+        let tmp =
+            std::env::temp_dir().join(format!("svc_relcfg_paths_alias_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("pkg-a/src")).unwrap();
+        fs::create_dir_all(tmp.join("pkg-libs/lib")).unwrap();
+        fs::write(
+            tmp.join("pkg-a/tsconfig.json"),
+            "{\"compilerOptions\":{\"paths\":{\"$lib/*\":[\"../pkg-libs/lib/*\"]}}}",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("pkg-libs/lib/Button.svelte"),
+            "<script lang=\"ts\">let { n }: { n: number } = $props();</script>\n<button>{n}</button>\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("pkg-a/src/App.svelte"),
+            "<script lang=\"ts\">import Button from '$lib/Button.svelte';</script>\n<Button n={1} />\n",
+        )
+        .unwrap();
+
+        let workspace = tmp.join("pkg-a");
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&workspace).unwrap();
+        let result = {
+            let files = vec![PathBuf::from("src/App.svelte")];
+            materialize_overlay_with(
+                Path::new("."),
+                &files,
+                Some(Path::new("./tsconfig.json")),
+                false,
+            )
+        };
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let app_tsx =
+            fs::read_to_string(workspace.join(".svelte-check/svelte/src/App.svelte.tsx")).unwrap();
+        assert!(
+            !app_tsx.contains("$lib/Button.svelte"),
+            "alias was not rewritten with a relative --tsconfig path:\n{app_tsx}"
         );
         assert!(
             app_tsx.contains("Button.svelte.tsx"),
