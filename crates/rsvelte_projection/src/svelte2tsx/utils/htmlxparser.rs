@@ -336,7 +336,64 @@ fn collect_html_tag_ranges(fragment: &crate::ast::template::Fragment, out: &mut 
 /// Returns a list of `(start, end, inner_content)` triples, where `start`/`end`
 /// are byte offsets in `source` and `inner_content` is the raw text between
 /// `<script…>` and `</script>`.
+fn only_has_top_level_script_candidates(ast: &Root, source: &str) -> bool {
+    only_has_script_candidates_in_ranges(
+        source,
+        ast.instance
+            .as_ref()
+            .map(|script| (script.start, script.end)),
+        ast.module.as_ref().map(|script| (script.start, script.end)),
+    )
+}
+
+fn only_has_script_candidates_in_ranges(
+    source: &str,
+    instance: Option<(u32, u32)>,
+    module: Option<(u32, u32)>,
+) -> bool {
+    let bytes = source.as_bytes();
+    let mut search = 0;
+
+    while search < bytes.len() {
+        let Some(relative_start) = memchr::memchr(b'<', &bytes[search..]) else {
+            break;
+        };
+        let tag_start = search + relative_start;
+        search = tag_start + 1;
+        let Some(tag) = bytes.get(tag_start..tag_start + 7) else {
+            continue;
+        };
+        if !tag.eq_ignore_ascii_case(b"<script") {
+            continue;
+        }
+
+        let after = bytes.get(tag_start + 7).copied();
+        search = tag_start + 7;
+        if !matches!(
+            after,
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/') | None
+        ) {
+            continue;
+        }
+
+        let tag_start = tag_start as u32;
+        if ![instance, module]
+            .into_iter()
+            .flatten()
+            .any(|(start, end)| tag_start == start || (tag_start > start && tag_start < end))
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn find_orphan_scripts(ast: &Root, source: &str) -> Vec<(u32, u32, String)> {
+    if only_has_top_level_script_candidates(ast, source) {
+        return Vec::new();
+    }
+
     // 1. Collect known "legitimate" script start positions and their full ranges.
     let mut known_starts: std::collections::HashSet<u32> = std::collections::HashSet::default();
     // Also collect ranges of instance/module scripts so we can skip `<script>`
@@ -428,7 +485,27 @@ fn find_orphan_scripts(ast: &Root, source: &str) -> Vec<(u32, u32, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blank_style_content, find_ci};
+    use super::*;
+    use crate::compiler::phases::phase1_parse::{self, ParseOptions};
+
+    fn parse(source: &str) -> Root<'_> {
+        phase1_parse::parse_script_ts(
+            source,
+            ParseOptions {
+                modern: true,
+                ..Default::default()
+            },
+        )
+        .expect("fixture should parse")
+    }
+
+    fn can_skip(source: &str) -> bool {
+        only_has_top_level_script_candidates(&parse(source), source)
+    }
+
+    fn orphans(source: &str) -> Vec<(u32, u32, String)> {
+        find_orphan_scripts(&parse(source), source)
+    }
 
     #[test]
     fn case_insensitive_search_preserves_utf8_byte_offsets() {
@@ -479,5 +556,57 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(!blanked.contains("color"));
+    }
+
+    #[test]
+    fn orphan_script_fast_path_accepts_templates_without_script_candidates() {
+        assert!(can_skip("<main><h1>Hello</h1><scripted /></main>"));
+    }
+
+    #[test]
+    fn orphan_script_fast_path_accepts_top_level_scripts_and_inner_candidates() {
+        let source = r#"<script context="module">
+const module_marker = "<SCRIPT data-marker>";
+</script>
+<script>
+const instance_marker = `<script data-marker>`;
+</script>
+<main>Hello</main>"#;
+        assert!(can_skip(source));
+    }
+
+    #[test]
+    fn orphan_script_fast_path_defers_uppercase_and_nested_scripts() {
+        let uppercase = "<SCRIPT>console.log('upper')</SCRIPT>";
+        let nested = "<main><script>console.log('nested')</script></main>";
+        assert!(!can_skip(uppercase));
+        assert!(!can_skip(nested));
+        assert_eq!(orphans(uppercase)[0].2, "console.log('upper')");
+        assert!(orphans(nested).is_empty());
+    }
+
+    #[test]
+    fn orphan_script_fast_path_defers_raw_html_and_comments() {
+        let raw_html = r#"{@html "<script>raw</script>"}"#;
+        let comment = "<!-- <script>comment</script> -->";
+        assert!(!can_skip(raw_html));
+        assert!(!can_skip(comment));
+        assert!(orphans(raw_html).is_empty());
+        assert_eq!(orphans(comment)[0].2, "comment");
+    }
+
+    #[test]
+    fn orphan_script_fast_path_defers_attribute_and_malformed_candidates() {
+        assert!(!only_has_script_candidates_in_ranges(
+            r#"<noscript><a href="</noscript><script>orphan</script>">link</a>"#,
+            None,
+            None,
+        ));
+        assert!(!only_has_script_candidates_in_ranges(
+            r#"<div data-script="<script data-x>">value</div>"#,
+            None,
+            None,
+        ));
+        assert!(!only_has_script_candidates_in_ranges("<script", None, None,));
     }
 }
