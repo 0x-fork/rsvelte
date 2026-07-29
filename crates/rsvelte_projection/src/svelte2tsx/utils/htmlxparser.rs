@@ -16,10 +16,29 @@ fn find_ci(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     if from > haystack.len() {
         return None;
     }
-    haystack[from..]
-        .windows(needle.len())
-        .position(|w| w.eq_ignore_ascii_case(needle))
-        .map(|p| from + p)
+    assert!(!needle.is_empty());
+    let last_start = haystack.len().checked_sub(needle.len())?;
+    if from > last_start {
+        return None;
+    }
+
+    let first_lower = needle[0].to_ascii_lowercase();
+    let first_upper = needle[0].to_ascii_uppercase();
+    let mut search = from;
+    while search <= last_start {
+        let candidates = &haystack[search..=last_start];
+        let offset = if first_lower == first_upper {
+            memchr::memchr(first_lower, candidates)
+        } else {
+            memchr::memchr2(first_lower, first_upper, candidates)
+        }?;
+        let candidate = search + offset;
+        if haystack[candidate..candidate + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(candidate);
+        }
+        search = candidate + 1;
+    }
+    None
 }
 
 /// Replace the content of every `<style …>…</style>` with spaces (newlines and
@@ -405,4 +424,60 @@ fn find_orphan_scripts(ast: &Root, source: &str) -> Vec<(u32, u32, String)> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blank_style_content, find_ci};
+
+    #[test]
+    fn case_insensitive_search_preserves_utf8_byte_offsets() {
+        let source = "前😀<STYLE>色</StYlE>後";
+        let open = source.find("<STYLE>").unwrap();
+        let close = source.find("</StYlE>").unwrap();
+
+        assert_eq!(find_ci(source.as_bytes(), 0, b"<style"), Some(open));
+        assert_eq!(
+            find_ci(source.as_bytes(), open + 1, b"</style>"),
+            Some(close)
+        );
+        assert_eq!(find_ci(source.as_bytes(), close + 1, b"<style"), None);
+    }
+
+    #[test]
+    fn search_skips_partial_candidates_and_honors_start_offset() {
+        let source = "<stale><StYlInG><style lang=\"scss\">";
+        let expected = source.find("<style lang").unwrap();
+
+        assert_eq!(find_ci(source.as_bytes(), 0, b"<style"), Some(expected));
+        assert_eq!(find_ci(source.as_bytes(), expected + 1, b"<style"), None);
+        assert_eq!(find_ci(source.as_bytes(), 0, b">"), source.find('>'));
+        assert_eq!(
+            find_ci(source.as_bytes(), source.len() + 1, b"<style"),
+            None
+        );
+    }
+
+    #[test]
+    fn style_blanking_keeps_unicode_offsets_and_line_endings() {
+        let source = "前<STYLE lang=\"x\">色 {\r\n color: red;\n}</StYlE>後";
+        let blanked = blank_style_content(source);
+
+        assert_eq!(blanked.len(), source.len());
+        assert!(blanked.starts_with("前<STYLE lang=\"x\">"));
+        assert!(blanked.ends_with("</StYlE>後"));
+        assert_eq!(
+            blanked
+                .bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| matches!(byte, b'\r' | b'\n').then_some((index, byte)))
+                .collect::<Vec<_>>(),
+            source
+                .bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| matches!(byte, b'\r' | b'\n').then_some((index, byte)))
+                .collect::<Vec<_>>()
+        );
+        assert!(!blanked.contains("color"));
+    }
 }
