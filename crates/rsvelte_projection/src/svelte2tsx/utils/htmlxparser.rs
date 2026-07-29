@@ -3,6 +3,8 @@
 //! the parser never CSS-parses it, and recovering `<script>` tags the HTML
 //! parser swallowed.
 
+use std::borrow::Cow;
+
 use crate::ast::template::Root;
 
 use super::super::magic_string::MagicString;
@@ -45,8 +47,8 @@ fn find_ci(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 /// carriage returns preserved) so the parser never CSS-parses it. Works at the
 /// BYTE level so the result is exactly the same length as `source` — every AST
 /// offset still indexes the original source. Case-insensitive on the tag name.
-pub(crate) fn blank_style_content(source: &str) -> String {
-    let mut bytes = source.as_bytes().to_vec();
+pub(crate) fn blank_style_content(source: &str) -> Cow<'_, str> {
+    let mut blanked = None;
     let sb = source.as_bytes();
     let mut search = 0usize;
     while let Some(tag_start) = find_ci(sb, search, b"<style") {
@@ -71,6 +73,9 @@ pub(crate) fn blank_style_content(source: &str) -> String {
         let Some(content_end) = find_ci(sb, content_start, b"</style") else {
             break;
         };
+        let output = blanked.get_or_insert_with(|| source.to_string());
+        // SAFETY: replacing every byte in the range with ASCII preserves UTF-8 and length.
+        let bytes = unsafe { output.as_mut_vec() };
         for b in &mut bytes[content_start..content_end] {
             if *b != b'\n' && *b != b'\r' {
                 *b = b' ';
@@ -78,7 +83,7 @@ pub(crate) fn blank_style_content(source: &str) -> String {
         }
         search = content_end;
     }
-    String::from_utf8(bytes).unwrap_or_else(|_| source.to_string())
+    blanked.map_or(Cow::Borrowed(source), Cow::Owned)
 }
 
 /// Remove embedded `<script>` tags that are NOT the top-level instance / module
@@ -428,6 +433,8 @@ fn find_orphan_scripts(ast: &Root, source: &str) -> Vec<(u32, u32, String)> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::{blank_style_content, find_ci};
 
     #[test]
@@ -463,6 +470,7 @@ mod tests {
         let source = "前<STYLE lang=\"x\">色 {\r\n color: red;\n}</StYlE>後";
         let blanked = blank_style_content(source);
 
+        assert!(matches!(blanked, Cow::Owned(_)));
         assert_eq!(blanked.len(), source.len());
         assert!(blanked.starts_with("前<STYLE lang=\"x\">"));
         assert!(blanked.ends_with("</StYlE>後"));
@@ -479,5 +487,18 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(!blanked.contains("color"));
+    }
+
+    #[test]
+    fn style_blanking_borrows_when_no_content_changes() {
+        for source in [
+            "<script>const style = '<stale>';</script><p>plain</p>",
+            "<style />\n<p>self closing</p>",
+            "<style>unterminated",
+        ] {
+            let blanked = blank_style_content(source);
+            assert!(matches!(blanked, Cow::Borrowed(_)));
+            assert_eq!(blanked, source);
+        }
     }
 }
