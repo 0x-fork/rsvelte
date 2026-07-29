@@ -262,20 +262,26 @@ pub fn svelte2tsx(
         modern: true,
         loose: false,
         skip_expression_loc: false,
-        defer_script_parse: false,
+        defer_script_parse: true,
         force_typescript: false,
         lenient_script: false,
         skip_non_css_lang_style: false,
         capture_comments: false,
     };
-    let ast = phase1_parse::parse_script_ts(&parse_source, parse_options)?;
+    let mut ast = phase1_parse::parse_script_ts(&parse_source, parse_options)?;
+    let parsed_scripts = super::script::ParsedScripts::new(&mut ast);
 
     // svelte rejects `{@debug expr}` whose arguments are not plain identifiers
     // (`{@debug user.firstname}` / `{@debug a[0]}`) at PARSE time. rsvelte does
     // this in the analyze DebugTag visitor, which svelte2tsx never runs — so
     // replicate it here to preserve error-parity with official svelte2tsx.
-    validate_debug_tag_arguments(&ast, source)?;
-    validate_meta_element_placement(&ast, source)?;
+    let (has_debug_marker, has_meta_marker) = validation_markers(source);
+    if has_debug_marker {
+        validate_debug_tag_arguments(&ast, source)?;
+    }
+    if has_meta_marker {
+        validate_meta_element_placement(&ast, source)?;
+    }
 
     // Step 2: Determine component name from filename
     let component_name = derive_component_name(&options.filename);
@@ -295,8 +301,8 @@ pub fn svelte2tsx(
     }
 
     // Step 6: Process module script (<script context="module">)
-    if let Some(ref module) = ast.module {
-        super::script::process_module_script(module, source, &mut str, &mut exported_names);
+    if let (Some(module), Some(parsed)) = (&ast.module, &parsed_scripts.module) {
+        super::script::process_module_script(module, parsed, source, &mut str, &mut exported_names);
     }
 
     // Step 7: Process instance script (<script>)
@@ -323,9 +329,14 @@ pub fn svelte2tsx(
                 .collect::<std::collections::HashSet<String>>()
         })
         .unwrap_or_default();
-    if let Some(ref instance) = ast.instance {
+    if let (Some(instance), Some(parsed)) = (&ast.instance, &parsed_scripts.instance) {
         super::script::process_instance_script(
             instance,
+            parsed,
+            parsed_scripts
+                .module
+                .as_ref()
+                .map(|script| script.program()),
             source,
             &mut str,
             &mut exported_names,
@@ -541,6 +552,11 @@ pub fn svelte2tsx(
     if has_instance_script {
         has_top_level_await = process_instance_script_tag(
             &ast,
+            parsed_scripts
+                .instance
+                .as_ref()
+                .expect("instance script")
+                .program(),
             source,
             &options,
             &mut str,
@@ -581,6 +597,10 @@ pub fn svelte2tsx(
 
     create_render_function(
         &ast,
+        parsed_scripts
+            .module
+            .as_ref()
+            .map(|script| script.program()),
         source,
         &options,
         &mut str,
@@ -591,6 +611,7 @@ pub fn svelte2tsx(
         &hoistable_snippet_ranges,
         &embedded_script_content,
     );
+    drop(parsed_scripts);
 
     let closing = add_component_export(
         ComponentExportParams {
@@ -648,4 +669,48 @@ pub fn svelte2tsx(
         events,
         forward_map,
     })
+}
+
+fn validation_markers(source: &str) -> (bool, bool) {
+    let bytes = source.as_bytes();
+    let mut has_debug = false;
+    let mut has_meta = false;
+
+    for index in memchr::memchr2_iter(b'@', b':', bytes) {
+        match bytes[index] {
+            b'@' => {
+                if !has_debug {
+                    has_debug =
+                        index > 0 && bytes.get(index - 1..index + 6) == Some(b"{@debug".as_slice());
+                }
+            }
+            b':' => {
+                if !has_meta {
+                    has_meta = (index >= 7
+                        && bytes.get(index - 7..=index) == Some(b"<svelte:".as_slice()))
+                        || (index >= 3 && bytes.get(index - 3..=index) == Some(b"use:".as_slice()));
+                }
+            }
+            _ => unreachable!(),
+        }
+        if has_debug && has_meta {
+            break;
+        }
+    }
+
+    (has_debug, has_meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validation_markers;
+
+    #[test]
+    fn validation_markers_remain_set_after_unrelated_candidates() {
+        assert_eq!(validation_markers("{@debug user.name} @"), (true, false));
+        assert_eq!(
+            validation_markers("<div><svelte:window /></div>:"),
+            (false, true)
+        );
+    }
 }

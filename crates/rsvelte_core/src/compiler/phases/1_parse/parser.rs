@@ -143,6 +143,13 @@ pub struct Parser<'a> {
 /// and the 8 MiB of a default main thread.
 pub const MAX_NESTING_DEPTH: u32 = 128;
 
+impl Parser<'_> {
+    #[inline]
+    pub(crate) fn should_defer_template_parse(&self) -> bool {
+        !self.script_ts && self.options.defer_script_parse
+    }
+}
+
 /// An entry on the parser stack.
 #[derive(Debug, Clone)]
 pub enum StackEntry {

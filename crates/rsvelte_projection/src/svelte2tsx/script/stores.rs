@@ -5,11 +5,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use oxc_allocator::Allocator;
 use oxc_ast::ast as oxc;
 use oxc_ast_visit::Visit;
-use oxc_parser::Parser as OxcParser;
-use oxc_span::SourceType;
 
 use super::ast_utils::{collect_binding_names, extract_all_names_from_binding_pattern};
 use super::reactive::extract_names_from_labeled_body;
@@ -610,6 +607,7 @@ pub(super) fn collect_self_named_rune_call_positions(
 /// once and pass the result here, avoiding a second OXC parse).
 pub(super) fn inject_store_subscriptions_with_program(
     program: &oxc::Program,
+    module_program: Option<&oxc::Program>,
     offset: u32,
     source: &str,
     str: &mut MagicString,
@@ -703,7 +701,7 @@ pub(super) fn inject_store_subscriptions_with_program(
         }
     }
 
-    collect_module_script_import_stores(source, &accessed_stores, &mut import_store_names);
+    collect_module_script_import_stores(module_program, &accessed_stores, &mut import_store_names);
 
     // Official `attachStoreValueDeclarationOfImportsToRenderFn` iterates
     // `importStatements` in IMPORT-DECLARATION order (not first-`$store`-use
@@ -775,36 +773,15 @@ fn collect_import_store_names(
 /// This allows the instance script to inject store subscriptions for module-level
 /// imports at the $$render function body start.
 fn collect_module_script_import_stores(
-    source: &str,
+    program: Option<&oxc::Program>,
     accessed_stores: &HashSet<String>,
     import_store_names: &mut Vec<String>,
 ) {
-    // Fast path: no `<script` substring → no module script.
-    if !source.contains("<script") {
-        return;
-    }
-    // Locate the module script body. `find_module_script_span` matches BOTH
-    // `<script context="module">` and the Svelte 5 `<script module>` shorthand
-    // (the old regex only matched the `context=` form, so `<script module>`
-    // imports used as stores were never injected).
-    let (content_start, close_tag) = match find_module_script_span(source) {
-        Some(span) => span,
+    let program = match program {
+        Some(program) => program,
         None => return,
     };
-
-    let raw_content = &source[content_start..close_tag];
-
-    // Skip the OXC parse when there are no `import` declarations to find.
-    if !raw_content.contains("import") {
-        return;
-    }
-
-    let allocator = Allocator::default();
-    let source_type = SourceType::mjs();
-    let parser = OxcParser::new(&allocator, raw_content, source_type);
-    let result = parser.parse();
-
-    for stmt in result.program.body.iter() {
+    for stmt in program.body.iter() {
         if let oxc::Statement::ImportDeclaration(import) = stmt {
             collect_import_store_names(import, accessed_stores, import_store_names);
         }
@@ -817,14 +794,17 @@ fn collect_module_script_import_stores(
 /// module-script import names that are used as stores (`$name`) in the source
 /// and returns the store subscription declarations string to inject at the
 /// start of the $$render async wrapper.
-pub fn collect_module_import_store_declarations(source: &str) -> String {
+pub fn collect_module_import_store_declarations(
+    source: &str,
+    module_program: Option<&oxc::Program>,
+) -> String {
     let accessed_stores = collect_store_references(source);
     if accessed_stores.is_empty() {
         return String::new();
     }
 
     let mut import_store_names: Vec<String> = Vec::new();
-    collect_module_script_import_stores(source, &accessed_stores, &mut import_store_names);
+    collect_module_script_import_stores(module_program, &accessed_stores, &mut import_store_names);
 
     import_store_names.sort();
     import_store_names.dedup();

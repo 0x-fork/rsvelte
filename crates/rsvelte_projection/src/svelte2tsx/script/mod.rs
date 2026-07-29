@@ -4,9 +4,7 @@
 //! Extracts exported names, component events, and prop declarations to generate
 //! proper TypeScript type information.
 //!
-//! Script AST is obtained by re-parsing the raw script content via OXC and walking
-//! the OXC AST directly. This avoids dependency on the thread-local ParseArena
-//! used by the main compiler, keeping svelte2tsx self-contained.
+//! Script AST is parsed once with OXC and retained across every processing pass.
 
 mod ast_utils;
 mod component_events;
@@ -48,6 +46,7 @@ use hoistable_types::{
     is_special_type_name, resolve_hoistable_type_decls, rewrite_interface_to_type_dts,
 };
 use parse::with_parsed_script;
+pub(crate) use parse::{ParsedScript, ParsedScripts};
 use props_rune::{
     PropsRuneInfo, apply_props_typedef, collect_props_rune_info, detect_props_rune_oxc,
 };
@@ -97,6 +96,8 @@ pub fn classify_kit_route_file(basename: &str) -> Option<bool> {
 /// - Store subscriptions
 pub fn process_instance_script(
     script: &Script,
+    parsed: &ParsedScript<'_>,
+    module_program: Option<&oxc::Program<'_>>,
     source: &str,
     str: &mut MagicString,
     exported_names: &mut ExportedNames,
@@ -108,7 +109,7 @@ pub fn process_instance_script(
     script_generic_names: &HashSet<String>,
 ) {
     let offset = script.content_offset;
-    with_parsed_script(script, source, |program, raw_content| {
+    with_parsed_script(parsed, |program, raw_content| {
         // Pass 1: collect top-level declared names and possible exports
         let mut possible_exports: HashMap<String, PossibleExport> = HashMap::new();
         // Pre-populate with ALL top-level declared names so rune-vs-store
@@ -718,7 +719,7 @@ pub fn process_instance_script(
 
         // Pass 5: store subscriptions. Reuses the already-parsed program
         // so we don't re-parse the instance script content with OXC.
-        inject_store_subscriptions_with_program(program, offset, source, str);
+        inject_store_subscriptions_with_program(program, module_program, offset, source, str);
 
         // Pass 6: disambiguate generic arrow type-parameter lists for the
         // `.tsx` overlay (`<T>` → `<T,>`) so they aren't misparsed as JSX.
@@ -746,6 +747,7 @@ pub fn process_instance_script(
 /// * `exported_names` - Accumulator for exported names
 pub fn process_module_script(
     script: &Script,
+    parsed: &ParsedScript<'_>,
     source: &str,
     str: &mut MagicString,
     exported_names: &mut ExportedNames,
@@ -757,7 +759,7 @@ pub fn process_module_script(
     // store-subscription injection, type-assertion rewrite, name snapshot).
     // Parse once and share the program across all three passes.
     let offset = script.content_offset;
-    with_parsed_script(script, source, |program, raw_content| {
+    with_parsed_script(parsed, |program, raw_content| {
         // Inject store subscriptions for module-level variable declarations
         // only. Import-based store subscriptions are NOT injected here
         // because they need to go inside the $$render function body.
