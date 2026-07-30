@@ -6,9 +6,7 @@ use crate::svelte2tsx::svelte2tsx::Svelte2TsxOptions;
 
 use crate::svelte2tsx::template::attributes::attribute::format_attribute_node;
 use crate::svelte2tsx::template::attributes::binding::format_bind_directive;
-use crate::svelte2tsx::template::attributes::let_::{
-    build_let_destructure_string, get_let_directives,
-};
+use crate::svelte2tsx::template::attributes::let_::build_let_destructure_string;
 use crate::svelte2tsx::template::attributes::spread::format_spread_attribute;
 use crate::svelte2tsx::template::ctx::Counter;
 use crate::svelte2tsx::template::utils::expr::get_expression_text;
@@ -43,8 +41,7 @@ pub(crate) fn handle_slot_element(
         get_slot_attr_value(&el.attributes, source).map(|name| (inst.clone(), name))
     });
     if let Some((ref inst, ref target_slot)) = named_slot {
-        let lets = get_let_directives(&el.attributes);
-        let let_destructure = build_let_destructure_string(&lets, source);
+        let let_destructure = build_let_destructure_string(&el.attributes, source);
         let block_open = format!(
             "{{const {{/*\u{03A9}ignore_start\u{03A9}*/$$_$$/*\u{03A9}ignore_end\u{03A9}*/,{}}} = {}.$$slot_def[\"{}\"];$$_$$;",
             let_destructure, inst, target_slot
@@ -77,7 +74,7 @@ pub(crate) fn handle_slot_element(
     let opener = if bind_this_expr.is_some() {
         format!(
             " {{ const $$_slot{} = __sveltets_createSlot(\"{}\", {});",
-            counter.next_for("slot"),
+            counter.next_slot(),
             slot_name,
             slot_props_obj
         )
@@ -100,16 +97,7 @@ pub(crate) fn handle_slot_element(
             str.overwrite(
                 closing_tag_start,
                 el.end,
-                &format!(
-                    "{} = $$_slot{};}}",
-                    bind_expr,
-                    counter
-                        .counters
-                        .get("slot")
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(1)
-                ),
+                &format!("{} = $$_slot{};}}", bind_expr, counter.last_slot()),
             );
         } else {
             str.overwrite(closing_tag_start, el.end, " }");
@@ -117,12 +105,7 @@ pub(crate) fn handle_slot_element(
     } else {
         // Self-closing slot
         if let Some(ref bind_expr) = bind_this_expr {
-            let slot_idx = counter
-                .counters
-                .get("slot")
-                .copied()
-                .unwrap_or(0)
-                .saturating_sub(1);
+            let slot_idx = counter.last_slot();
             str.overwrite(
                 el.end - 2, // rewrite the `/>` portion
                 el.end,
@@ -179,6 +162,24 @@ pub(crate) fn slot_name_for_type(attributes: &[Attribute]) -> String {
         }
     }
     "default".to_string()
+}
+
+pub(crate) fn dollar_slot_name(attributes: &[Attribute]) -> String {
+    // The legacy declaration uses the last static text part, unlike the slot type key.
+    let mut slot_name = "default".to_string();
+    for attr in attributes {
+        if let Attribute::Attribute(node) = attr
+            && node.name == "name"
+            && let AttributeValue::Sequence(parts) = &node.value
+        {
+            for part in parts {
+                if let AttributeValuePart::Text(text) = part {
+                    slot_name = text.raw.to_string();
+                }
+            }
+        }
+    }
+    slot_name
 }
 
 pub(crate) fn get_slot_name(attributes: &[Attribute], source: &str) -> String {

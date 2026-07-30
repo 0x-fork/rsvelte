@@ -12,17 +12,15 @@ use super::helpers::rewrite_external_imports::{TextEdit, rewrite_external_specif
 use super::magic_string::{GenerateMapOptions, MagicString};
 use super::nodes::component_name::derive_component_name;
 use super::nodes::generics::{extract_generics_from_script_tag, split_generic_param_names};
-use super::nodes::runes_detection::{
-    detect_await_in_template, detect_rune_global_in_template, detect_runes_mode,
-};
+use super::nodes::runes_detection::detect_runes_mode;
 use super::nodes::scripts::find_script_close_tag_start;
-use super::nodes::slot::fragment_has_slot_element;
 use super::nodes::snippet_hoisting::hoist_top_level_snippets;
 use super::nodes::svelte_options::emit_svelte_options_element;
 use super::process_instance_script_tag::process_instance_script_tag;
 use super::script::{ComponentEvents, ExportedNames, StoreScanContext};
 use super::template;
 use super::utils::htmlxparser::{blank_style_content, blank_style_tags, remove_orphan_scripts};
+use super::utils::source_features::scan_source_features;
 use super::validation::{validate_debug_tag_arguments, validate_meta_element_placement};
 
 pub use super::interfaces::{
@@ -357,32 +355,7 @@ pub fn svelte2tsx(
         );
     }
 
-    // Step 7.4: Detect `{await expr}` in template expression tags.
-    // Await-in-template forces runes mode (async template expressions are
-    // Svelte 5 runes-only).
-    // Reference: language-tools/packages/svelte2tsx/src/svelte2tsx/nodes/ExportedNames.ts
-    //   `isRunes` doc: "True if uses runes or top level await or await in template expressions"
-    if detect_await_in_template(&ast, source) {
-        exported_names.set_uses_runes(true);
-    }
-
-    // Step 7.45: Detect `$state`/`$derived`/`$effect` rune-globals in TEMPLATE expressions.
-    //
-    // Official rule: `exportedNames.checkGlobalsForRunes(implicitStoreValues.getGlobals())`
-    // (svelte2tsx/index.ts) — `implicitStoreValues` collects ALL accessed undeclared
-    // globals across the entire component INCLUDING template expressions.
-    // `checkGlobalsForRunes` (svelte2tsx/nodes/ExportedNames.ts ~line 878–881) sets
-    // `hasRunesGlobals = isSvelte5Plus && globals.some(g =>
-    // ['$state','$derived','$effect'].includes(g))`.
-    //
-    // A component with NO `<script>` but with e.g. `aria-current={$state.eager(pathname) === '/'
-    // ? 'page' : null}` is therefore RUNES (because `$state` is an undeclared global
-    // referenced in the template).  rsvelte's instance-script scanner never runs for
-    // template-only components, so we need to walk the template AST here.
-    if detect_rune_global_in_template(&ast, source, &exported_names.instance_value_names) {
-        exported_names.set_uses_runes(true);
-    }
-
+    let source_features = scan_source_features(source);
     // Step 7.48: Find and remove embedded `<script>` tags (those NOT matching
     // the top-level instance / module script). Mirrors official svelte2tsx's
     // `blankOtherScriptTags` / `str.move` approach.
@@ -417,13 +390,6 @@ pub fn svelte2tsx(
     // whose source span covers that range to be automatically truncated.
     let embedded_script_content = remove_orphan_scripts(&ast, source, &mut str);
 
-    // Step 7.5: Slot detection from the AST (NOT a source substring scan — a
-    // naive `source.contains("<slot")` matches `<slot>` inside string literals
-    // such as a custom element's `shadowRoot.innerHTML = '…<slot>…'`, which are
-    // not real template slots). Official emits the `__sveltets_createSlot`
-    // helper / treats the component as slotted only for real `<slot>` elements.
-    let has_slot_elements = fragment_has_slot_element(&ast.fragment);
-
     // Step 7.6: Process <svelte:options> tag as a createElement call
     // The parser stores svelte:options in ast.options (not in fragment.nodes),
     // so we need to handle it separately.
@@ -433,9 +399,9 @@ pub fn svelte2tsx(
     blank_style_tags(&ast, source, &mut str);
 
     // Step 8.5: Detect $$props, $$restProps, $$slots usage in source (before wrapping)
-    let uses_dollar_props = source.contains("$$props");
-    let uses_dollar_rest_props = source.contains("$$restProps");
-    let uses_dollar_slots = source.contains("$$slots");
+    let uses_dollar_props = source_features.uses_dollar_props;
+    let uses_dollar_rest_props = source_features.uses_dollar_rest_props;
+    let uses_dollar_slots = source_features.uses_dollar_slots;
 
     // Step 9: Process template nodes in-place via MagicString. Publish the
     // element-opener comment ranges first so attribute emission can re-attach
@@ -462,7 +428,19 @@ pub fn svelte2tsx(
         hoist_top_level_snippets(&ast, source, &exported_names, &mut str);
 
     // Step 9.5: Collect slot and event information from the template
-    let template_info = template::collect_template_info(&ast.fragment, source);
+    let template_info = template::collect_template_info_if_needed(
+        &ast,
+        source,
+        uses_dollar_slots,
+        source_features.may_need_template_info,
+        source_features.has_await_word,
+        source_features.may_have_template_rune_global,
+        &exported_names.instance_value_names,
+    );
+    let has_slot_elements = !template_info.slots.is_empty();
+    if template_info.uses_runes {
+        exported_names.set_uses_runes(true);
+    }
 
     // Step 10: Wrap in $$render() and add component export
     //
@@ -536,10 +514,10 @@ pub fn svelte2tsx(
 
     // Build $$props/$$restProps/$$slots declaration text for injection into $$render() header
     let dollar_decls = build_dollar_declarations(
-        &ast,
         uses_dollar_props,
         uses_dollar_rest_props,
         uses_dollar_slots,
+        template_info.dollar_slot_names.as_deref(),
     );
 
     // Detect generics attribute from the script tag (available for component export)
