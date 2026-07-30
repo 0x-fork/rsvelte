@@ -70,12 +70,15 @@ struct Cli {
     #[arg(long = "config")]
     config: Option<PathBuf>,
 
-    /// Prefer Microsoft's native `tsgo` over the stock `tsc` when
-    /// type-checking the overlay. Without this flag type-checking still
-    /// runs, using `tsc`. (`tsgo` falls back to `tsc` and vice-versa if
-    /// the preferred binary isn't installed.) `--tsgo-experimental-api`
-    /// is accepted as an alias — rsvelte has a single native tsgo
-    /// backend, so the experimental in-process API has no separate mode.
+    /// Type-check the overlay with the TypeScript 7 native compiler
+    /// instead of the workspace's own `tsc`, matching official
+    /// svelte-check's flag of the same name. TypeScript 7 is looked up as
+    /// `@typescript/native` (the npm alias it is installed under when a
+    /// TypeScript 6 `typescript` has to stay alongside it) and then as
+    /// `@typescript/native-preview`; if neither is installed this is an
+    /// error, not a silent downgrade. Install it with
+    /// `npm install --save-dev typescript@~6 @typescript/native@npm:typescript@7`.
+    /// `--tsgo-experimental-api` is accepted as an alias.
     #[arg(
         long = "tsgo",
         alias = "tsgo-experimental-api",

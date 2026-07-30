@@ -128,7 +128,12 @@ function oracleModules() {
 /** Resolve the compiler binary rsvelte-check's TSGO_BIN should point at, per `--rsvelte-backend`. */
 function rsvelteCompiler(oracleNodeModules) {
 	if (BACKEND === 'tsc') {
-		const tsc = path.join(oracleNodeModules, '.bin/tsc');
+		// The real TypeScript's own launcher, NOT `.bin/tsc`: the oracle also
+		// installs TypeScript 7 under the `@typescript/native` alias, which
+		// declares the same `tsc` bin name, so the shim points at whichever of
+		// the two npm linked last. Everything but the `ts7-native` scenario
+		// must type-check with the TS 6 svelte-check itself runs on.
+		const tsc = path.join(oracleNodeModules, 'typescript/bin/tsc');
 		if (!fs.existsSync(tsc)) return fail(`oracle typescript missing its tsc at ${tsc}`);
 		return tsc;
 	}
@@ -191,7 +196,15 @@ function main() {
 		// it against the workspace, rsvelte-check against cwd).
 		const common = ['--workspace', '.'];
 		if (config.tsconfig) common.push('--tsconfig', config.tsconfig);
+		// `args` opts a scenario into a flag both checkers understand — the
+		// point being to compare the diagnostics that flag produces, so it has
+		// to reach both sides identically.
+		for (const extra of config.args ?? []) common.push(extra);
 		const ws = config.workspace ?? '.';
+		// `TSGO_BIN` pins rsvelte-check to the backend selected above so both
+		// sides type-check with the same compiler. A scenario whose whole
+		// subject IS compiler discovery has to be allowed to do its own.
+		const actualEnv = config.discoverCompiler ? {} : { TSGO_BIN: rsvelteTsBin };
 
 		const oracle = parseMachineVerbose(
 			runCapture(
@@ -209,13 +222,16 @@ function main() {
 		// pointing it straight at the chosen binary is enough on its own; `--tsgo`
 		// is added too so the invocation matches how a real caller selects the
 		// backend and isn't relying on an implementation detail of the override.
-		const backendArgs = BACKEND === 'tsgo' ? ['--tsgo'] : [];
+		// A scenario that already asks for `--tsgo` itself must not get a second
+		// copy — clap rejects a repeated flag outright.
+		const backendArgs =
+			BACKEND === 'tsgo' && !(config.args ?? []).includes('--tsgo') ? ['--tsgo'] : [];
 		const actual = parseMachineVerbose(
 			runCapture(
 				bin,
 				['--output', 'machine-verbose', ...common, ...backendArgs],
 				path.join(actualDir, ws),
-				{ TSGO_BIN: rsvelteTsBin }
+				actualEnv
 			)
 		);
 
