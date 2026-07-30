@@ -99,6 +99,7 @@ impl Chunk {
 // ---------------------------------------------------------------------------
 
 /// A v3 source map.
+#[allow(dead_code, reason = "preserved as the standalone MagicString API")]
 #[derive(Debug, Clone)]
 pub struct SourceMap {
     pub version: u8,
@@ -109,53 +110,136 @@ pub struct SourceMap {
     pub mappings: String,
 }
 
+#[allow(dead_code, reason = "preserved as the standalone MagicString API")]
 impl SourceMap {
     /// Serialize to a JSON string.
     pub fn to_json(&self) -> String {
-        let sources: Vec<String> = self.sources.iter().map(|s| json_escape(s)).collect();
-        let sources_content: Vec<String> = self
-            .sources_content
+        let metadata_bytes = self
+            .sources
             .iter()
-            .map(|s| json_escape(s))
-            .collect();
-        let names: Vec<String> = self.names.iter().map(|s| json_escape(s)).collect();
+            .chain(&self.sources_content)
+            .chain(&self.names)
+            .map(String::len)
+            .fold(
+                self.file.as_ref().map_or(0, String::len),
+                usize::saturating_add,
+            );
+        let mut json = String::with_capacity(
+            96usize
+                .saturating_add(metadata_bytes)
+                .saturating_add(self.mappings.len()),
+        );
 
-        let file_str = match &self.file {
-            Some(f) => json_escape(f),
-            None => "null".to_string(),
-        };
-
-        format!(
-            r#"{{"version":{},"file":{},"sources":[{}],"sourcesContent":[{}],"names":[{}],"mappings":{}}}"#,
-            self.version,
-            file_str,
-            sources.join(","),
-            sources_content.join(","),
-            names.join(","),
-            json_escape(&self.mappings),
-        )
+        json.push_str(r#"{"version":"#);
+        let _ = write!(json, "{}", self.version);
+        json.push_str(r#","file":"#);
+        match &self.file {
+            Some(file) => push_json_string(&mut json, file),
+            None => json.push_str("null"),
+        }
+        json.push_str(r#","sources":"#);
+        push_json_string_array(&mut json, &self.sources);
+        json.push_str(r#","sourcesContent":"#);
+        push_json_string_array(&mut json, &self.sources_content);
+        json.push_str(r#","names":"#);
+        push_json_string_array(&mut json, &self.names);
+        json.push_str(r#","mappings":"#);
+        push_mappings_json(&mut json, &self.mappings);
+        json.push('}');
+        json
     }
 }
 
-/// Wrap a string value in double-quotes with JSON escaping.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
+#[inline]
+#[allow(dead_code, reason = "used by the standalone SourceMap API")]
+fn push_json_string_array(json: &mut String, values: &[String]) {
+    json.push('[');
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            json.push(',');
+        }
+        push_json_string(json, value);
+    }
+    json.push(']');
+}
+
+#[inline]
+#[allow(dead_code, reason = "used by the standalone SourceMap API")]
+fn push_mappings_json(json: &mut String, mappings: &str) {
+    let needs_escape = mappings
+        .bytes()
+        .any(|byte| byte < 0x20 || matches!(byte, b'"' | b'\\'));
+
+    if needs_escape {
+        #[cfg(test)]
+        MAPPINGS_ESCAPE_FALLBACKS.with(|calls| calls.set(calls.get() + 1));
+        push_json_string(json, mappings);
+    } else {
+        #[cfg(test)]
+        MAPPINGS_DIRECT_WRITES.with(|calls| calls.set(calls.get() + 1));
+        json.push('"');
+        json.push_str(mappings);
+        json.push('"');
+    }
+}
+
+fn push_source_map_json_prefix(
+    json: &mut String,
+    file: Option<&str>,
+    source: &str,
+    source_content: Option<&str>,
+) {
+    json.push_str(r#"{"version":3,"file":"#);
+    match file {
+        Some(file) => push_json_string(json, file),
+        None => json.push_str("null"),
+    }
+    json.push_str(r#","sources":["#);
+    push_json_string(json, source);
+    json.push_str(r#"],"sourcesContent":"#);
+    match source_content {
+        Some(content) => {
+            json.push('[');
+            push_json_string(json, content);
+            json.push(']');
+        }
+        None => json.push_str("[]"),
+    }
+    json.push_str(r#","names":[],"mappings":""#);
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static JSON_STRING_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static JSON_STRING_INPUT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAPPINGS_DIRECT_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAPPINGS_ESCAPE_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BUNDLE_SOURCE_MAP_CAPACITY_GREW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Append a string value with JSON escaping.
+fn push_json_string(json: &mut String, value: &str) {
+    #[cfg(test)]
+    {
+        JSON_STRING_WRITES.with(|writes| writes.set(writes.get() + 1));
+        JSON_STRING_INPUT_BYTES.with(|bytes| bytes.set(bytes.get() + value.len()));
+    }
+
+    json.push('"');
+    for ch in value.chars() {
         match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+                let _ = write!(json, "\\u{:04x}", c as u32);
             }
-            c => out.push(c),
+            c => json.push(c),
         }
     }
-    out.push('"');
-    out
+    json.push('"');
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +257,14 @@ pub struct GenerateMapOptions {
     pub include_content: bool,
 }
 
+/// Code and both mapping directions produced by one chunk traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedBundle {
+    pub code: String,
+    pub source_map: String,
+    pub forward_segments: Vec<(u32, u32, u32)>,
+}
+
 // ---------------------------------------------------------------------------
 // VLQ encoding
 // ---------------------------------------------------------------------------
@@ -184,14 +276,30 @@ const VLQ_CONTINUATION_BIT: u32 = VLQ_BASE; // 32
 
 const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn vlq_encode(value: i64) -> String {
+const ASCII_HIRES_SEGMENT: &str = ",AAAC";
+const ASCII_HIRES_BLOCK_SEGMENTS: usize = 16;
+const MAX_HIRES_SEGMENT_BYTES: usize = 24;
+const ASCII_HIRES_BLOCK: &str = concat!(
+    ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC",
+    ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC", ",AAAC",
+);
+
+#[cfg(test)]
+std::thread_local! {
+    static VLQ_ENCODE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn vlq_encode(encoded: &mut String, value: i64) {
+    #[cfg(test)]
+    VLQ_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let mut vlq = if value < 0 {
         ((-value) as u32) << 1 | 1
     } else {
         (value as u32) << 1
     };
 
-    let mut encoded = String::new();
     loop {
         let mut digit = vlq & VLQ_BASE_MASK;
         vlq >>= VLQ_BASE_SHIFT;
@@ -203,7 +311,207 @@ fn vlq_encode(value: i64) -> String {
             break;
         }
     }
-    encoded
+}
+
+#[inline]
+fn push_ascii_hires_segments(mappings: &mut String, count: usize) {
+    mappings.reserve(count * ASCII_HIRES_SEGMENT.len());
+
+    let mut remaining = count;
+    while remaining >= ASCII_HIRES_BLOCK_SEGMENTS {
+        mappings.push_str(ASCII_HIRES_BLOCK);
+        remaining -= ASCII_HIRES_BLOCK_SEGMENTS;
+    }
+    mappings.push_str(&ASCII_HIRES_BLOCK[..remaining * ASCII_HIRES_SEGMENT.len()]);
+}
+
+#[derive(Default)]
+struct OutputEstimate {
+    mapping_bytes: usize,
+    forward_segments: usize,
+}
+
+impl OutputEstimate {
+    #[inline]
+    fn add_mapping_bytes(&mut self, bytes: usize) {
+        self.mapping_bytes = self.mapping_bytes.saturating_add(bytes);
+    }
+
+    #[inline]
+    fn add_unmapped(&mut self, content: &str) {
+        self.add_mapping_bytes(memchr::memchr_iter(b'\n', content.as_bytes()).count());
+    }
+
+    fn add_chunk_body(&mut self, chunk: &Chunk, body: &str) {
+        if body.is_empty() {
+            return;
+        }
+
+        // Four u32-domain VLQ fields plus a possible comma fit in 24 bytes.
+        self.add_mapping_bytes(MAX_HIRES_SEGMENT_BYTES);
+        if chunk.is_edited() {
+            self.add_unmapped(body);
+            return;
+        }
+
+        if body.is_ascii() {
+            let newlines = memchr::memchr_iter(b'\n', body.as_bytes()).count();
+            let ascii_bytes = body.len() - newlines;
+            self.add_mapping_bytes(
+                ascii_bytes
+                    .saturating_mul(ASCII_HIRES_SEGMENT.len())
+                    .saturating_add(newlines.saturating_mul(1 + MAX_HIRES_SEGMENT_BYTES)),
+            );
+            return;
+        }
+
+        for &byte in body.as_bytes() {
+            if byte == b'\n' {
+                self.add_mapping_bytes(1 + MAX_HIRES_SEGMENT_BYTES);
+            } else if byte.is_ascii() {
+                self.add_mapping_bytes(ASCII_HIRES_SEGMENT.len());
+            } else if byte & 0xc0 != 0x80 {
+                self.add_mapping_bytes(MAX_HIRES_SEGMENT_BYTES);
+            }
+        }
+    }
+}
+
+struct MappingState<'a> {
+    mappings: &'a mut String,
+    original_line_starts: Vec<usize>,
+    generated_column: i64,
+    original_line: i64,
+    original_column: i64,
+    first_segment_on_line: bool,
+}
+
+impl<'a> MappingState<'a> {
+    fn new(mappings: &'a mut String, original: &str) -> Self {
+        Self {
+            mappings,
+            original_line_starts: line_starts(original),
+            generated_column: 0,
+            original_line: 0,
+            original_column: 0,
+            first_segment_on_line: true,
+        }
+    }
+
+    #[inline]
+    fn original_location(&self, original: &str, offset: u32) -> (i64, i64) {
+        let offset = offset as usize;
+        let line = match self.original_line_starts.binary_search(&offset) {
+            Ok(index) => index,
+            Err(index) => index - 1,
+        };
+        let line_start = self.original_line_starts[line];
+        let column = original[line_start..offset]
+            .chars()
+            .map(char::len_utf16)
+            .sum::<usize>();
+        (line as i64, column as i64)
+    }
+
+    #[inline]
+    fn advance_line(&mut self) {
+        self.mappings.push(';');
+        self.generated_column = 0;
+        self.first_segment_on_line = true;
+    }
+
+    fn advance_unmapped(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        for (index, part) in content.split('\n').enumerate() {
+            if index != 0 {
+                self.advance_line();
+            }
+            self.generated_column += count_utf16(part) as i64;
+        }
+    }
+
+    #[inline]
+    fn emit_segment(&mut self, generated_column: i64, original_line: i64, original_column: i64) {
+        if !self.first_segment_on_line {
+            self.mappings.push(',');
+        }
+        self.first_segment_on_line = false;
+
+        vlq_encode(self.mappings, generated_column - self.generated_column);
+        self.generated_column = generated_column;
+        vlq_encode(self.mappings, 0);
+        vlq_encode(self.mappings, original_line - self.original_line);
+        self.original_line = original_line;
+        vlq_encode(self.mappings, original_column - self.original_column);
+        self.original_column = original_column;
+    }
+
+    fn advance_chunk_body(&mut self, original: &str, chunk: &Chunk, body: &str) {
+        if body.is_empty() {
+            return;
+        }
+
+        let (source_line, source_column) = self.original_location(original, chunk.start);
+        self.emit_segment(self.generated_column, source_line, source_column);
+
+        if chunk.is_edited() {
+            for ch in body.chars() {
+                if ch == '\n' {
+                    self.advance_line();
+                } else {
+                    self.generated_column += ch.len_utf16() as i64;
+                }
+            }
+            return;
+        }
+
+        let mut current_source_line = source_line;
+        let mut current_source_column = source_column;
+        let bytes = body.as_bytes();
+        let mut byte_index = 0;
+        while byte_index < bytes.len() {
+            if bytes[byte_index] == b'\n' {
+                self.advance_line();
+                current_source_line += 1;
+                current_source_column = 0;
+                self.emit_segment(
+                    self.generated_column,
+                    current_source_line,
+                    current_source_column,
+                );
+                byte_index += 1;
+            } else if bytes[byte_index].is_ascii() {
+                let run_start = byte_index;
+                while byte_index < bytes.len()
+                    && bytes[byte_index].is_ascii()
+                    && bytes[byte_index] != b'\n'
+                {
+                    byte_index += 1;
+                }
+                let run_len = byte_index - run_start;
+                push_ascii_hires_segments(self.mappings, run_len);
+                self.generated_column += run_len as i64;
+                current_source_column += run_len as i64;
+                self.original_column = current_source_column;
+            } else {
+                let ch = body[byte_index..]
+                    .chars()
+                    .next()
+                    .expect("non-ASCII byte starts a character");
+                let width = ch.len_utf16() as i64;
+                self.generated_column += width;
+                current_source_column += width;
+                self.emit_segment(
+                    self.generated_column,
+                    current_source_line,
+                    current_source_column,
+                );
+                byte_index += ch.len_utf8();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,20 +964,7 @@ impl MagicString {
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         let mut result = String::with_capacity(self.original.len());
-        result.push_str(&self.intro);
-
-        let mut cur = Some(self.first_chunk);
-        while let Some(ci) = cur {
-            let chunk = &self.chunks[ci];
-            result.push_str(&chunk.intro);
-            // Avoid cloning the per-chunk slice for unedited chunks.
-            let body = self.chunk_content(ci);
-            result.push_str(body);
-            result.push_str(&chunk.outro);
-            cur = chunk.next;
-        }
-
-        result.push_str(&self.outro);
+        self.traverse_outputs(Some(&mut result), None, None);
         result
     }
 
@@ -690,25 +985,15 @@ impl MagicString {
     /// [`MagicString::to_string`] *before* any text-level post-pass. Callers
     /// that apply such a post-pass (e.g. import-specifier rewriting) must
     /// account for drift after the rewrite point themselves.
+    #[allow(dead_code, reason = "preserved as the standalone MagicString API")]
     pub fn forward_segments(&self) -> Vec<(u32, u32, u32)> {
-        let mut segments = Vec::new();
-        let mut generated: u32 = self.intro.len() as u32;
-        let mut cur = Some(self.first_chunk);
-        while let Some(ci) = cur {
-            let chunk = &self.chunks[ci];
-            generated += chunk.intro.len() as u32;
-            let body = self.chunk_content(ci);
-            if !chunk.is_edited() && chunk.end > chunk.start {
-                segments.push((chunk.start, chunk.end, generated));
-            }
-            generated += body.len() as u32;
-            generated += chunk.outro.len() as u32;
-            cur = chunk.next;
-        }
+        let mut segments = Vec::with_capacity(self.chunks.len());
+        self.traverse_outputs(None, None, Some(&mut segments));
         segments
     }
 
     /// Generate a v3 source map.
+    #[allow(dead_code, reason = "preserved as the standalone MagicString API")]
     pub fn generate_map(&self, options: GenerateMapOptions) -> SourceMap {
         let source_name = options.source.unwrap_or_default();
         let mappings = self.generate_mappings();
@@ -727,240 +1012,139 @@ impl MagicString {
         }
     }
 
+    /// Generate code and both mapping directions in one chunk traversal.
+    pub fn generate_bundle(&self, options: GenerateMapOptions) -> GeneratedBundle {
+        let GenerateMapOptions {
+            file,
+            source,
+            include_content,
+        } = options;
+        let source = source.unwrap_or_default();
+        let estimate = self.estimate_outputs();
+        let code_capacity = self
+            .original
+            .len()
+            .saturating_add(self.intro.len())
+            .saturating_add(self.outro.len());
+        let metadata_bytes = file
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(source.len())
+            .saturating_add(usize::from(include_content).saturating_mul(self.original.len()));
+        let mut source_map = String::with_capacity(
+            96usize
+                .saturating_add(metadata_bytes)
+                .saturating_add(estimate.mapping_bytes),
+        );
+        #[cfg(test)]
+        let initial_source_map_capacity = source_map.capacity();
+        push_source_map_json_prefix(
+            &mut source_map,
+            file.as_deref(),
+            &source,
+            include_content.then_some(self.original.as_str()),
+        );
+
+        let mut code = String::with_capacity(code_capacity);
+        let mut forward_segments = Vec::with_capacity(estimate.forward_segments);
+        self.traverse_outputs(
+            Some(&mut code),
+            Some(&mut source_map),
+            Some(&mut forward_segments),
+        );
+        source_map.push_str("\"}");
+        #[cfg(test)]
+        BUNDLE_SOURCE_MAP_CAPACITY_GREW.with(|grew| {
+            grew.set(source_map.capacity() != initial_source_map_capacity);
+        });
+
+        GeneratedBundle {
+            code,
+            source_map,
+            forward_segments,
+        }
+    }
+
+    fn estimate_outputs(&self) -> OutputEstimate {
+        let mut estimate = OutputEstimate::default();
+        estimate.add_unmapped(&self.intro);
+
+        let mut cur = Some(self.first_chunk);
+        while let Some(chunk_index) = cur {
+            let chunk = &self.chunks[chunk_index];
+            let body = self.chunk_content(chunk_index);
+            estimate.add_unmapped(&chunk.intro);
+            estimate.add_chunk_body(chunk, body);
+            estimate.add_unmapped(&chunk.outro);
+            if !chunk.is_edited() && chunk.end > chunk.start {
+                estimate.forward_segments = estimate.forward_segments.saturating_add(1);
+            }
+            cur = chunk.next;
+        }
+
+        estimate.add_unmapped(&self.outro);
+        estimate
+    }
+
     // -----------------------------------------------------------------
     // Source-map internals
     // -----------------------------------------------------------------
 
     /// Build the VLQ-encoded `mappings` string.
-    #[allow(unused_assignments)]
+    #[allow(dead_code, reason = "used by the standalone MagicString API")]
     fn generate_mappings(&self) -> String {
         let mut mappings = String::new();
+        self.traverse_outputs(None, Some(&mut mappings), None);
+        mappings
+    }
 
-        // Running state for relative VLQ encoding.
-        let mut _generated_line: u32 = 0;
-        let mut generated_column: i64 = 0;
-        let mut original_line: i64 = 0;
-        let mut original_column: i64 = 0;
-
-        // Pre-compute line starts for the original source.
-        let original_line_starts = line_starts(&self.original);
-
-        // Helper closure: given an original byte offset, return (line, col) both 0-based.
-        // Source-map columns are UTF-16 code units (source-map spec v3 / LSP), not
-        // bytes — so a multibyte char before `offset` must count its UTF-16 width,
-        // not its byte length. For ASCII this is identical to the byte delta.
-        let orig_loc = |offset: u32| -> (i64, i64) {
-            let offset = offset as usize;
-            let line = match original_line_starts.binary_search(&offset) {
-                Ok(i) => i,
-                Err(i) => i - 1,
-            };
-            let line_start = original_line_starts[line];
-            let col: usize = self.original[line_start..offset]
-                .chars()
-                .map(|c| c.len_utf16())
-                .sum();
-            (line as i64, col as i64)
-        };
-
-        let mut first_segment_on_line = true;
-
-        // Emit a mapping segment.
-        let emit_segment = |mappings: &mut String,
-                            gen_col: i64,
-                            generated_column: &mut i64,
-                            source_idx: i64,
-                            orig_line: i64,
-                            original_line: &mut i64,
-                            orig_col: i64,
-                            original_column: &mut i64,
-                            first_segment_on_line: &mut bool| {
-            if !*first_segment_on_line {
-                mappings.push(',');
-            }
-            *first_segment_on_line = false;
-
-            // Field 1: generated column (relative)
-            mappings.push_str(&vlq_encode(gen_col - *generated_column));
-            *generated_column = gen_col;
-            // Field 2: source index (relative)
-            mappings.push_str(&vlq_encode(source_idx));
-            // Field 3: original line (relative)
-            mappings.push_str(&vlq_encode(orig_line - *original_line));
-            *original_line = orig_line;
-            // Field 4: original column (relative)
-            mappings.push_str(&vlq_encode(orig_col - *original_column));
-            *original_column = orig_col;
-        };
-
-        // Process the intro (generated content with no source mapping).
-        let intro_lines: Vec<&str> = self.intro.split('\n').collect();
-        for (i, _) in intro_lines.iter().enumerate() {
-            if i > 0 {
-                mappings.push(';');
-                _generated_line += 1;
-                generated_column = 0;
-                first_segment_on_line = true;
-            }
+    fn traverse_outputs(
+        &self,
+        mut code: Option<&mut String>,
+        mappings: Option<&mut String>,
+        mut forward_segments: Option<&mut Vec<(u32, u32, u32)>>,
+    ) {
+        let mut mapping = mappings.map(|mappings| MappingState::new(mappings, &self.original));
+        if let Some(code) = &mut code {
+            code.push_str(&self.intro);
         }
-        // Advance generated column for the last intro line fragment.
-        if let Some(last) = intro_lines.last() {
-            generated_column += count_utf16(last) as i64;
+        if let Some(mapping) = &mut mapping {
+            mapping.advance_unmapped(&self.intro);
         }
 
-        // Walk chunks.
+        let mut generated_bytes = self.intro.len() as u32;
         let mut cur = Some(self.first_chunk);
         while let Some(ci) = cur {
             let chunk = &self.chunks[ci];
+            let body = self.chunk_content(ci);
 
-            // Process chunk intro.
-            if !chunk.intro.is_empty() {
-                let parts: Vec<&str> = chunk.intro.split('\n').collect();
-                for (i, part) in parts.iter().enumerate() {
-                    if i > 0 {
-                        mappings.push(';');
-                        _generated_line += 1;
-                        generated_column = 0;
-                        first_segment_on_line = true;
-                    }
-                    generated_column += count_utf16(part) as i64;
-                }
+            if let Some(code) = &mut code {
+                code.push_str(&chunk.intro);
+                code.push_str(body);
+                code.push_str(&chunk.outro);
             }
-
-            // Process chunk content. Effective body is the replacement
-            // text for edited chunks, or `original[start..end]` for
-            // unedited ones.
-            let edited = chunk.is_edited();
-            let body: &str = match &chunk.content {
-                Some(s) => s.as_str(),
-                None => &self.original[chunk.start as usize..chunk.end as usize],
-            };
-            if !body.is_empty() {
-                if !edited {
-                    // Unedited: emit one segment per character ("hires"
-                    // mode). Per-line-only mapping forces consumers to
-                    // interpolate, which breaks at edited-chunk
-                    // boundaries; per-character segments let
-                    // `lookup_token` return the exact original column
-                    // for any generated position inside an unedited
-                    // region.
-                    let (src_line, src_col) = orig_loc(chunk.start);
-                    let mut cur_src_line = src_line;
-                    let mut cur_src_col = src_col;
-
-                    // Emit a segment at the start of this chunk.
-                    emit_segment(
-                        &mut mappings,
-                        generated_column,
-                        &mut generated_column,
-                        0,
-                        cur_src_line,
-                        &mut original_line,
-                        cur_src_col,
-                        &mut original_column,
-                        &mut first_segment_on_line,
-                    );
-
-                    // Walk character-by-character, emitting one segment
-                    // per character anchored to its original position.
-                    for ch in body.chars() {
-                        if ch == '\n' {
-                            mappings.push(';');
-                            _generated_line += 1;
-                            generated_column = 0;
-                            first_segment_on_line = true;
-                            cur_src_line += 1;
-                            cur_src_col = 0;
-
-                            // Emit mapping at start of new line.
-                            emit_segment(
-                                &mut mappings,
-                                generated_column,
-                                &mut generated_column,
-                                0,
-                                cur_src_line,
-                                &mut original_line,
-                                cur_src_col,
-                                &mut original_column,
-                                &mut first_segment_on_line,
-                            );
-                        } else {
-                            // Advance by UTF-16 width so generated and original
-                            // columns stay in UTF-16 units (1 for BMP, 2 for astral).
-                            let w = ch.len_utf16() as i64;
-                            generated_column += w;
-                            cur_src_col += w;
-                            emit_segment(
-                                &mut mappings,
-                                generated_column,
-                                &mut generated_column,
-                                0,
-                                cur_src_line,
-                                &mut original_line,
-                                cur_src_col,
-                                &mut original_column,
-                                &mut first_segment_on_line,
-                            );
-                        }
-                    }
-                } else {
-                    // Edited chunk: map the start of the replacement to the original position.
-                    let (src_line, src_col) = orig_loc(chunk.start);
-
-                    emit_segment(
-                        &mut mappings,
-                        generated_column,
-                        &mut generated_column,
-                        0,
-                        src_line,
-                        &mut original_line,
-                        src_col,
-                        &mut original_column,
-                        &mut first_segment_on_line,
-                    );
-
-                    // Advance through the replacement content.
-                    for ch in body.chars() {
-                        if ch == '\n' {
-                            mappings.push(';');
-                            _generated_line += 1;
-                            generated_column = 0;
-                            first_segment_on_line = true;
-                        } else {
-                            generated_column += ch.len_utf16() as i64;
-                        }
-                    }
-                }
+            if let Some(mapping) = &mut mapping {
+                mapping.advance_unmapped(&chunk.intro);
+                mapping.advance_chunk_body(&self.original, chunk, body);
+                mapping.advance_unmapped(&chunk.outro);
             }
-
-            // Process chunk outro.
-            if !chunk.outro.is_empty() {
-                let parts: Vec<&str> = chunk.outro.split('\n').collect();
-                for (i, part) in parts.iter().enumerate() {
-                    if i > 0 {
-                        mappings.push(';');
-                        _generated_line += 1;
-                        generated_column = 0;
-                        first_segment_on_line = true;
-                    }
-                    generated_column += count_utf16(part) as i64;
+            if let Some(segments) = &mut forward_segments {
+                generated_bytes += chunk.intro.len() as u32;
+                if !chunk.is_edited() && chunk.end > chunk.start {
+                    segments.push((chunk.start, chunk.end, generated_bytes));
                 }
+                generated_bytes += body.len() as u32;
+                generated_bytes += chunk.outro.len() as u32;
             }
-
             cur = chunk.next;
         }
 
-        // Process the outro.
-        if !self.outro.is_empty() {
-            let parts: Vec<&str> = self.outro.split('\n').collect();
-            for (i, _) in parts.iter().enumerate() {
-                if i > 0 {
-                    mappings.push(';');
-                }
-            }
+        if let Some(code) = &mut code {
+            code.push_str(&self.outro);
         }
-
-        mappings
+        if let Some(mapping) = &mut mapping {
+            mapping.advance_unmapped(&self.outro);
+        }
     }
 }
 
@@ -1001,6 +1185,37 @@ fn count_utf16(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_bundle_matches_individual_outputs(value: &MagicString) {
+        let options = [
+            GenerateMapOptions::default(),
+            GenerateMapOptions {
+                file: Some("out\"\\雪\n.tsx".to_string()),
+                source: Some("src\"\\é.svelte".to_string()),
+                include_content: false,
+            },
+            GenerateMapOptions {
+                file: Some("out\"\\雪\n.tsx".to_string()),
+                source: Some("src\"\\é.svelte".to_string()),
+                include_content: true,
+            },
+        ];
+        let expected_code = value.to_string();
+        let expected_forward_segments = value.forward_segments();
+        assert_eq!(
+            value.estimate_outputs().forward_segments,
+            expected_forward_segments.len()
+        );
+        for options in options {
+            let expected_source_map = value.generate_map(options.clone()).to_json();
+
+            let actual = value.generate_bundle(options);
+            assert_eq!(actual.code, expected_code);
+            assert_eq!(actual.source_map, expected_source_map);
+            assert_eq!(actual.forward_segments, expected_forward_segments);
+            assert!(!BUNDLE_SOURCE_MAP_CAPACITY_GREW.with(std::cell::Cell::get));
+        }
+    }
 
     #[test]
     fn test_basic_to_string() {
@@ -1112,6 +1327,115 @@ mod tests {
     }
 
     #[test]
+    fn generated_bundle_matches_exhaustive_overwrites() {
+        let source = "a😀\nb";
+        let mut boundaries = source
+            .char_indices()
+            .map(|(offset, _)| offset as u32)
+            .collect::<Vec<_>>();
+        boundaries.push(source.len() as u32);
+
+        assert_bundle_matches_individual_outputs(&MagicString::new(""));
+        assert_bundle_matches_individual_outputs(&MagicString::new(source));
+        for (start_index, &start) in boundaries.iter().enumerate() {
+            for &end in &boundaries[start_index + 1..] {
+                for replacement in ["", "X", "Ω\n😀"] {
+                    let mut value = MagicString::new(source);
+                    value.overwrite(start, end, replacement);
+                    assert_bundle_matches_individual_outputs(&value);
+                }
+            }
+        }
+
+        let mut fully_overwritten = MagicString::new(source);
+        fully_overwritten.overwrite(0, source.len() as u32, "\n全😀\n");
+        assert_bundle_matches_individual_outputs(&fully_overwritten);
+    }
+
+    #[test]
+    fn generated_bundle_matches_moved_chunks() {
+        for start in 0..5 {
+            for end in start + 1..=5 {
+                if start == 0 && end == 5 {
+                    continue;
+                }
+                for target in 0..=5 {
+                    if target >= start && target < end {
+                        continue;
+                    }
+                    let mut value = MagicString::new("abcde");
+                    value.move_range(start, end, target);
+                    assert_bundle_matches_individual_outputs(&value);
+                }
+            }
+        }
+
+        let source = "A😀\nBC";
+        let mut value = MagicString::new(source);
+        value.append_left(1, "<");
+        value.prepend_right(1, ">");
+        value.move_range(1, 5, source.len() as u32);
+        value.overwrite(6, 7, "Ω\n");
+        assert_bundle_matches_individual_outputs(&value);
+    }
+
+    #[test]
+    fn generated_bundle_matches_insert_ordering_and_empty_source() {
+        let mut value = MagicString::new("ab");
+        value.append_left(1, "a1");
+        value.append_left(1, "a2");
+        value.prepend_left(1, "p1");
+        value.prepend_left(1, "p2");
+        value.append_right(1, "r1");
+        value.append_right(1, "r2");
+        value.prepend_right(1, "q1");
+        value.prepend_right(1, "q2");
+        value.prepend_str("I😀\n");
+        value.append_str("\nO雪");
+        assert_bundle_matches_individual_outputs(&value);
+
+        let mut empty = MagicString::new("");
+        empty.append_left(0, "left");
+        empty.prepend_left(0, "<");
+        empty.append_right(0, "right");
+        empty.prepend_right(0, ">");
+        empty.prepend_str("\n");
+        empty.append_str("😀\n");
+        assert_bundle_matches_individual_outputs(&empty);
+
+        let mut control_chars = MagicString::new("\t\u{001f}\"\\\n😀");
+        control_chars.overwrite(2, 3, "\r\n");
+        assert_bundle_matches_individual_outputs(&control_chars);
+    }
+
+    #[test]
+    fn edited_heavy_bundle_does_not_reserve_for_unedited_hires_mappings() {
+        let source = "x".repeat(64 * 1024);
+        let mut value = MagicString::new(&source);
+        for start in (0..source.len()).step_by(64) {
+            value.overwrite(start as u32, (start + 64) as u32, "_");
+        }
+
+        let generated = value.generate_bundle(GenerateMapOptions::default());
+        assert!(
+            generated.source_map.capacity() < source.len() * 2,
+            "edited source map reserved {} bytes for {} source bytes",
+            generated.source_map.capacity(),
+            source.len()
+        );
+        assert!(!BUNDLE_SOURCE_MAP_CAPACITY_GREW.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    fn unedited_heavy_bundle_reserves_the_mapping_once() {
+        let source = "x".repeat(64 * 1024);
+        let generated = MagicString::new(&source).generate_bundle(GenerateMapOptions::default());
+
+        assert!(generated.source_map.len() > source.len() * 5);
+        assert!(!BUNDLE_SOURCE_MAP_CAPACITY_GREW.with(std::cell::Cell::get));
+    }
+
+    #[test]
     fn test_move_range_forward() {
         let mut s = MagicString::new("abcdefghij");
         s.move_range(0, 3, 6);
@@ -1174,6 +1498,81 @@ mod tests {
     }
 
     #[test]
+    fn source_map_json_escapes_metadata_but_not_encoded_mappings() {
+        let map = SourceMap {
+            version: 3,
+            file: Some("out\"\\雪\n.js".to_string()),
+            sources: vec!["src\"\\é.svelte".to_string(), "二.svelte".to_string()],
+            sources_content: vec!["line \"one\"\\\n\t\u{001f}雪".to_string()],
+            names: vec!["na\"\\mé".to_string()],
+            mappings: "AAAA,CAAC;AACA+/09".to_string(),
+        };
+
+        assert_eq!(
+            map.to_json(),
+            r#"{"version":3,"file":"out\"\\雪\n.js","sources":["src\"\\é.svelte","二.svelte"],"sourcesContent":["line \"one\"\\\n\t\u001f雪"],"names":["na\"\\mé"],"mappings":"AAAA,CAAC;AACA+/09"}"#
+        );
+    }
+
+    #[test]
+    fn large_mappings_do_not_add_json_escape_work() {
+        let mappings = "AAAA,AAAC;".repeat(32 * 1024);
+        let file = "out\"\\雪.js".to_string();
+        let source = "src\"\\é.svelte".to_string();
+        let content = "line \"one\"\\\n雪".to_string();
+        let name = "na\"\\mé".to_string();
+        let map = SourceMap {
+            version: 3,
+            file: Some(file.clone()),
+            sources: vec![source.clone()],
+            sources_content: vec![content.clone()],
+            names: vec![name.clone()],
+            mappings: mappings.clone(),
+        };
+
+        JSON_STRING_WRITES.with(|writes| writes.set(0));
+        JSON_STRING_INPUT_BYTES.with(|bytes| bytes.set(0));
+        MAPPINGS_DIRECT_WRITES.with(|calls| calls.set(0));
+        MAPPINGS_ESCAPE_FALLBACKS.with(|calls| calls.set(0));
+        let json = map.to_json();
+
+        assert_eq!(JSON_STRING_WRITES.with(std::cell::Cell::get), 4);
+        assert_eq!(
+            JSON_STRING_INPUT_BYTES.with(std::cell::Cell::get),
+            file.len() + source.len() + content.len() + name.len()
+        );
+        assert_eq!(MAPPINGS_DIRECT_WRITES.with(std::cell::Cell::get), 1);
+        assert_eq!(MAPPINGS_ESCAPE_FALLBACKS.with(std::cell::Cell::get), 0);
+        assert_eq!(
+            json,
+            [
+                r#"{"version":3,"file":"out\"\\雪.js","sources":["src\"\\é.svelte"],"sourcesContent":["line \"one\"\\\n雪"],"names":["na\"\\mé"],"mappings":""#,
+                &mappings,
+                r#""}"#,
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn externally_mutated_mappings_fall_back_to_json_escaping() {
+        let mut map = MagicString::new("x").generate_map(GenerateMapOptions::default());
+        map.sources.clear();
+        map.mappings = "AA\"\\\n\t\u{0001}雪".to_string();
+
+        JSON_STRING_WRITES.with(|writes| writes.set(0));
+        MAPPINGS_DIRECT_WRITES.with(|calls| calls.set(0));
+        MAPPINGS_ESCAPE_FALLBACKS.with(|calls| calls.set(0));
+        assert_eq!(
+            map.to_json(),
+            r#"{"version":3,"file":null,"sources":[],"sourcesContent":[],"names":[],"mappings":"AA\"\\\n\t\u0001雪"}"#
+        );
+        assert_eq!(JSON_STRING_WRITES.with(std::cell::Cell::get), 1);
+        assert_eq!(MAPPINGS_DIRECT_WRITES.with(std::cell::Cell::get), 0);
+        assert_eq!(MAPPINGS_ESCAPE_FALLBACKS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
     fn test_generate_map_with_overwrite() {
         let mut s = MagicString::new("hello world");
         s.overwrite(0, 5, "goodbye");
@@ -1192,11 +1591,11 @@ mod tests {
 
     #[test]
     fn test_vlq_encode() {
-        assert_eq!(vlq_encode(0), "A");
-        assert_eq!(vlq_encode(1), "C");
-        assert_eq!(vlq_encode(-1), "D");
-        assert_eq!(vlq_encode(5), "K");
-        assert_eq!(vlq_encode(16), "gB");
+        let mut encoded = "prefix:".to_string();
+        for value in [0, 1, -1, 5, 16] {
+            vlq_encode(&mut encoded, value);
+        }
+        assert_eq!(encoded, "prefix:ACDKgB");
     }
 
     #[test]
@@ -1280,6 +1679,68 @@ mod tests {
         });
         // Should have semicolons for line breaks.
         assert!(map.mappings.contains(';'));
+    }
+
+    #[test]
+    fn source_map_mappings_cover_unmapped_newlines_and_utf16_columns() {
+        let mut s = MagicString::new("à😀\nZ");
+        s.prepend_str("P😀\n\n");
+        s.append_left("à".len() as u32, "I😀\n");
+        s.prepend_right("à".len() as u32, "\nJà");
+        let z = "à😀\n".len() as u32;
+        s.overwrite(z, z + 1, "Ω\nQ😀");
+        s.append_str("\n\nTAIL");
+
+        assert_eq!(s.to_string(), "P😀\n\nàI😀\n\nJà😀\nΩ\nQ😀\n\nTAIL");
+
+        let map = s.generate_map(GenerateMapOptions {
+            file: None,
+            source: Some("in.svelte".to_string()),
+            include_content: false,
+        });
+        assert_eq!(map.mappings, ";;AAAA,AAAC;;AAAA,AAAE;AACH,AAAA;;;");
+    }
+
+    #[test]
+    fn source_map_ascii_runs_are_exact_across_moved_and_edited_chunks() {
+        let mut s = MagicString::new("abcdef\nghijkl");
+        s.append_left(3, "<>");
+        s.overwrite(9, 10, "Ω");
+        s.move_range(10, 13, 0);
+
+        assert_eq!(s.to_string(), "jklabc<>def\nghΩ");
+
+        let map = s.generate_map(GenerateMapOptions {
+            file: None,
+            source: Some("in.svelte".to_string()),
+            include_content: false,
+        });
+        assert_eq!(
+            map.mappings,
+            "AACG,AAAC,AAAC,AAAC,AADN,AAAC,AAAC,AAAC,AAAA,AAAC,AAAC,AAAC;\
+             AACN,AAAC,AAAC,AAAA"
+        );
+    }
+
+    #[test]
+    fn ascii_hires_run_avoids_per_character_vlq_work() {
+        let source = "a".repeat(32 * 1024);
+        VLQ_ENCODE_CALLS.with(|calls| calls.set(0));
+
+        let mappings = MagicString::new(&source).generate_mappings();
+        let vlq_calls = VLQ_ENCODE_CALLS.with(std::cell::Cell::get);
+
+        assert_eq!(mappings.len(), 4 + source.len() * ASCII_HIRES_SEGMENT.len());
+        assert_eq!(vlq_calls, 4);
+    }
+
+    #[test]
+    fn ascii_hires_segment_batches_are_exact() {
+        for count in 0..=ASCII_HIRES_BLOCK_SEGMENTS * 2 {
+            let mut actual = String::new();
+            push_ascii_hires_segments(&mut actual, count);
+            assert_eq!(actual, ASCII_HIRES_SEGMENT.repeat(count));
+        }
     }
 
     #[test]
