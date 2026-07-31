@@ -14,7 +14,7 @@
 //! prefix that a later `Newline` will emit, exactly as upstream mutates its
 //! `current_newline` string.
 
-use std::borrow::Cow;
+use compact_str::CompactString;
 
 /// One entry in the command buffer. Strings are literal output; the sentinels
 /// defer whitespace decisions until the next string is emitted.
@@ -32,22 +32,34 @@ pub enum Command {
     /// Emit a single space before the next string (unless a newline supersedes
     /// it).
     Space,
-    /// Literal output. A `Cow` so static literals (the overwhelming majority of
-    /// writes) borrow with zero allocation, while dynamic text still owns.
-    Str(Cow<'static, str>),
+    /// Literal output. A `CompactString` so the fragments the printer emits —
+    /// punctuation, keywords, identifiers, nearly all under the 24-byte inline
+    /// limit — live in the command itself instead of a heap allocation.
+    Str(CompactString),
     /// A nested buffer, spliced in place (esrap's nested command arrays).
     Nested(Vec<Command>),
     /// A source-map anchor (1-based line, 0-based column) for a following
-    /// string. `Driver::run` consumes it into a [`Segment`] at the current
-    /// generated column (see [`flatten_with_map`]); like a string, it also
+    /// string. `Driver::run` consumes it into a [`Mapping`] at the current
+    /// generated position (see [`flatten_with_map`]); like a string, it also
     /// flushes pending whitespace first, matching upstream ordering.
     Location { line: u32, column: u32 },
 }
 
-/// One source-map segment: `[generated_column, source_index, source_line_0based,
-/// source_column_0based]`. The source index is always `0` (esrap only ever maps a
-/// single source), matching upstream's emitted shape.
-pub type Segment = [i64; 4];
+/// One source-map entry: a generated position and the source position it came
+/// from, all 0-based. Flat rather than grouped per generated line — grouping
+/// cost one `Vec` allocation for every line of output. esrap only ever maps a
+/// single source, so there is no source index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mapping {
+    /// 0-based line in the generated output.
+    pub gen_line: u32,
+    /// 0-based column in the generated output.
+    pub gen_column: u32,
+    /// 0-based line in the original source.
+    pub source_line: u32,
+    /// 0-based column in the original source.
+    pub source_column: u32,
+}
 
 /// Flatten `commands` into source text, using `indent` (e.g. `"\t"` or a run
 /// of spaces) for each indentation level. Faithful port of the `run`/`append`
@@ -119,16 +131,15 @@ impl CodeDriver<'_> {
     }
 }
 
-/// Flatten `commands` into both the source text and its source-map `mappings`
-/// (an array-of-lines, each line an array of [`Segment`]s). A faithful port of
-/// esrap's `print` driver, which threads `current_column` through `append` and
-/// pushes a segment on every `Location` command.
+/// Flatten `commands` into both the source text and its source-map [`Mapping`]s.
+/// A faithful port of esrap's `print` driver, which threads the generated
+/// position through `append` and records a mapping on every `Location` command.
 ///
 /// Note on columns: esrap segments carry ESTree columns (UTF-16 code-unit
 /// indices). This port derives source columns from byte offsets, so the two
 /// agree for ASCII / BMP source (which covers the keyword sites). Generated
 /// columns are likewise tracked in `char`s of the emitted code.
-pub fn flatten_with_map(commands: &[Command], indent: &str) -> (String, Vec<Vec<Segment>>) {
+pub fn flatten_with_map(commands: &[Command], indent: &str) -> (String, Vec<Mapping>) {
     let mut driver = Driver {
         code: String::new(),
         current_newline: String::from("\n"),
@@ -136,17 +147,13 @@ pub fn flatten_with_map(commands: &[Command], indent: &str) -> (String, Vec<Vec<
         needs_newline: false,
         needs_margin: false,
         needs_space: false,
+        current_line: 0,
         current_column: 0,
         mappings: Vec::new(),
-        current_line: Vec::new(),
     };
     for command in commands {
         driver.run(command);
     }
-    // esrap pushes the final (possibly empty) line once the buffer is drained.
-    driver
-        .mappings
-        .push(std::mem::take(&mut driver.current_line));
     (driver.code, driver.mappings)
 }
 
@@ -159,12 +166,11 @@ struct Driver<'a> {
     needs_newline: bool,
     needs_margin: bool,
     needs_space: bool,
+    /// Current 0-based generated line, advanced on each `\n`.
+    current_line: u32,
     /// Current 0-based generated column (in `char`s), reset on each `\n`.
-    current_column: i64,
-    /// Completed generated lines of segments.
-    mappings: Vec<Vec<Segment>>,
-    /// Segments accumulated for the generated line currently being built.
-    current_line: Vec<Segment>,
+    current_column: u32,
+    mappings: Vec<Mapping>,
 }
 
 impl Driver<'_> {
@@ -190,27 +196,28 @@ impl Driver<'_> {
             Command::Location { line, column } => {
                 // Anchors flush pending whitespace just like a string would (so
                 // adding source-map support doesn't shift output), then record a
-                // segment at the current generated column. Mirrors esrap's
+                // mapping at the current generated position. Mirrors esrap's
                 // `command.type === 'Location'` branch in `run`.
                 self.flush_pending();
-                self.current_line.push([
-                    self.current_column,
-                    0, // source index is always zero
-                    *line as i64 - 1,
-                    *column as i64,
-                ]);
+                self.mappings.push(Mapping {
+                    gen_line: self.current_line,
+                    gen_column: self.current_column,
+                    // `line` is 1-based, as ESTree `loc` reports it.
+                    source_line: *line - 1,
+                    source_column: *column,
+                });
             }
         }
     }
 
-    /// Append literal text to the output, advancing `current_column` per char
-    /// and rolling over `current_line`/`mappings` on each `\n`. A faithful port
-    /// of esrap's `append`.
+    /// Append literal text to the output, advancing the generated position per
+    /// char and rolling over to the next line on each `\n`. A faithful port of
+    /// esrap's `append`.
     fn append(&mut self, str: &str) {
         self.code.push_str(str);
         for ch in str.chars() {
             if ch == '\n' {
-                self.mappings.push(std::mem::take(&mut self.current_line));
+                self.current_line += 1;
                 self.current_column = 0;
             } else {
                 self.current_column += 1;

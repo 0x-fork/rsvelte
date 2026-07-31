@@ -34,10 +34,13 @@
 
 mod command;
 mod context;
+mod pool;
 mod printer;
 
 #[cfg(test)]
 mod internal_tests;
+
+pub use command::Mapping;
 
 use oxc_ast::ast::Program;
 
@@ -110,12 +113,15 @@ pub fn print(program: &Program<'_>, source: &str) -> String {
 
 /// Print `program` to JavaScript with explicit options, interleaving comments.
 pub fn print_with(program: &Program<'_>, source: &str, options: &PrintOptions) -> String {
-    let comments = printer::build_comments(program, source);
-    let mut printer =
-        printer::Printer::with_comments(options, comments, printer::line_starts(source));
+    let line_starts = printer::line_starts(source);
+    let comments = printer::build_comments(program, source, &line_starts);
+    let mut printer = printer::Printer::with_comments(options, comments, line_starts);
     let mut ctx = context::Context::new();
     printer.print_program(program, &mut ctx);
-    command::print(&ctx.into_commands(), &options.indent)
+    let commands = ctx.into_commands();
+    let code = command::print(&commands, &options.indent);
+    pool::recycle(commands);
+    code
 }
 
 /// Print a program whose comment coordinates and source-map coordinates live in
@@ -144,15 +150,15 @@ pub fn print_split(
     loc_map: &[(u32, u32, Option<u32>)],
     options: &PrintOptions,
 ) -> PrintWithMap {
-    let comments = printer::build_comments(program, comment_source);
+    let line_starts = printer::line_starts(comment_source);
+    let comments = printer::build_comments(program, comment_source, &line_starts);
     let map_line_starts = map_source.map(printer::line_starts).unwrap_or_default();
-    let mut printer =
-        printer::Printer::with_comments(options, comments, printer::line_starts(comment_source))
-            .with_split_coordinates(map_line_starts, loc_base, loc_map);
+    let mut printer = printer::Printer::with_comments(options, comments, line_starts)
+        .with_split_coordinates(map_line_starts, loc_base, loc_map);
     let mut ctx = context::Context::new();
     printer.print_program(program, &mut ctx);
     let commands = ctx.into_commands();
-    if map_source.is_some() {
+    let printed = if map_source.is_some() {
         let (code, mappings) = command::flatten_with_map(&commands, &options.indent);
         PrintWithMap { code, mappings }
     } else {
@@ -160,7 +166,9 @@ pub fn print_split(
             code: command::print(&commands, &options.indent),
             mappings: Vec::new(),
         }
-    }
+    };
+    pool::recycle(commands);
+    printed
 }
 
 /// A synthetic comment injected by a [`CommentHooks`] callback (esrap's
@@ -241,13 +249,16 @@ pub fn print_with_hooks(
     options: &PrintOptions,
     hooks: &CommentHooks<'_>,
 ) -> String {
-    let comments = printer::build_comments(program, source);
+    let line_starts = printer::line_starts(source);
+    let comments = printer::build_comments(program, source, &line_starts);
     let mut printer =
-        printer::Printer::with_comments(options, comments, printer::line_starts(source))
-            .with_hooks(hooks);
+        printer::Printer::with_comments(options, comments, line_starts).with_hooks(hooks);
     let mut ctx = context::Context::new();
     printer.print_program(program, &mut ctx);
-    command::print(&ctx.into_commands(), &options.indent)
+    let commands = ctx.into_commands();
+    let code = command::print(&commands, &options.indent);
+    pool::recycle(commands);
+    code
 }
 
 /// Print `program` to JavaScript with the default options, returning both the
@@ -263,10 +274,9 @@ pub fn print_with_map(program: &Program<'_>, source: &str) -> PrintWithMap {
 pub struct PrintWithMap {
     /// The generated source text (identical to what [`print_with`] returns).
     pub code: String,
-    /// Source-map mappings: one entry per generated line, each a list of
-    /// `[generated_column, source_index, source_line_0based, source_column_0based]`
-    /// segments. Matches esrap's `sourceMapEncodeMappings: false` shape.
-    pub mappings: Vec<Vec<SourceMapSegment>>,
+    /// Source-map mappings in generated order (line/column pairs are 0-based;
+    /// the flat list replaces esrap's per-line `sourceMapEncodeMappings: false` shape).
+    pub mappings: Vec<Mapping>,
 }
 
 /// One decoded source-map segment:
@@ -279,11 +289,13 @@ pub fn print_with_map_opts(
     source: &str,
     options: &PrintOptions,
 ) -> PrintWithMap {
-    let comments = printer::build_comments(program, source);
-    let mut printer =
-        printer::Printer::with_comments(options, comments, printer::line_starts(source));
+    let line_starts = printer::line_starts(source);
+    let comments = printer::build_comments(program, source, &line_starts);
+    let mut printer = printer::Printer::with_comments(options, comments, line_starts);
     let mut ctx = context::Context::new();
     printer.print_program(program, &mut ctx);
-    let (code, mappings) = command::flatten_with_map(&ctx.into_commands(), &options.indent);
+    let commands = ctx.into_commands();
+    let (code, mappings) = command::flatten_with_map(&commands, &options.indent);
+    pool::recycle(commands);
     PrintWithMap { code, mappings }
 }

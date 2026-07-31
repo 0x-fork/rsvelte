@@ -7,8 +7,9 @@
 //! kinds), so `Context` is purely the buffer API: `write`, the whitespace
 //! sentinels, `append` (splice a child buffer), `measure`, and `empty`.
 
+use compact_str::CompactString;
+
 use crate::command::Command;
-use std::borrow::Cow;
 
 /// Accumulates commands for one syntactic unit. Build a child with
 /// [`Context::child`], fill it, then [`Context::append`] it into the parent.
@@ -16,6 +17,12 @@ use std::borrow::Cow;
 pub struct Context {
     commands: Vec<Command>,
     has_newline: bool,
+    /// Running total of the literal string lengths written so far, so
+    /// [`Context::measure`] is O(1) instead of a re-walk of the command tree.
+    measure: usize,
+    /// `true` once a non-empty literal has been written (the inverse of
+    /// [`Context::empty`], tracked for the same reason as `measure`).
+    has_content: bool,
     /// `true` once this context (or an appended child) emitted a newline.
     /// Visitors read it to pick a layout.
     pub multiline: bool,
@@ -24,7 +31,10 @@ pub struct Context {
 impl Context {
     /// A fresh, empty context.
     pub fn new() -> Self {
-        Self::default()
+        Context {
+            commands: crate::pool::take(),
+            ..Self::default()
+        }
     }
 
     /// A fresh child context. Named `child` rather than mirroring esrap's `new`
@@ -62,8 +72,11 @@ impl Context {
 
     /// Append literal `content`. If a newline is already pending in this
     /// context, writing after it makes the context multiline (mirrors esrap).
-    pub fn write(&mut self, content: impl Into<Cow<'static, str>>) {
-        self.commands.push(Command::Str(content.into()));
+    pub fn write(&mut self, content: impl Into<CompactString>) {
+        let content = content.into();
+        self.measure += content.len();
+        self.has_content |= !content.is_empty();
+        self.commands.push(Command::Str(content));
         if self.has_newline {
             self.multiline = true;
         }
@@ -77,6 +90,8 @@ impl Context {
     /// Splice `child`'s commands in place, propagating its multiline state.
     pub fn append(&mut self, child: Context) {
         let child_multiline = child.multiline;
+        self.measure += child.measure;
+        self.has_content |= child.has_content;
         self.commands.push(Command::Nested(child.commands));
         if self.has_newline || child_multiline {
             self.multiline = true;
@@ -85,39 +100,19 @@ impl Context {
 
     /// `true` when nothing with visible content has been written.
     pub fn empty(&self) -> bool {
-        !self.commands.iter().any(has_content)
+        !self.has_content
     }
 
     /// Total length of the literal strings in this context, ignoring whitespace
     /// sentinels — esrap's `measure`, used to decide if a layout fits on a line.
     pub fn measure(&self) -> usize {
-        measure(&self.commands)
+        self.measure
     }
 
     /// Consume the context, yielding its raw command buffer (for the top-level
     /// [`print`](crate::command::print) call).
     pub fn into_commands(self) -> Vec<Command> {
         self.commands
-    }
-}
-
-fn measure(commands: &[Command]) -> usize {
-    let mut total = 0;
-    for command in commands {
-        match command {
-            Command::Str(s) => total += s.len(),
-            Command::Nested(inner) => total += measure(inner),
-            _ => {}
-        }
-    }
-    total
-}
-
-fn has_content(command: &Command) -> bool {
-    match command {
-        Command::Str(s) => !s.is_empty(),
-        Command::Nested(inner) => inner.iter().any(has_content),
-        _ => false,
     }
 }
 
