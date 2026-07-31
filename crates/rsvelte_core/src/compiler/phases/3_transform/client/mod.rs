@@ -2486,25 +2486,37 @@ fn extract_rest_excludes_hoists(code: &mut String) -> Vec<(String, String)> {
 /// `$.from_tree(...)` / `$.with_script(...)`. The `rest_excludes` hoist is
 /// inserted immediately before the first such statement so it lands right after
 /// the imports / module-script preamble, matching upstream's `state.hoisted`
-/// ordering. A dev-mode `$.add_locations(...)` wrapper is intentionally *not*
-/// matched, so those fall through to the `export default` anchor.
+/// ordering. In dev the factory is wrapped in `$.add_locations(...)`, so the
+/// match looks through that wrapper to the factory call it carries.
 fn is_client_template_factory(arena: &super::js_ast::JsArena, stmt: &JsStatement) -> bool {
+    fn callee_name<'a>(
+        arena: &'a super::js_ast::JsArena,
+        expr: &'a JsExpr,
+    ) -> Option<(&'a str, &'a super::js_ast::nodes::JsCallExpression)> {
+        let JsExpr::Call(call) = expr else {
+            return None;
+        };
+        let JsExpr::Member(m) = arena.get_expr(call.callee) else {
+            return None;
+        };
+        if !matches!(arena.get_expr(m.object), JsExpr::Identifier(o) if o == "$") {
+            return None;
+        }
+        match &m.property {
+            super::js_ast::nodes::JsMemberProperty::Identifier(p) => Some((p.as_str(), call)),
+            _ => None,
+        }
+    }
     fn callee_is_factory(arena: &super::js_ast::JsArena, expr: &JsExpr) -> bool {
-        match expr {
-            JsExpr::Call(call) => match arena.get_expr(call.callee) {
-                JsExpr::Member(m) => {
-                    matches!(arena.get_expr(m.object), JsExpr::Identifier(o) if o == "$")
-                        && matches!(
-                            &m.property,
-                            super::js_ast::nodes::JsMemberProperty::Identifier(p)
-                                if matches!(
-                                    p.as_str(),
-                                    "from_html" | "from_svg" | "from_mathml" | "from_tree" | "with_script"
-                                )
-                        )
-                }
-                _ => false,
-            },
+        let Some((name, call)) = callee_name(arena, expr) else {
+            return false;
+        };
+        match name {
+            "from_html" | "from_svg" | "from_mathml" | "from_tree" | "with_script" => true,
+            "add_locations" => call
+                .arguments
+                .first()
+                .is_some_and(|a| callee_is_factory(arena, a)),
             _ => false,
         }
     }
@@ -2527,6 +2539,7 @@ fn stmt_text_has_factory(s: &str) -> bool {
         "= $.from_mathml(",
         "= $.from_tree(",
         "= $.with_script(",
+        "= $.add_locations(",
     ];
     NEEDLES.iter().any(|n| s.contains(n))
 }
