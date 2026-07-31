@@ -51,7 +51,8 @@ use serde_json::Value;
 
 use rsvelte_core::compiler::{
     CompileOptions, CssMode, ExperimentalOptions, GenerateMode, ModuleCompileOptions, Namespace,
-    compile as rust_compile, compile_module as rust_compile_module,
+    compile as rust_compile, compile_both as rust_compile_both,
+    compile_module as rust_compile_module,
     compile_with_external_sourcemap_content as rust_compile_with_external_sourcemap_content,
 };
 use rsvelte_projection::svelte2tsx::{
@@ -231,6 +232,27 @@ pub fn napi_compile(source: String, options: Option<NapiCompileOptions>) -> napi
 
     match rust_compile(&source, opts) {
         Ok(result) => Ok(compile_result_to_json(result)),
+        Err(e) => Err(napi::Error::from_reason(format!("{e:?}"))),
+    }
+}
+
+/// Compile a single component to both client and server output, sharing one
+/// parse + analyze pass (see `compile_both` in rsvelte_core::compiler): a
+/// dual-output build otherwise pays for that shared work twice by calling
+/// `compile` once per target. `options.generate` is ignored; the result is
+/// `{ client, server }`, each shaped like the `compile` return value.
+#[napi(js_name = "compileBoth")]
+pub fn napi_compile_both(
+    source: String,
+    options: Option<NapiCompileOptions>,
+) -> napi::Result<Value> {
+    let opts = options_to_compile(options)?;
+
+    match rust_compile_both(&source, opts) {
+        Ok((client, server)) => Ok(serde_json::json!({
+            "client": compile_result_to_json(client),
+            "server": compile_result_to_json(server),
+        })),
         Err(e) => Err(napi::Error::from_reason(format!("{e:?}"))),
     }
 }
@@ -583,6 +605,21 @@ fn coerce_string(keypath: &str, v: &LenientScalar) -> napi::Result<String> {
     }
 }
 
+// Upstream's `validate-options.js` defaults `rootDir` to `process.cwd()`
+// evaluated once at module load, not per compile call; caching it here
+// matches that and turns a getcwd syscall on every absolute-filename compile
+// into a one-time cost. A mid-process `chdir()` would go unnoticed, but the
+// NAPI addon is loaded once per long-lived process (Node/Vite), same as upstream.
+fn cached_current_dir() -> Option<String> {
+    static CWD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CWD.get_or_init(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.to_string_lossy().to_string())
+    })
+    .clone()
+}
+
 // `runes` mirrors upstream's `parametric` validator, which never rejects a
 // value. Only a real `false` becomes `Some(false)`: `Option<bool>` can't encode
 // the other falsy values (`0`/`""`/`NaN`, none of which upstream compares
@@ -751,9 +788,9 @@ impl NapiCompileOptions {
             .filename
             .as_deref()
             .is_some_and(|filename| std::path::Path::new(filename).is_absolute())
-            && let Ok(cwd) = std::env::current_dir()
+            && let Some(cwd) = cached_current_dir()
         {
-            opts.root_dir = Some(cwd.to_string_lossy().to_string());
+            opts.root_dir = Some(cwd);
         }
         if let Some(v) = &self.name {
             opts.name = Some(coerce_string("name", v)?);
