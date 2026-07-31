@@ -67,6 +67,39 @@ fn collect_binding_identifier_names(pattern: &BindingPattern<'_>, out: &mut Vec<
     }
 }
 
+/// Label the leaf declarators of a destructured `$derived` with their own
+/// binding names. The `$$array` temps are already labelled by pattern kind at
+/// their emit site, and the `$$d` source temp upstream leaves bare, so both are
+/// skipped here.
+fn tag_derived_leaves(declarations: &mut [String], dev: bool) {
+    if !dev {
+        return;
+    }
+    for decl in declarations.iter_mut() {
+        let Some((name, init)) = decl.split_once(" = ") else {
+            continue;
+        };
+        if name.starts_with("$$array") || name.starts_with("$$d") || !init.starts_with("$.derived(")
+        {
+            continue;
+        }
+        *decl = format!("{} = $.tag({}, '{}')", name, init, name);
+    }
+}
+
+/// The `$$array` label for a destructured `$derived`. Upstream reads the kind
+/// off the *top-level* declarator, so `let { a: [x] } = $derived(o)` says
+/// "object" even for the inner array (`VariableDeclaration.js:176-186`).
+fn derived_insert_label(dev: bool, pattern_text: &str) -> Option<&'static str> {
+    dev.then(|| {
+        if pattern_text.trim_start().starts_with('[') {
+            "[$derived iterable]"
+        } else {
+            "[$derived object]"
+        }
+    })
+}
+
 /// AST-based should_proxy check, mirroring the official Svelte compiler's `should_proxy()`.
 /// Returns `false` for expression types that are known to produce non-proxyable values:
 ///  - Literal, TemplateLiteral, ArrowFunctionExpression, FunctionExpression
@@ -1094,10 +1127,19 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         } else {
             format!("$.to_array({}, {})", tmp_name, element_count)
         };
-        declarations.push(format!(
-            "{} = $.derived(() => {})",
-            array_var, to_array_args
-        ));
+        // The temp holding the iterable is labelled by pattern kind, not by a
+        // binding name — it has none. `collect_state_array_pattern` only ever
+        // runs for a top-level array pattern, so the kind is fixed; the sibling
+        // form upstream can emit is `'[$state object]'`.
+        let array_init = if self.dev {
+            format!(
+                "$.tag($.derived(() => {}), '[$state iterable]')",
+                to_array_args
+            )
+        } else {
+            format!("$.derived(() => {})", to_array_args)
+        };
+        declarations.push(format!("{} = {}", array_var, array_init));
 
         for (index, elem_opt) in arr.elements.iter().enumerate() {
             let Some(elem) = elem_opt else { continue };
@@ -1294,6 +1336,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             base_expr.clone()
         };
 
+        let insert_label = derived_insert_label(self.dev, &pattern_text);
         let mut array_counter: usize = 0;
         if process_derived_destructuring_pattern(
             &pattern_text,
@@ -1301,6 +1344,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             &member_base,
             &mut declarations,
             &mut array_counter,
+            insert_label,
         )
         .is_none()
         {
@@ -1309,6 +1353,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         if declarations.is_empty() {
             return false;
         }
+        tag_derived_leaves(&mut declarations, self.dev);
 
         // Replacement covers [pattern_start, init_end] so the keyword and
         // optional trailing pieces of the VariableDeclaration remain.
@@ -1377,6 +1422,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         let mut declarations: Vec<String> =
             vec![format!("{} = $.derived({})", d_name, wrapped_source)];
         let base_expr = format!("$.get({})", d_name);
+        let insert_label = derived_insert_label(self.dev, &pattern_text);
         let mut array_counter: usize = 0;
         if process_derived_destructuring_pattern(
             &pattern_text,
@@ -1384,6 +1430,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             &base_expr,
             &mut declarations,
             &mut array_counter,
+            insert_label,
         )
         .is_none()
         {
@@ -1392,6 +1439,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         if declarations.is_empty() {
             return false;
         }
+        tag_derived_leaves(&mut declarations, self.dev);
 
         let replacement = declarations.join(",\n\t");
         let start = pattern_span.start;
