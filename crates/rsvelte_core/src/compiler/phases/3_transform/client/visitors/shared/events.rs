@@ -192,23 +192,21 @@ pub fn build_event_handler(
         //   if (!dev && binding?.declaration_kind !== 'import') return handler;
         //
         // i.e. attach the handler directly when (a) it's a function
-        // declaration / hoisted function, or (b) it's any locally-declared
-        // const/let/var binding (the value won't change between mounts), or
-        // (c) it isn't in scope at all (assume a global like `window.alert`
-        // or an untracked helper). Only imports get wrapped in
-        // `function (...$$args) { handler?.apply(this, $$args); }`, which
-        // copes with hot-reload swapping the imported binding.
+        // declaration / hoisted function, or (b) outside dev, any binding that
+        // is not an import — a locally-declared const/let/var whose value will
+        // not change between mounts, or a name that is not in scope at all
+        // (assume a global like `window.alert`). An import gets wrapped so it
+        // copes with hot-reload swapping the binding, and dev wraps everything
+        // else too so a throwing handler can still be reported.
         use crate::compiler::phases::phase2_analyze::scope::DeclarationKind;
-        match context.state.get_binding(name) {
-            Some(binding) if binding.is_function() => return handler,
-            None => return handler,
-            Some(binding) => {
-                let is_import = matches!(binding.declaration_kind, DeclarationKind::Import);
-                if !context.state.options.dev && !is_import {
-                    return handler;
-                }
-                // Falls through to the wrapping path below.
-            }
+        let binding = context.state.get_binding(name);
+        if binding.is_some_and(|b| b.is_function()) {
+            return handler;
+        }
+        if !context.state.options.dev
+            && binding.is_none_or(|b| b.declaration_kind != DeclarationKind::Import)
+        {
+            return handler;
         }
     }
 
@@ -236,12 +234,51 @@ pub fn build_event_handler(
 
     // For complex expressions, wrap in a function that calls the expression
     // This handles cases like: onclick={obj.method} or onclick={expr()}
-    // handler?.apply(this, $$args) - use optional chaining for safety
-    let call_expr = b::call(
-        arena,
-        b::optional_member(arena, handler, "apply"),
-        vec![b::this(), b::id("$$args")],
-    );
+    let call_expr = if context.state.dev {
+        // Dev routes the call through `$.apply` so a handler that throws can be
+        // reported with the component and the source position of the attribute.
+        let (line, column) = match expression.start() {
+            Some(start) => super::super::attribute::locate_in_source(
+                &context.state.analysis.source,
+                start as usize,
+            ),
+            None => (0, 0),
+        };
+        let side_effects = super::super::attribute::expression_has_side_effects(expression);
+        let remove_parens = super::super::attribute::expression_is_removable_call(
+            expression,
+            context.state.parse_arena,
+        );
+
+        let mut apply_args = vec![
+            b::thunk(arena, handler),
+            b::this(),
+            b::id("$$args"),
+            b::id(&context.state.analysis.name),
+            b::array(vec![b::number(line as f64), b::number(column as f64)]),
+        ];
+        // The trailing flags are positional, so a set `remove_parens` forces the
+        // `has_side_effects` slot to be filled even when it is false.
+        if side_effects || remove_parens {
+            apply_args.push(if side_effects {
+                b::boolean(true)
+            } else {
+                b::undefined(arena)
+            });
+        }
+        if remove_parens {
+            apply_args.push(b::boolean(true));
+        }
+
+        b::call(arena, b::member_path(arena, "$.apply"), apply_args)
+    } else {
+        // handler?.apply(this, $$args) - use optional chaining for safety
+        b::call(
+            arena,
+            b::optional_member(arena, handler, "apply"),
+            vec![b::this(), b::id("$$args")],
+        )
+    };
 
     b::function_expr(
         None,
