@@ -64,6 +64,21 @@ pub enum TemplateEntry<'a> {
     HoistableDecl(Statement<'a>),
 }
 
+/// The names declared by the `{#snippet}` blocks directly inside a fragment.
+pub fn fragment_snippet_names<'a, N: AsRef<TemplateNode<'a>>>(
+    nodes: &[N],
+) -> rustc_hash::FxHashSet<String> {
+    let mut out = rustc_hash::FxHashSet::default();
+    for node in nodes {
+        if let TemplateNode::SnippetBlock(snippet) = node.as_ref()
+            && let Some(name) = snippet.expression.name()
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 /// Port of upstream `process_children`: walk a slice of sibling template nodes,
 /// joining adjacent Text / Comment / ExpressionTag siblings into a single
 /// [`TemplateEntry::Template`] and recursing into element/block children.
@@ -160,6 +175,14 @@ fn process_children_scoped<'a, N: AsRef<TemplateNode<'a>>>(
         Some(v) => v,
         None => nodes.iter().map(|n| n.as_ref()).collect(),
     };
+
+    // 写经 upstream `get_transform`: the `{#snippet}` blocks a fragment declares
+    // are `normal` bindings in its scope, so they shadow a same-named outer
+    // `$derived` / store for the whole fragment — `{@render row()}` next to a
+    // local `{#snippet row()}` must not be read-wrapped into `row()()`.
+    state
+        .shadowed_names
+        .push(fragment_snippet_names(&iter_nodes));
 
     let mut hoisted: Vec<&TemplateNode> = Vec::new();
     let mut filtered: Vec<&TemplateNode> = Vec::new();
@@ -369,6 +392,7 @@ fn process_children_scoped<'a, N: AsRef<TemplateNode<'a>>>(
         }
     }
     flush_sequence(&sequence, state);
+    state.shadowed_names.pop();
     state.in_element_children = saved_in_element;
     state.namespace = saved_namespace;
 }
