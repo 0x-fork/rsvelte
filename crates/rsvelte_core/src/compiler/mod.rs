@@ -541,7 +541,7 @@ pub(crate) fn prepare_and_analyze<'source>(
     ),
     CompileError,
 > {
-    let line_offsets = phases::phase1_parse::compute_line_offsets(source, false);
+    let line_offsets = phases::phase1_parse::compute_line_offsets(source, ast.skip_expression_loc);
 
     // Resolve lazy expressions (deferred template expressions). If any
     // expression has a parse error, return it immediately.
@@ -895,6 +895,10 @@ pub fn compile_module(
         },
         options: None,
         comments: Vec::new(),
+        // This module's program is already parsed, so the flag only decides
+        // whether analysis rebuilds a line table it would not use; keep the
+        // pre-existing behaviour for the `.svelte.js` path.
+        skip_expression_loc: false,
         instance: None,
         module: Some(Box::new(crate::ast::template::Script {
             node_type: crate::ast::template::ScriptType::Script,
