@@ -2374,6 +2374,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsvelte_ast_equiv"
+version = "0.0.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_codegen",
+ "oxc_parser",
+ "oxc_span",
+]
+
+[[package]]
 name = "rsvelte_bindings_support"
 version = "0.1.0"
 dependencies = [
@@ -2445,6 +2455,7 @@ dependencies = [
  "pretty_assertions",
  "rayon",
  "regex",
+ "rsvelte_ast_equiv",
  "rsvelte_esrap",
  "rustc-hash",
  "self_cell",
@@ -2474,6 +2485,7 @@ dependencies = [
  "pprof",
  "rayon",
  "regex",
+ "rsvelte_ast_equiv",
  "rsvelte_core",
  "rsvelte_esrap",
  "rsvelte_projection",
