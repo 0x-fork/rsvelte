@@ -15,6 +15,7 @@
 //! This module is NOT yet wired into `super::transform_server`; it exists so
 //! the crate keeps compiling while the AST pipeline is built out.
 
+pub mod comments;
 pub mod read_wrap;
 pub mod script;
 pub mod visitors;
@@ -218,6 +219,9 @@ pub struct ServerTransformState<'a> {
     /// so `scope.evaluate` resolves an identifier through the real lexical chain
     /// instead of a flat "every template scope" union.
     pub current_scope_index: usize,
+    /// Leading-comment regions registered by the script transform, replayed onto
+    /// a synthetic buffer at print time. See [`comments`].
+    pub comments: comments::ChunkRegistry,
 }
 
 /// The render position saved by [`ServerTransformState::enter_template_scope`],
@@ -304,6 +308,7 @@ impl<'a> ServerTransformState<'a> {
             shadowed_names: Vec::new(),
             slot_let_shadows: Vec::new(),
             current_scope_index: analysis.root.instance_scope_index,
+            comments: comments::ChunkRegistry::default(),
         }
     }
 
@@ -1438,8 +1443,12 @@ See https://svelte.dev/docs/svelte/v5-migration-guide#Components-are-no-longer-c
         program_body.insert(insert_at, filename_stmt);
     }
 
-    let program = b.program(program_body);
-    Some(rsvelte_esrap::print(&program, ""))
+    let mut program = b.program(program_body);
+    Some(comments::print_with_comments(
+        &mut program,
+        &state.comments,
+        allocator,
+    ))
 }
 
 #[cfg(test)]
