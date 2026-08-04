@@ -56,10 +56,12 @@ pub fn dump() {
     if !enabled() {
         return;
     }
-    let line = take_all()
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    eprintln!("SERVER_COMMENT_STATS {line}");
+    let mut line = String::from("SERVER_COMMENT_STATS");
+    for (k, v) in take_all() {
+        line.push_str(&format!(" {k}={v}"));
+    }
+    line.push('\n');
+    // Corpus workers share one stderr, and `eprintln!` writes each piece
+    // separately, so records glue together unless emitted in a single write.
+    let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
 }
