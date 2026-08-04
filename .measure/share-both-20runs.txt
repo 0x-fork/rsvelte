@@ -1,0 +1,51 @@
+Files: 6436, Total: 10197497 bytes, mode: both, runs: 20
+
+run   1: client  7.67% (split  1.64 / map  6.03 / plain  0.00)  server  4.46% (print  4.46 / pipe  0.00)  normalize  0.12%  ALL 12.26%
+  per-file share: median 15.62%  mean 16.41%  sd  6.67  p10  8.90%  p90 25.91%  min  0.00%  max 48.42%
+  small  (<2KB)    n= 5119  aggregate 16.01%  median 15.88%
+  medium (2-10KB)  n= 1241  aggregate 13.49%  median 14.80%
+  large  (>10KB)   n=   76  aggregate  4.42%  median 11.47%
+  normalize_js_with_oxc slow-path calls: 113
+  top 5 files by absolute print time:
+      1.117ms print /   6.627ms compile (16.85%)  skeleton/sites/themes.skeleton.dev/src/lib/components/generator/Controls/ControlsTypography.svelte (31145 B)
+      0.852ms print /   3.020ms compile (28.21%)  shadcn-svelte/docs/src/lib/registry/examples/create/dialog/dialog-chat-settings.svelte (13370 B)
+      0.768ms print /   3.767ms compile (20.39%)  svelte-ux/packages/svelte-ux/src/routes/docs/components/ToggleGroup/+page.svelte (11541 B)
+      0.709ms print /   7.810ms compile ( 9.08%)  layerchart/packages/layerchart/src/lib/components/tooltip/TooltipContext.svelte (30687 B)
+      0.707ms print /   2.637ms compile (26.81%)  shadcn-svelte/docs/src/lib/registry/examples/create/home/small-form-example.svelte (13857 B)
+
+run   2: client  7.75% (split  1.66 / map  6.09 / plain  0.00)  server  4.51% (print  4.51 / pipe  0.00)  normalize  0.12%  ALL 12.39%
+run   3: client  7.74% (split  1.68 / map  6.06 / plain  0.00)  server  4.54% (print  4.54 / pipe  0.00)  normalize  0.13%  ALL 12.41%
+run   4: client  7.81% (split  1.65 / map  6.16 / plain  0.00)  server  4.55% (print  4.55 / pipe  0.00)  normalize  0.13%  ALL 12.49%
+run   5: client  7.77% (split  1.66 / map  6.12 / plain  0.00)  server  4.53% (print  4.53 / pipe  0.00)  normalize  0.12%  ALL 12.43%
+run   6: client  7.84% (split  1.67 / map  6.16 / plain  0.00)  server  4.54% (print  4.54 / pipe  0.00)  normalize  0.12%  ALL 12.50%
+run   7: client  7.85% (split  1.70 / map  6.15 / plain  0.00)  server  4.60% (print  4.60 / pipe  0.00)  normalize  0.13%  ALL 12.57%
+run   8: client  7.83% (split  1.67 / map  6.16 / plain  0.00)  server  4.57% (print  4.57 / pipe  0.00)  normalize  0.12%  ALL 12.53%
+run   9: client  7.82% (split  1.69 / map  6.14 / plain  0.00)  server  4.57% (print  4.57 / pipe  0.00)  normalize  0.12%  ALL 12.52%
+run  10: client  7.84% (split  1.67 / map  6.18 / plain  0.00)  server  4.60% (print  4.60 / pipe  0.00)  normalize  0.12%  ALL 12.56%
+run  11: client  7.85% (split  1.68 / map  6.17 / plain  0.00)  server  4.56% (print  4.56 / pipe  0.00)  normalize  0.12%  ALL 12.53%
+run  12: client  7.86% (split  1.68 / map  6.18 / plain  0.00)  server  4.56% (print  4.56 / pipe  0.00)  normalize  0.13%  ALL 12.54%
+run  13: client  7.73% (split  1.64 / map  6.08 / plain  0.00)  server  4.52% (print  4.52 / pipe  0.00)  normalize  0.12%  ALL 12.37%
+run  14: client  7.94% (split  1.87 / map  6.07 / plain  0.00)  server  4.55% (print  4.55 / pipe  0.00)  normalize  0.14%  ALL 12.63%
+run  15: client  7.83% (split  1.66 / map  6.18 / plain  0.00)  server  4.55% (print  4.55 / pipe  0.00)  normalize  0.12%  ALL 12.51%
+run  16: client  7.83% (split  1.67 / map  6.16 / plain  0.00)  server  4.59% (print  4.59 / pipe  0.00)  normalize  0.12%  ALL 12.55%
+run  17: client  7.88% (split  1.70 / map  6.18 / plain  0.00)  server  4.59% (print  4.59 / pipe  0.00)  normalize  0.12%  ALL 12.60%
+run  18: client  7.86% (split  1.68 / map  6.18 / plain  0.00)  server  4.58% (print  4.58 / pipe  0.00)  normalize  0.12%  ALL 12.57%
+run  19: client  7.82% (split  1.70 / map  6.12 / plain  0.00)  server  4.53% (print  4.53 / pipe  0.00)  normalize  0.13%  ALL 12.47%
+run  20: client  7.87% (split  1.66 / map  6.21 / plain  0.00)  server  4.57% (print  4.57 / pipe  0.00)  normalize  0.12%  ALL 12.56%
+
+=== share of compile() across 20 runs ===
+site                              median      min      max       q1       q3
+client print_split                1.67%    1.64%    1.87%    1.66%    1.68%
+client print_with_map             6.16%    6.03%    6.21%    6.12%    6.18%
+client print_with                 0.00%    0.00%    0.00%    0.00%    0.00%
+CLIENT group                      7.83%    7.67%    7.94%    7.81%    7.85%
+server print                      4.56%    4.46%    4.60%    4.54%    4.57%
+server pipe print                 0.00%    0.00%    0.00%    0.00%    0.00%
+SERVER group                      4.56%    4.46%    4.60%    4.54%    4.57%
+normalize print                   0.12%    0.12%    0.14%    0.12%    0.13%
+TOTAL esrap print                12.53%   12.26%   12.63%   12.47%   12.56%
+--- not printer cost, tracked for context ---
+server pipe reparse (oxc)         0.00%    0.00%    0.00%    0.00%    0.00%
+per-file median share            15.70%   15.46%   16.10%   15.63%   15.74%
+
+TOTAL median 12.53% -> a printer 5x faster would cut compile() by 10.02%
