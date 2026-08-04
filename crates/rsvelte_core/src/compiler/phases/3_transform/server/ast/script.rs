@@ -2611,129 +2611,117 @@ fn transform_script_legacy<'a>(
     // within) so the second array destructure is named `$$array_1`, not `$$array`
     // (写经 the per-component `scope.generate('$$array')`).
     let mut array_counter: u32 = 0;
+    let mut prev_end: u32 = 0;
 
     for stmt in ret.program.body.iter() {
-        match stmt {
-            Statement::ImportDeclaration(imp) => {
-                let slice = &src[imp.span.start as usize..imp.span.end as usize];
-                if let Some(rehomed) = state.reparse_statement(slice) {
-                    match import_sink.as_deref_mut() {
-                        Some(sink) => sink.push(rehomed),
-                        None => out.push(rehomed),
-                    }
-                }
-            }
-            Statement::ExportNamedDeclaration(exp) => {
-                if !is_instance {
-                    // MODULE script: `export const FOO = 1` is a REAL ES module
-                    // export, not a prop — upstream's `server_module` keeps it
-                    // verbatim (export keyword included). Re-parse the whole
-                    // statement span.
-                    let span = exp.span();
-                    let slice = &src[span.start as usize..span.end as usize];
+        let anchor = register_leading_comments(
+            &mut state.comments,
+            src,
+            &ret.program.comments,
+            prev_end,
+            stmt.span().start,
+        );
+        prev_end = stmt.span().end;
+        let out_len = out.len();
+        let reactive_len = reactive.len();
+        let sink_len = import_sink.as_deref().map_or(0, Vec::len);
+
+        'emit: {
+            match stmt {
+                Statement::ImportDeclaration(imp) => {
+                    let slice = &src[imp.span.start as usize..imp.span.end as usize];
                     if let Some(rehomed) = state.reparse_statement(slice) {
-                        out.push(rehomed);
-                    }
-                    continue;
-                }
-                // INSTANCE script: `export let x …` → props (the `export` keyword
-                // is dropped and the declaration prop-lowered, mirroring upstream's
-                // `ExportNamedDeclaration` global visitor `return
-                // context.visit(node.declaration)` feeding the non-runes
-                // `VariableDeclaration` branch).
-                let Some(decl) = exp.declaration.as_ref() else {
-                    // `export { a, b }` with no declaration → dropped (`b.empty`).
-                    continue;
-                };
-                match decl {
-                    oxc_ast::ast::Declaration::VariableDeclaration(vd) => {
-                        out.extend(lower_legacy_var_decl(
-                            vd,
-                            src,
-                            state,
-                            true,
-                            &mut array_counter,
-                        ));
-                    }
-                    other => {
-                        // `export function` / `export class` → keep the inner
-                        // declaration verbatim (re-parsed from its source span),
-                        // but read-wrap the body so store/derived reads & writes
-                        // inside an `export function f() { … $store … }` are
-                        // lowered (写经 the global server visitor).
-                        let is_fn =
-                            matches!(other, oxc_ast::ast::Declaration::FunctionDeclaration(_));
-                        let span = other.span();
-                        let slice = &src[span.start as usize..span.end as usize];
-                        if let Some(mut rehomed) = state.reparse_statement(slice) {
-                            if is_instance && is_fn {
-                                super::read_wrap::wrap_reads_in_statement_counted(
-                                    &mut rehomed,
-                                    state.b,
-                                    state.analysis,
-                                    state.analysis.root.instance_scope_index,
-                                    &mut array_counter,
-                                );
-                            }
-                            out.push(rehomed);
+                        match import_sink.as_deref_mut() {
+                            Some(sink) => sink.push(rehomed),
+                            None => out.push(rehomed),
                         }
                     }
                 }
-            }
-            Statement::VariableDeclaration(vd) => {
-                out.extend(lower_legacy_var_decl(
-                    vd,
-                    src,
-                    state,
-                    false,
-                    &mut array_counter,
-                ));
-            }
-            Statement::LabeledStatement(ls) if is_instance && ls.label.name.as_str() == "$" => {
-                // Top-level legacy reactive `$:` statement. Upstream keeps the
-                // `$` label (people may `break $`) and appends the body to the
-                // instance run after everything else.
-                let span = ls.span();
-                let slice = &src[span.start as usize..span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // Assignment targets (for the hoisted `let <name>;` decl) and
-                    // read dependencies (for the topological reorder) — both keyed
-                    // by instance-scope binding index (写经 the `assignments` /
-                    // `dependencies` sets in `ReactiveStatement`).
-                    let mut decl_names: Vec<String> = Vec::new();
-                    collect_legacy_reactive_decls(&ls.body, state, &mut decl_names);
-                    let assigns = reactive_assignment_indices(&ls.body, state);
-                    let deps = reactive_dependency_indices(&ls.body, state, &assigns);
-                    // 写经 `LabeledStatement.js`: `context.visit(node.body)` — the
-                    // reactive body is visited by the global `Identifier` visitor,
-                    // so every READ inside it (store `$x`, derived call, `$$props`)
-                    // is wrapped exactly like any other instance statement.
-                    super::read_wrap::wrap_reads_in_statement_counted(
-                        &mut rehomed,
-                        state.b,
-                        state.analysis,
-                        state.analysis.root.instance_scope_index,
+                Statement::ExportNamedDeclaration(exp) => {
+                    if !is_instance {
+                        // MODULE script: `export const FOO = 1` is a REAL ES module
+                        // export, not a prop — upstream's `server_module` keeps it
+                        // verbatim (export keyword included). Re-parse the whole
+                        // statement span.
+                        let span = exp.span();
+                        let slice = &src[span.start as usize..span.end as usize];
+                        if let Some(rehomed) = state.reparse_statement(slice) {
+                            out.push(rehomed);
+                        }
+                        break 'emit;
+                    }
+                    // INSTANCE script: `export let x …` → props (the `export` keyword
+                    // is dropped and the declaration prop-lowered, mirroring upstream's
+                    // `ExportNamedDeclaration` global visitor `return
+                    // context.visit(node.declaration)` feeding the non-runes
+                    // `VariableDeclaration` branch).
+                    let Some(decl) = exp.declaration.as_ref() else {
+                        // `export { a, b }` with no declaration → dropped (`b.empty`).
+                        break 'emit;
+                    };
+                    match decl {
+                        oxc_ast::ast::Declaration::VariableDeclaration(vd) => {
+                            out.extend(lower_legacy_var_decl(
+                                vd,
+                                src,
+                                state,
+                                true,
+                                &mut array_counter,
+                            ));
+                        }
+                        other => {
+                            // `export function` / `export class` → keep the inner
+                            // declaration verbatim (re-parsed from its source span),
+                            // but read-wrap the body so store/derived reads & writes
+                            // inside an `export function f() { … $store … }` are
+                            // lowered (写经 the global server visitor).
+                            let is_fn =
+                                matches!(other, oxc_ast::ast::Declaration::FunctionDeclaration(_));
+                            let span = other.span();
+                            let slice = &src[span.start as usize..span.end as usize];
+                            if let Some(mut rehomed) = state.reparse_statement(slice) {
+                                if is_instance && is_fn {
+                                    super::read_wrap::wrap_reads_in_statement_counted(
+                                        &mut rehomed,
+                                        state.b,
+                                        state.analysis,
+                                        state.analysis.root.instance_scope_index,
+                                        &mut array_counter,
+                                    );
+                                }
+                                out.push(rehomed);
+                            }
+                        }
+                    }
+                }
+                Statement::VariableDeclaration(vd) => {
+                    out.extend(lower_legacy_var_decl(
+                        vd,
+                        src,
+                        state,
+                        false,
                         &mut array_counter,
-                    );
-                    reactive.push(ReactiveEntry {
-                        stmt: rehomed,
-                        decl_names,
-                        assigns,
-                        deps,
-                    });
+                    ));
                 }
-            }
-            Statement::ExpressionStatement(es) => {
-                if is_removed_effect_stmt(&es.expression) {
-                    continue;
-                }
-                let slice = &src[es.span.start as usize..es.span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // 写经 the global server visitor: every READ / store-or-derived
-                    // WRITE inside an ordinary instance statement is lowered (e.g.
-                    // top-level `$a.foo = 3` → `$.store_mutate(...)`,
-                    // `({$a} = obj)` → store-set sequence).
-                    if is_instance {
+                Statement::LabeledStatement(ls) if is_instance && ls.label.name.as_str() == "$" => {
+                    // Top-level legacy reactive `$:` statement. Upstream keeps the
+                    // `$` label (people may `break $`) and appends the body to the
+                    // instance run after everything else.
+                    let span = ls.span();
+                    let slice = &src[span.start as usize..span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // Assignment targets (for the hoisted `let <name>;` decl) and
+                        // read dependencies (for the topological reorder) — both keyed
+                        // by instance-scope binding index (写经 the `assignments` /
+                        // `dependencies` sets in `ReactiveStatement`).
+                        let mut decl_names: Vec<String> = Vec::new();
+                        collect_legacy_reactive_decls(&ls.body, state, &mut decl_names);
+                        let assigns = reactive_assignment_indices(&ls.body, state);
+                        let deps = reactive_dependency_indices(&ls.body, state, &assigns);
+                        // 写经 `LabeledStatement.js`: `context.visit(node.body)` — the
+                        // reactive body is visited by the global `Identifier` visitor,
+                        // so every READ inside it (store `$x`, derived call, `$$props`)
+                        // is wrapped exactly like any other instance statement.
                         super::read_wrap::wrap_reads_in_statement_counted(
                             &mut rehomed,
                             state.b,
@@ -2741,48 +2729,92 @@ fn transform_script_legacy<'a>(
                             state.analysis.root.instance_scope_index,
                             &mut array_counter,
                         );
+                        reactive.push(ReactiveEntry {
+                            stmt: rehomed,
+                            decl_names,
+                            assigns,
+                            deps,
+                        });
                     }
-                    out.push(rehomed);
+                }
+                Statement::ExpressionStatement(es) => {
+                    if is_removed_effect_stmt(&es.expression) {
+                        break 'emit;
+                    }
+                    let slice = &src[es.span.start as usize..es.span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // 写经 the global server visitor: every READ / store-or-derived
+                        // WRITE inside an ordinary instance statement is lowered (e.g.
+                        // top-level `$a.foo = 3` → `$.store_mutate(...)`,
+                        // `({$a} = obj)` → store-set sequence).
+                        if is_instance {
+                            super::read_wrap::wrap_reads_in_statement_counted(
+                                &mut rehomed,
+                                state.b,
+                                state.analysis,
+                                state.analysis.root.instance_scope_index,
+                                &mut array_counter,
+                            );
+                        }
+                        out.push(rehomed);
+                    }
+                }
+                Statement::FunctionDeclaration(_) => {
+                    let span = stmt.span();
+                    let slice = &src[span.start as usize..span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // A function BODY is visited too (`function f() { return
+                        // $count; }` → `$.store_get(...)`, `$foo++` → `$.update_store`).
+                        if is_instance {
+                            super::read_wrap::wrap_reads_in_statement_counted(
+                                &mut rehomed,
+                                state.b,
+                                state.analysis,
+                                state.analysis.root.instance_scope_index,
+                                &mut array_counter,
+                            );
+                        }
+                        out.push(rehomed);
+                    }
+                }
+                other => {
+                    let span = other.span();
+                    let slice = &src[span.start as usize..span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // Wrap store/derived reads inside instance-scope control-flow
+                        // statements (`if ($store === …) …`, `for`, `while`, blocks…) —
+                        // upstream's server visitor visits every statement, so reads
+                        // become `$.store_get(...)`. The ExpressionStatement /
+                        // FunctionDeclaration arms already do this; this catch-all did not.
+                        if is_instance {
+                            super::read_wrap::wrap_reads_in_statement_counted(
+                                &mut rehomed,
+                                state.b,
+                                state.analysis,
+                                state.analysis.root.instance_scope_index,
+                                &mut array_counter,
+                            );
+                        }
+                        out.push(rehomed);
+                    }
                 }
             }
-            Statement::FunctionDeclaration(_) => {
-                let span = stmt.span();
-                let slice = &src[span.start as usize..span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // A function BODY is visited too (`function f() { return
-                    // $count; }` → `$.store_get(...)`, `$foo++` → `$.update_store`).
-                    if is_instance {
-                        super::read_wrap::wrap_reads_in_statement_counted(
-                            &mut rehomed,
-                            state.b,
-                            state.analysis,
-                            state.analysis.root.instance_scope_index,
-                            &mut array_counter,
-                        );
-                    }
-                    out.push(rehomed);
+        }
+
+        // Anchor the region on the FIRST statement this source statement emitted;
+        // emitting nothing leaves the region unreferenced, so its comments die
+        // with the statement instead of landing inside an unrelated node.
+        if let Some(anchor) = anchor {
+            if import_sink.as_deref().is_some_and(|s| s.len() > sink_len) {
+                if let Some(sink) = import_sink.as_deref_mut()
+                    && let Some(first) = sink.get_mut(sink_len)
+                {
+                    comments::SetSpans(anchor).visit_statement(first);
                 }
-            }
-            other => {
-                let span = other.span();
-                let slice = &src[span.start as usize..span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // Wrap store/derived reads inside instance-scope control-flow
-                    // statements (`if ($store === …) …`, `for`, `while`, blocks…) —
-                    // upstream's server visitor visits every statement, so reads
-                    // become `$.store_get(...)`. The ExpressionStatement /
-                    // FunctionDeclaration arms already do this; this catch-all did not.
-                    if is_instance {
-                        super::read_wrap::wrap_reads_in_statement_counted(
-                            &mut rehomed,
-                            state.b,
-                            state.analysis,
-                            state.analysis.root.instance_scope_index,
-                            &mut array_counter,
-                        );
-                    }
-                    out.push(rehomed);
-                }
+            } else if let Some(first) = out.get_mut(out_len) {
+                comments::SetSpans(anchor).visit_statement(first);
+            } else if let Some(entry) = reactive.get_mut(reactive_len) {
+                comments::SetSpans(anchor).visit_statement(&mut entry.stmt);
             }
         }
     }
