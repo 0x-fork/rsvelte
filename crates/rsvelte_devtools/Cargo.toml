@@ -19,6 +19,7 @@ native = [
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc-alloc = ["dep:mimalloc"]
 pprof = ["dep:pprof"]
+measure-json = ["rsvelte_core/measure-json"]
 
 [dependencies]
 rsvelte_ast_equiv = { path = "../rsvelte_ast_equiv" }
