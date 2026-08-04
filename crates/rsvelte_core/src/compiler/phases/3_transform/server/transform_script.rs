@@ -4,7 +4,7 @@
 //! for server-side code generation, including rune transformations, class field transforms,
 //! and effect block removal.
 
-use super::helpers::sanitize_identifier;
+use super::helpers::{sanitize_identifier, skip_string_literal};
 use super::transform_legacy::transform_export_let_declarations;
 use super::transform_store::{
     transform_store_assignments, transform_store_destructure_assignments,
@@ -4866,6 +4866,86 @@ fn strip_ts_field_modifiers(lhs: &str) -> &str {
     s
 }
 
+/// Advance past a `//` or `/*` comment starting at `i`, or return `None` when
+/// `i` is not a comment start.
+fn skip_comment(bytes: &[u8], i: usize) -> Option<usize> {
+    let n = bytes.len();
+    if bytes[i] != b'/' || i + 1 >= n {
+        return None;
+    }
+    match bytes[i + 1] {
+        b'/' => {
+            let mut j = i + 2;
+            while j < n && bytes[j] != b'\n' {
+                j += 1;
+            }
+            Some(j)
+        }
+        b'*' => {
+            let mut j = i + 2;
+            while j + 1 < n && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+                j += 1;
+            }
+            Some((j + 2).min(n))
+        }
+        _ => None,
+    }
+}
+
+/// Byte offset of the first `needle` occurrence that lies in JS code — skipping
+/// string / template literals and `//` / `/*` comments.
+fn code_find(haystack: &str, needle: &[u8]) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        if matches!(bytes[i], b'\'' | b'"' | b'`') {
+            i = skip_string_literal(bytes, i);
+            continue;
+        }
+        if let Some(next) = skip_comment(bytes, i) {
+            i = next;
+            continue;
+        }
+        if i + needle.len() <= n && &bytes[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Byte offset of the `}` closing the block whose `{` sits just before `start`,
+/// counting only braces in JS code. `None` when the block is unterminated.
+fn code_matching_brace(haystack: &str, start: usize) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let n = bytes.len();
+    let mut depth = 1usize;
+    let mut i = start;
+    while i < n {
+        if matches!(bytes[i], b'\'' | b'"' | b'`') {
+            i = skip_string_literal(bytes, i);
+            continue;
+        }
+        if let Some(next) = skip_comment(bytes, i) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Transform class fields with $derived runes for server-side.
 pub(crate) fn transform_class_fields_server(script: &str) -> String {
     let script_bytes = script.as_bytes();
@@ -4878,7 +4958,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
         return script.to_string();
     }
 
-    let Some(class_pos) = memmem::find(script_bytes, b"class ") else {
+    let Some(class_pos) = code_find(script, b"class ") else {
         return script.to_string();
     };
 
@@ -4890,22 +4970,12 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
     let class_header = &after_class[..brace_pos + 1];
 
     let class_body_start = class_pos + brace_pos + 1;
-    let mut brace_depth = 1;
-    let mut class_body_end = class_body_start;
-
-    for (i, c) in script[class_body_start..].char_indices() {
-        match c {
-            '{' => brace_depth += 1,
-            '}' => {
-                brace_depth -= 1;
-                if brace_depth == 0 {
-                    class_body_end = class_body_start + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
+    // A `}` inside a string / template / comment must not close the class body:
+    // the reassembly below would then splice mid-literal and emit broken JS
+    // (same defect class as issue #447, H-029).
+    let Some(class_body_end) = code_matching_brace(script, class_body_start) else {
+        return script.to_string();
+    };
 
     // The member scan below is line-based, so members sharing a physical line
     // must first be broken apart or everything after the first one is dropped
@@ -7603,5 +7673,88 @@ class Last {
             !out.contains("set value(value)") && !out.contains("set result(value)"),
             "client-shaped setter leaked through:\n{out}"
         );
+    }
+
+    /// The class-body scan counted every `{` / `}` byte, so a brace inside a
+    /// string / template / comment closed the body early and the reassembly
+    /// spliced mid-literal, emitting broken JS (issue #447, H-029 class).
+    #[test]
+    fn brace_inside_string_does_not_close_class_body() {
+        let input = r#"class Foo {
+  count = $state(0);
+  label = '}';
+  other = $state(1);
+}
+export const after = 1;"#;
+        let out = transform_class_fields_server(input);
+
+        assert!(
+            out.contains("label = '}';"),
+            "the string literal must survive intact:\n{out}"
+        );
+        assert!(
+            out.contains("other = 1;"),
+            "the field after the brace-bearing string must still be lowered:\n{out}"
+        );
+        assert!(
+            out.contains("export const after = 1;"),
+            "trailing code must survive:\n{out}"
+        );
+    }
+
+    #[test]
+    fn brace_inside_comment_does_not_close_class_body() {
+        let input = r#"class Foo {
+  count = $state(0);
+  // }
+  other = $state(1);
+}
+export const after = 1;"#;
+        let out = transform_class_fields_server(input);
+
+        assert!(
+            out.contains("other = 1;"),
+            "the field after the brace-bearing comment must still be lowered:\n{out}"
+        );
+        assert!(
+            out.contains("export const after = 1;"),
+            "trailing code must survive:\n{out}"
+        );
+    }
+
+    /// `class ` inside a string must not anchor the scan on the wrong brace.
+    #[test]
+    fn class_keyword_inside_string_is_not_matched() {
+        let input = r#"export const s = "class Bar {";
+class Foo {
+  count = $state(0);
+}"#;
+        let out = transform_class_fields_server(input);
+
+        assert!(
+            out.contains(r#""class Bar {""#),
+            "the string literal must survive intact:\n{out}"
+        );
+        assert!(
+            out.contains("count = 0;"),
+            "the real class must still be lowered:\n{out}"
+        );
+    }
+
+    /// An unterminated class body has no defensible transform, so the contract
+    /// is to hand the input back; the previous scan defaulted the end offset to
+    /// the start and spliced garbage instead.
+    #[test]
+    fn unbalanced_class_body_returns_the_input_unchanged() {
+        for input in [
+            "class Foo {\n  count = $state(0);\n",
+            "class Foo {\n  count = $state(0);\n  label = '}\n",
+        ] {
+            assert_eq!(
+                transform_class_fields_server(input),
+                input,
+                "unbalanced input must round-trip"
+            );
+        }
     }
 }
