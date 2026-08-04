@@ -2377,11 +2377,14 @@ fn transform_client_with_visitors(
             super::profile::record_codegen(super::profile::timer_elapsed(_codegen_start));
             return Ok(CodegenResult { code, mappings });
         } else if *CLIENT_TO_OXC_DEBUG {
-            eprintln!(
-                "CLIENT_TO_OXC_FALLBACK {} {}",
+            // Corpus workers share one stderr and a multi-part write interleaves,
+            // gluing records together; emit the whole line in one call.
+            let line = format!(
+                "CLIENT_TO_OXC_FALLBACK {} {}\n",
                 super::js_ast::to_oxc::take_fallback_reason(),
                 options.filename.as_deref().unwrap_or("?")
             );
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
         }
     }
 
