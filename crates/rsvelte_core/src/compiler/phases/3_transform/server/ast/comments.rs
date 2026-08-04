@@ -14,9 +14,9 @@
 //! node.
 
 use oxc_allocator::{Allocator, Vec as ArenaVec};
-use oxc_ast::ast::{Comment, Program};
-use oxc_ast_visit::VisitMut;
-use oxc_span::Span;
+use oxc_ast::ast::{Comment, Program, Statement};
+use oxc_ast_visit::{VisitMut, walk_mut};
+use oxc_span::{GetSpan, Span};
 
 /// Base of the provisional address range. Registered anchors live above it;
 /// every other span stays below and is zeroed on the way out, which is how the
@@ -91,16 +91,34 @@ struct Encounter<'m> {
     bases: &'m [(u32, u32)],
     seen: Vec<bool>,
     order: Vec<usize>,
+    /// Per region: whether the walk first reached it as a whole statement.
+    via_stmt: Vec<bool>,
 }
 
-impl VisitMut<'_> for Encounter<'_> {
-    fn visit_span(&mut self, span: &mut Span) {
-        if let Some(i) = chunk_of(self.bases, *span)
+impl Encounter<'_> {
+    fn mark(&mut self, span: Span, is_stmt: bool) {
+        if let Some(i) = chunk_of(self.bases, span)
             && !self.seen[i]
         {
             self.seen[i] = true;
+            self.via_stmt[i] = is_stmt;
             self.order.push(i);
         }
+    }
+}
+
+impl<'a> VisitMut<'a> for Encounter<'_> {
+    fn visit_statement(&mut self, it: &mut Statement<'a>) {
+        // A region only survives if its anchor is still a statement position:
+        // reaching it first inside an expression means the owning statement was
+        // dropped and only a fragment of it was rehomed elsewhere. Empty
+        // statements are filtered out by the printer, so they cannot host one.
+        self.mark(it.span(), !matches!(it, Statement::EmptyStatement(_)));
+        walk_mut::walk_statement(self, it);
+    }
+
+    fn visit_span(&mut self, span: &mut Span) {
+        self.mark(*span, false);
     }
 }
 
@@ -158,13 +176,14 @@ pub fn print_with_comments<'a>(
         bases: &bases,
         seen: vec![false; bases.len()],
         order: Vec::new(),
+        via_stmt: vec![false; bases.len()],
     };
     encounter.visit_program(program);
 
     let mut buf = String::from(PAD);
     let mut shift: Vec<Option<i64>> = vec![None; bases.len()];
     let mut comments: Vec<Comment> = Vec::new();
-    for &i in &encounter.order {
+    for &i in encounter.order.iter().filter(|&&i| encounter.via_stmt[i]) {
         let chunk = &registry.chunks[i];
         let base = buf.len() as u32;
         shift[i] = Some(i64::from(base) - i64::from(chunk.prov_base));

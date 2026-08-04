@@ -49,12 +49,13 @@
 //!   KNOWN GAP: `$$array` is not yet deconflicted.
 
 use super::ServerTransformState;
+use super::comments;
 use crate::ast::template::Script;
 use crate::compiler::phases::phase2_analyze::scope::BindingKind;
 use crate::compiler::phases::phase3_transform::builders::B;
-use oxc_ast::ast::{Expression as OxcExpression, Statement, VariableDeclarationKind};
+use oxc_ast::ast::{Comment, Expression as OxcExpression, Statement, VariableDeclarationKind};
 use oxc_ast_visit::VisitMut;
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -302,6 +303,32 @@ fn build_dev_inspect<'a>(
     Some(rehomed)
 }
 
+/// Register the source region between the previous top-level statement and this
+/// one, so its comments can be replayed in front of whatever the statement
+/// lowers to. Returns the anchor to stamp, or `None` when the gap holds none.
+fn register_leading_comments(
+    registry: &mut comments::ChunkRegistry,
+    src: &str,
+    all: &[Comment],
+    prev_end: u32,
+    stmt_start: u32,
+) -> Option<u32> {
+    if stmt_start <= prev_end {
+        return None;
+    }
+    let gap = src.get(prev_end as usize..stmt_start as usize)?;
+    let kept: Vec<Comment> = all
+        .iter()
+        .filter(|c| c.span.start >= prev_end && c.span.end <= stmt_start)
+        .map(|c| {
+            let mut c = *c;
+            c.span = Span::new(c.span.start - prev_end, c.span.end - prev_end);
+            c
+        })
+        .collect();
+    registry.register(gap, &kept)
+}
+
 /// Parse + lower a single RUNES-mode script into transformed top-level
 /// statements. `import_sink` receives instance-script imports to hoist (`None`
 /// for module).
@@ -355,204 +382,233 @@ fn transform_script<'a>(
     }
 
     let mut out: Vec<Statement<'a>> = Vec::new();
+    let mut prev_end: u32 = 0;
 
     for stmt in ret.program.body.iter() {
-        match stmt {
-            Statement::ImportDeclaration(imp) => {
-                let slice = &src[imp.span.start as usize..imp.span.end as usize];
-                if let Some(rehomed) = state.reparse_statement(slice) {
-                    match import_sink.as_deref_mut() {
-                        Some(sink) => sink.push(rehomed),
-                        None => out.push(rehomed),
-                    }
-                }
-            }
-            Statement::VariableDeclaration(vd) => {
-                out.extend(lower_variable_declaration(vd, src, is_instance, state));
-            }
-            // INSTANCE-only `ExportNamedDeclaration` override (写经 the per-instance
-            // visitor added in `transform-server.js` line ~127): a declaration-less
-            // `export { a, b }` (accessor / re-export) is dropped (`b.empty`); an
-            // `export <decl>` unwraps to visiting the inner declaration (the
-            // `export` keyword is removed). The MODULE script uses the bare
-            // `global_visitors`, which has NO `ExportNamedDeclaration` visitor, so a
-            // module `export class` / `export const` is kept VERBATIM (export
-            // retained) — that falls through to the `other =>` catch-all below.
-            Statement::ExportNamedDeclaration(exp) if is_instance => {
-                match exp.declaration.as_ref() {
-                    None => {
-                        // `export { count }` → removed.
-                        continue;
-                    }
-                    Some(oxc_ast::ast::Declaration::VariableDeclaration(vd)) => {
-                        out.extend(lower_variable_declaration(vd, src, is_instance, state));
-                    }
-                    Some(decl) => {
-                        // `export function` / `export class` → keep the inner
-                        // declaration verbatim (re-parsed from its source span)
-                        // with the same read-wrap every re-homed statement gets.
-                        let span = decl.span();
-                        let slice = &src[span.start as usize..span.end as usize];
-                        if let Some(mut rehomed) = state.reparse_statement(slice) {
-                            super::read_wrap::wrap_reads_in_statement(
-                                &mut rehomed,
-                                state.b,
-                                state.analysis,
-                                state.analysis.root.instance_scope_index,
-                            );
-                            out.push(rehomed);
+        let anchor = register_leading_comments(
+            &mut state.comments,
+            src,
+            &ret.program.comments,
+            prev_end,
+            stmt.span().start,
+        );
+        prev_end = stmt.span().end;
+        let out_len = out.len();
+        let sink_len = import_sink.as_deref().map_or(0, Vec::len);
+
+        'emit: {
+            match stmt {
+                Statement::ImportDeclaration(imp) => {
+                    let slice = &src[imp.span.start as usize..imp.span.end as usize];
+                    if let Some(rehomed) = state.reparse_statement(slice) {
+                        match import_sink.as_deref_mut() {
+                            Some(sink) => sink.push(rehomed),
+                            None => out.push(rehomed),
                         }
                     }
                 }
-            }
-            // MODULE-script `export <decl>` (`!is_instance`): kept VERBATIM (export
-            // retained — module exports are NOT instance props), but the inner
-            // declaration's top-level `$state` / `$derived` runes still lower (写经
-            // the tree-wide server `CallExpression` / `VariableDeclaration` visitors
-            // firing on the module body). E.g. `<script module> export let route =
-            // $state({})` → `export let route = {}`.
-            Statement::ExportNamedDeclaration(exp) if !is_instance => {
-                let span = exp.span();
-                let slice = &src[span.start as usize..span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    lower_module_export_runes(&mut rehomed, state);
-                    super::read_wrap::wrap_reads_in_statement(
-                        &mut rehomed,
-                        state.b,
-                        state.analysis,
-                        state.analysis.root.instance_scope_index,
-                    );
-                    out.push(rehomed);
+                Statement::VariableDeclaration(vd) => {
+                    out.extend(lower_variable_declaration(vd, src, is_instance, state));
                 }
-            }
-            Statement::ExpressionStatement(es) => {
-                // DEV mode: a top-level `$inspect(args)` / `$inspect(args).with(fn)`
-                // is NOT removed — upstream's server `CallExpression` visitor lowers
-                // it to a `console.log('$inspect(', args, ')')` / `(fn)('init', args)`
-                // call (`$inspect.trace` is still removed in dev). Detect it before
-                // the generic effect/inspect removal so we keep the call.
-                if state.options.dev
-                    && let Some(kind) = inspect_kind(&es.expression)
-                {
-                    // Pull the verbatim argument / `.with` callback source straight
-                    // from the call spans — preserving operators/whitespace exactly
-                    // like the text oracle's slice-based extraction.
-                    let OxcExpression::CallExpression(call) = &es.expression else {
-                        unreachable!("inspect_kind matched a CallExpression");
-                    };
-                    let (args_src, with_fn_src) = match kind {
-                        InspectKind::Plain => {
-                            let s = call_args_src(call, src);
-                            (s, None)
+                // INSTANCE-only `ExportNamedDeclaration` override (写经 the per-instance
+                // visitor added in `transform-server.js` line ~127): a declaration-less
+                // `export { a, b }` (accessor / re-export) is dropped (`b.empty`); an
+                // `export <decl>` unwraps to visiting the inner declaration (the
+                // `export` keyword is removed). The MODULE script uses the bare
+                // `global_visitors`, which has NO `ExportNamedDeclaration` visitor, so a
+                // module `export class` / `export const` is kept VERBATIM (export
+                // retained) — that falls through to the `other =>` catch-all below.
+                Statement::ExportNamedDeclaration(exp) if is_instance => {
+                    match exp.declaration.as_ref() {
+                        None => {
+                            // `export { count }` → removed.
+                            break 'emit;
                         }
-                        InspectKind::With => {
-                            // For `<inner>.with(fn)`, the args belong to the INNER
-                            // `$inspect(...)` call, and `fn` is this outer call's
-                            // first argument.
-                            let inner_args = match &call.callee {
-                                OxcExpression::StaticMemberExpression(m) => match &m.object {
-                                    OxcExpression::CallExpression(inner) => {
-                                        call_args_src(inner, src)
-                                    }
-                                    _ => String::new(),
-                                },
-                                _ => String::new(),
-                            };
-                            let fn_src = call
-                                .arguments
-                                .first()
-                                .and_then(|a| a.as_expression())
-                                .map(|e| {
-                                    src[e.span().start as usize..e.span().end as usize].to_string()
-                                });
-                            (inner_args, fn_src)
+                        Some(oxc_ast::ast::Declaration::VariableDeclaration(vd)) => {
+                            out.extend(lower_variable_declaration(vd, src, is_instance, state));
                         }
-                    };
-                    if let Some(stmt) =
-                        build_dev_inspect(&kind, &args_src, with_fn_src.as_deref(), state)
+                        Some(decl) => {
+                            // `export function` / `export class` → keep the inner
+                            // declaration verbatim (re-parsed from its source span)
+                            // with the same read-wrap every re-homed statement gets.
+                            let span = decl.span();
+                            let slice = &src[span.start as usize..span.end as usize];
+                            if let Some(mut rehomed) = state.reparse_statement(slice) {
+                                super::read_wrap::wrap_reads_in_statement(
+                                    &mut rehomed,
+                                    state.b,
+                                    state.analysis,
+                                    state.analysis.root.instance_scope_index,
+                                );
+                                out.push(rehomed);
+                            }
+                        }
+                    }
+                }
+                // MODULE-script `export <decl>` (`!is_instance`): kept VERBATIM (export
+                // retained — module exports are NOT instance props), but the inner
+                // declaration's top-level `$state` / `$derived` runes still lower (写经
+                // the tree-wide server `CallExpression` / `VariableDeclaration` visitors
+                // firing on the module body). E.g. `<script module> export let route =
+                // $state({})` → `export let route = {}`.
+                Statement::ExportNamedDeclaration(exp) if !is_instance => {
+                    let span = exp.span();
+                    let slice = &src[span.start as usize..span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        lower_module_export_runes(&mut rehomed, state);
+                        super::read_wrap::wrap_reads_in_statement(
+                            &mut rehomed,
+                            state.b,
+                            state.analysis,
+                            state.analysis.root.instance_scope_index,
+                        );
+                        out.push(rehomed);
+                    }
+                }
+                Statement::ExpressionStatement(es) => {
+                    // DEV mode: a top-level `$inspect(args)` / `$inspect(args).with(fn)`
+                    // is NOT removed — upstream's server `CallExpression` visitor lowers
+                    // it to a `console.log('$inspect(', args, ')')` / `(fn)('init', args)`
+                    // call (`$inspect.trace` is still removed in dev). Detect it before
+                    // the generic effect/inspect removal so we keep the call.
+                    if state.options.dev
+                        && let Some(kind) = inspect_kind(&es.expression)
                     {
-                        out.push(stmt);
-                    }
-                    continue;
-                }
-                if is_removed_effect_stmt(&es.expression) {
-                    // Under `experimental.async`, a removed `$inspect(...)` /
-                    // `$effect(...)` statement must leave a PLACEHOLDER behind so
-                    // the async-body transform keeps its `$$promises` slot (the
-                    // text-based `transform_async_body` turns the placeholder into
-                    // a `() => void 0` thunk, preserving every later expression's
-                    // blocker index). Mirrors upstream's `/* $$async_hole */`
-                    // marker (server `transform_script.rs`). A removed `$inspect`
-                    // uses a DISTINCT `$$inspect_hole` marker so that, if no
-                    // top-level await actually splits the body, the fall-through
-                    // can rehydrate it as `;;` (see below) instead of dropping it.
-                    if state.eval_inputs.use_async {
-                        let marker = if inspect_kind(&es.expression).is_some() {
-                            inspect_hole_placeholder(state)
-                        } else {
-                            async_hole_placeholder(state)
+                        // Pull the verbatim argument / `.with` callback source straight
+                        // from the call spans — preserving operators/whitespace exactly
+                        // like the text oracle's slice-based extraction.
+                        let OxcExpression::CallExpression(call) = &es.expression else {
+                            unreachable!("inspect_kind matched a CallExpression");
                         };
-                        if let Some(marker) = marker {
-                            out.push(marker);
+                        let (args_src, with_fn_src) = match kind {
+                            InspectKind::Plain => {
+                                let s = call_args_src(call, src);
+                                (s, None)
+                            }
+                            InspectKind::With => {
+                                // For `<inner>.with(fn)`, the args belong to the INNER
+                                // `$inspect(...)` call, and `fn` is this outer call's
+                                // first argument.
+                                let inner_args = match &call.callee {
+                                    OxcExpression::StaticMemberExpression(m) => match &m.object {
+                                        OxcExpression::CallExpression(inner) => {
+                                            call_args_src(inner, src)
+                                        }
+                                        _ => String::new(),
+                                    },
+                                    _ => String::new(),
+                                };
+                                let fn_src =
+                                    call.arguments.first().and_then(|a| a.as_expression()).map(
+                                        |e| {
+                                            src[e.span().start as usize..e.span().end as usize]
+                                                .to_string()
+                                        },
+                                    );
+                                (inner_args, fn_src)
+                            }
+                        };
+                        if let Some(stmt) =
+                            build_dev_inspect(&kind, &args_src, with_fn_src.as_deref(), state)
+                        {
+                            out.push(stmt);
                         }
-                        continue;
+                        break 'emit;
                     }
-                    // Sync mode: a removed `$inspect(...)` / `$inspect(...).with(...)`
-                    // is NOT simply dropped. Upstream's server `ExpressionStatement`
-                    // visitor calls `context.next()`, and the inner `CallExpression`
-                    // visitor returns `b.empty` (an `EmptyStatement`) as the *new
-                    // expression* of the still-present `ExpressionStatement`. esrap
-                    // prints that empty-as-expression as `;` plus the statement's own
-                    // `;` → a literal `;;` per inspect (verified against every
-                    // `inspect-*` server fixture). We can't model an
-                    // `ExpressionStatement` wrapping an `EmptyStatement` in oxc's
-                    // typed AST, so emit two *kept* sentinel empties whose printed
-                    // `;\n;` canonicalizes to the same `;;`. Distinct `start`s keep
-                    // the body-sequence comment-resync treating them as separate.
-                    //
-                    // `$effect` / `$effect.pre` / `$effect.root` / `$inspect.trace`
-                    // are removed by the `ExpressionStatement` visitor itself
-                    // returning `b.empty` — a *bare* `EmptyStatement` that esrap
-                    // elides (prints nothing), so those keep being dropped.
-                    if inspect_kind(&es.expression).is_some() {
-                        out.push(state.b.empty_kept(es.span.start));
-                        out.push(state.b.empty_kept(es.span.start + 1));
+                    if is_removed_effect_stmt(&es.expression) {
+                        // Under `experimental.async`, a removed `$inspect(...)` /
+                        // `$effect(...)` statement must leave a PLACEHOLDER behind so
+                        // the async-body transform keeps its `$$promises` slot (the
+                        // text-based `transform_async_body` turns the placeholder into
+                        // a `() => void 0` thunk, preserving every later expression's
+                        // blocker index). Mirrors upstream's `/* $$async_hole */`
+                        // marker (server `transform_script.rs`). A removed `$inspect`
+                        // uses a DISTINCT `$$inspect_hole` marker so that, if no
+                        // top-level await actually splits the body, the fall-through
+                        // can rehydrate it as `;;` (see below) instead of dropping it.
+                        if state.eval_inputs.use_async {
+                            let marker = if inspect_kind(&es.expression).is_some() {
+                                inspect_hole_placeholder(state)
+                            } else {
+                                async_hole_placeholder(state)
+                            };
+                            if let Some(marker) = marker {
+                                out.push(marker);
+                            }
+                            break 'emit;
+                        }
+                        // Sync mode: a removed `$inspect(...)` / `$inspect(...).with(...)`
+                        // is NOT simply dropped. Upstream's server `ExpressionStatement`
+                        // visitor calls `context.next()`, and the inner `CallExpression`
+                        // visitor returns `b.empty` (an `EmptyStatement`) as the *new
+                        // expression* of the still-present `ExpressionStatement`. esrap
+                        // prints that empty-as-expression as `;` plus the statement's own
+                        // `;` → a literal `;;` per inspect (verified against every
+                        // `inspect-*` server fixture). We can't model an
+                        // `ExpressionStatement` wrapping an `EmptyStatement` in oxc's
+                        // typed AST, so emit two *kept* sentinel empties whose printed
+                        // `;\n;` canonicalizes to the same `;;`. Distinct `start`s keep
+                        // the body-sequence comment-resync treating them as separate.
+                        //
+                        // `$effect` / `$effect.pre` / `$effect.root` / `$inspect.trace`
+                        // are removed by the `ExpressionStatement` visitor itself
+                        // returning `b.empty` — a *bare* `EmptyStatement` that esrap
+                        // elides (prints nothing), so those keep being dropped.
+                        if inspect_kind(&es.expression).is_some() {
+                            out.push(state.b.empty_kept(es.span.start));
+                            out.push(state.b.empty_kept(es.span.start + 1));
+                        }
+                        break 'emit;
                     }
-                    continue;
+                    let slice = &src[es.span.start as usize..es.span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // Read-wrap the whole statement: derived / store reads (`d` →
+                        // `d()`, `$x` → `$.store_get(...)`), derived / store WRITES &
+                        // UPDATES (`count++` → `$.update_derived(count)`), and private
+                        // `this.#derived` reads — exactly as upstream's tree-wide
+                        // server `Identifier` / `AssignmentExpression` / `UpdateExpression`
+                        // / `MemberExpression` visitors fire on every instance-body node.
+                        super::read_wrap::wrap_reads_in_statement(
+                            &mut rehomed,
+                            state.b,
+                            state.analysis,
+                            state.analysis.root.instance_scope_index,
+                        );
+                        out.push(rehomed);
+                    }
                 }
-                let slice = &src[es.span.start as usize..es.span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // Read-wrap the whole statement: derived / store reads (`d` →
-                    // `d()`, `$x` → `$.store_get(...)`), derived / store WRITES &
-                    // UPDATES (`count++` → `$.update_derived(count)`), and private
-                    // `this.#derived` reads — exactly as upstream's tree-wide
-                    // server `Identifier` / `AssignmentExpression` / `UpdateExpression`
-                    // / `MemberExpression` visitors fire on every instance-body node.
-                    super::read_wrap::wrap_reads_in_statement(
-                        &mut rehomed,
-                        state.b,
-                        state.analysis,
-                        state.analysis.root.instance_scope_index,
-                    );
-                    out.push(rehomed);
+                other => {
+                    let span = other.span();
+                    let slice = &src[span.start as usize..span.end as usize];
+                    if let Some(mut rehomed) = state.reparse_statement(slice) {
+                        // Same whole-statement read-wrap for every other re-homed
+                        // verbatim instance statement (function declarations, `if` /
+                        // `for` / blocks, class declarations — the private-derived
+                        // member wrap applies inside class bodies).
+                        super::read_wrap::wrap_reads_in_statement(
+                            &mut rehomed,
+                            state.b,
+                            state.analysis,
+                            state.analysis.root.instance_scope_index,
+                        );
+                        out.push(rehomed);
+                    }
                 }
             }
-            other => {
-                let span = other.span();
-                let slice = &src[span.start as usize..span.end as usize];
-                if let Some(mut rehomed) = state.reparse_statement(slice) {
-                    // Same whole-statement read-wrap for every other re-homed
-                    // verbatim instance statement (function declarations, `if` /
-                    // `for` / blocks, class declarations — the private-derived
-                    // member wrap applies inside class bodies).
-                    super::read_wrap::wrap_reads_in_statement(
-                        &mut rehomed,
-                        state.b,
-                        state.analysis,
-                        state.analysis.root.instance_scope_index,
-                    );
-                    out.push(rehomed);
+        }
+
+        // Anchor the region on the FIRST statement this source statement emitted;
+        // emitting nothing leaves the region unreferenced, so its comments die
+        // with the statement instead of landing inside an unrelated node.
+        if let Some(anchor) = anchor {
+            if import_sink.as_deref().is_some_and(|s| s.len() > sink_len) {
+                if let Some(sink) = import_sink.as_deref_mut()
+                    && let Some(first) = sink.get_mut(sink_len)
+                {
+                    comments::SetSpans(anchor).visit_statement(first);
                 }
+            } else if let Some(first) = out.get_mut(out_len) {
+                comments::SetSpans(anchor).visit_statement(first);
             }
         }
     }
