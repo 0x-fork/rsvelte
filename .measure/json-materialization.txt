@@ -1,0 +1,22 @@
+Deterministic counts for a serial *client* compile of the flowbite-svelte corpus
+(1296 .svelte files), profiling profile. Load-independent: these are work counts,
+not timings, so a busy machine cannot skew them.
+
+json_materialize_count --features measure-json
+  files:            1296
+  materializations: 7073 total,     5.5/file   (Expression::as_json cache misses)
+  objects:          24821 total,   19.2/file   (serde_json::Map instances)
+  map entries:      123559 total,  95.3/file   (= key String allocs = IndexMap
+                                                inserts = SipHash of the key)
+  strings:          167750 total, 129.4/file   (map keys + string values)
+
+alloc_count (system allocator, every alloc/realloc counted)
+  files:       1296
+  allocations: 2573673 total, 1986/file
+    <= 64B:    1624434 total, 1253/file  (63.1% of allocations)
+  bytes:       484182880 total, 373598/file
+
+Derived: JSON materialization is responsible for roughly 129 String + ~40 Map/Vec
+allocations per file, i.e. ~8% of all allocations and ~10% of the small (<=64B)
+ones, plus 95 SipHash+insert operations per file before any reader has looked
+anything up.
