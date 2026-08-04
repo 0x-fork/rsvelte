@@ -722,6 +722,19 @@ impl<'a> ServerTransformState<'a> {
         comment_stats::bump::REPARSE_PROGRAM_CALLS(1);
         if !ret.diagnostics.is_empty() {
             comment_stats::bump::REPARSE_PROGRAM_DIAG_DROPS(1);
+            // `src` is our own generated text, so a parse failure is a compiler
+            // bug that would otherwise erase the whole instance body in silence.
+            let line = format!(
+                "rsvelte: server reparse_program rejected generated source ({} diagnostics); \
+                 instance body dropped: {}\n",
+                ret.diagnostics.len(),
+                ret.diagnostics
+                    .iter()
+                    .map(|d| d.message.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
             return Vec::new();
         }
         ret.program.body.into_iter().collect()
