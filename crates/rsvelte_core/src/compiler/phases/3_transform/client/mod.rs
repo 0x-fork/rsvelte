@@ -2378,7 +2378,8 @@ fn transform_client_with_visitors(
             return Ok(CodegenResult { code, mappings });
         } else if *CLIENT_TO_OXC_DEBUG {
             eprintln!(
-                "CLIENT_TO_OXC_FALLBACK {}",
+                "CLIENT_TO_OXC_FALLBACK {} {}",
+                super::js_ast::to_oxc::take_fallback_reason(),
                 options.filename.as_deref().unwrap_or("?")
             );
         }
