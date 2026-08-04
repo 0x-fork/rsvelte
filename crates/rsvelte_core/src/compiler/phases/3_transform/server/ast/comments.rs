@@ -65,6 +65,8 @@ impl ChunkRegistry {
             text: text.to_string(),
             comments: comments.to_vec(),
         });
+        super::comment_stats::bump::REGISTERED_CHUNKS(1);
+        super::comment_stats::bump::REGISTERED_COMMENTS(comments.len() as u64);
         Some(prov_base + len)
     }
 
@@ -180,6 +182,17 @@ pub fn print_with_comments<'a>(
     };
     encounter.visit_program(program);
 
+    if super::comment_stats::enabled() {
+        for i in 0..bases.len() {
+            let n = registry.chunks[i].comments.len() as u64;
+            match (encounter.seen[i], encounter.via_stmt[i]) {
+                (true, true) => super::comment_stats::bump::REACHED_VIA_STMT(n),
+                (true, false) => super::comment_stats::bump::REACHED_NOT_STMT(n),
+                (false, _) => super::comment_stats::bump::NEVER_REACHED(n),
+            }
+        }
+    }
+
     let mut buf = String::from(PAD);
     let mut shift: Vec<Option<i64>> = vec![None; bases.len()];
     let mut comments: Vec<Comment> = Vec::new();
@@ -209,6 +222,7 @@ pub fn print_with_comments<'a>(
         return rsvelte_esrap::print(program, "");
     }
     comments.sort_by_key(|c| c.span.start);
+    super::comment_stats::bump::EMITTED_COMMENTS(comments.len() as u64);
     program.comments = ArenaVec::from_iter_in(comments, &allocator);
 
     rsvelte_esrap::print_split(

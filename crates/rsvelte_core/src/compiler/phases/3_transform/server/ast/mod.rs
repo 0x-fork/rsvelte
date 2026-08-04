@@ -15,6 +15,7 @@
 //! This module is NOT yet wired into `super::transform_server`; it exists so
 //! the crate keeps compiling while the AST pipeline is built out.
 
+pub mod comment_stats;
 pub mod comments;
 pub mod read_wrap;
 pub mod script;
@@ -701,6 +702,8 @@ impl<'a> ServerTransformState<'a> {
         let owned = self.allocator.alloc_str(src.trim());
         let ret =
             oxc_parser::Parser::new(self.allocator, owned, oxc_span::SourceType::mjs()).parse();
+        comment_stats::bump::REPARSE_STMT_CALLS(1);
+        comment_stats::bump::REPARSE_STMT_DROPPED_COMMENTS(ret.program.comments.len() as u64);
         if !ret.diagnostics.is_empty() {
             return None;
         }
@@ -716,7 +719,9 @@ impl<'a> ServerTransformState<'a> {
         let owned = self.allocator.alloc_str(src.trim());
         let ret =
             oxc_parser::Parser::new(self.allocator, owned, oxc_span::SourceType::mjs()).parse();
+        comment_stats::bump::REPARSE_PROGRAM_CALLS(1);
         if !ret.diagnostics.is_empty() {
+            comment_stats::bump::REPARSE_PROGRAM_DIAG_DROPS(1);
             return Vec::new();
         }
         ret.program.body.into_iter().collect()
@@ -1444,11 +1449,9 @@ See https://svelte.dev/docs/svelte/v5-migration-guide#Components-are-no-longer-c
     }
 
     let mut program = b.program(program_body);
-    Some(comments::print_with_comments(
-        &mut program,
-        &state.comments,
-        allocator,
-    ))
+    let code = comments::print_with_comments(&mut program, &state.comments, allocator);
+    comment_stats::dump();
+    Some(code)
 }
 
 #[cfg(test)]
