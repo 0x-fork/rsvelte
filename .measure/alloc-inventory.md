@@ -70,6 +70,27 @@ team-lead から渡された「string alloc 5.42% / hash 5.75%」は samply の*
 hash 5.75% への寄与は「ハッシュ関数の入れ替え」でも「容量ヒント」でもないが、
 効果は string 側に限定して見積もるべき。
 
+### 段 1（`conflicts` 集合のみ）の変更コスト実測
+
+`ScopeRoot.conflicts` に実際に触るコードは **3 ファイル・15 サイトだけ**で、
+`rsvelte_core` の外には 1 件も出ない（`rsvelte_formatter` / `rsvelte_projection` /
+`rsvelte_lint` / `rsvelte_fmt` の `conflicts` ヒットは全部無関係な語 —
+borrow-checker conflicts、MagicString conflicts、clap の `conflicts_with`）。
+
+- 型宣言 2: `scope.rs:58` `FxHashSet<String>` / `client/types.rs:2640`
+  `Rc<RefCell<FxHashSet<String>>>`（Phase 3 側の別集合）
+- 橋渡し 1: `client/types.rs:2683` `scope_root.conflicts.clone()`
+- `insert` 10: `2_analyze/mod.rs:865`、`scope_builder.rs:300/305/313/321`、
+  `client/types.rs:2972/2993/3022/3046/3067`
+- `contains` 2: `client/types.rs:2992/3045`
+
+**イテレーション・`&FxHashSet<String>` を取る関数シグネチャ・serde derive はゼロ**
+（`ScopeRoot` は `#[derive(Debug, Default)]` のみ）。API 面は insert/contains/clone に閉じている。
+
+ただし Phase 2 側だけを `CompactString` にすると `:2683` の橋渡しで
+逆変換が要り、消したはずの 0.59pt がそこに戻る。**段 1 は Phase 2 と Phase 3 の
+両集合を同時に移す必要がある**（それでも 3 ファイル 15 サイト）。
+
 ## 3. `Binding.initial` の JSON 文字列往復（参考・N4 no-go 済み）
 
 `scope_builder.rs:1260-1278` が import 用の JSON を**文字列連結で手組み**し、
