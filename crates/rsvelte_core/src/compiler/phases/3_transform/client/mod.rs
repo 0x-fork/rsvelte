@@ -6800,6 +6800,9 @@ fn index_shadowed_decls(
     let mut map: rustc_hash::FxHashMap<String, [Option<u32>; SHADOWED_DECL_SHAPE_COUNT]> =
         rustc_hash::FxHashMap::default();
     for (marker_idx, marker) in SHADOWED_DECL_MARKERS.iter().enumerate() {
+        // One counted scan per marker: `find_iter` walks the whole script once
+        // for each, and the whole index is rebuilt after every rewrite.
+        super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_INDEX, script.len());
         for pos in memmem::find_iter(script.as_bytes(), marker.as_bytes()) {
             let mut before = &script[..pos];
             for wrapper in SHADOWED_DECL_TAG_WRAPPERS {
@@ -6840,6 +6843,8 @@ fn index_shadowed_decls(
 
 /// Find the enclosing function body (from `{` to matching `}`) that contains `pos`.
 fn find_enclosing_function_body(script: &str, pos: usize) -> Option<(usize, usize)> {
+    // Backward then forward brace walk; both are bounded by the script length.
+    super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_ENCLOSING, script.len());
     let bytes = script.as_bytes();
 
     // Scan backwards from pos to find the opening `{` of the enclosing function
@@ -6919,6 +6924,8 @@ fn apply_local_state_transforms(func_body: &str, var_name: &str, is_state: bool)
 
 /// Replace a pattern only when it appears as a standalone expression.
 fn replace_standalone_pattern(text: &str, from: &str, to: &str) -> String {
+    // The `find` loop advances monotonically, so the whole text is scanned once.
+    super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_BODY, text.len());
     let mut result = String::new();
     let mut search_from = 0;
 
@@ -6949,6 +6956,7 @@ fn replace_standalone_pattern(text: &str, from: &str, to: &str) -> String {
 
 /// Apply `$.set(var, expr, true)` transforms for assignment expressions within a function body.
 fn apply_local_set_transforms(func_body: &str, var_name: &str) -> String {
+    super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_BODY, func_body.len());
     let mut lines: Vec<String> = Vec::new();
 
     for line in func_body.lines() {

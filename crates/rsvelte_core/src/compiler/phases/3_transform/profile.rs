@@ -442,6 +442,8 @@ thread_local! {
     static SCAN_BYTES: Cell<u64> = const { Cell::new(0) };
     static SCAN_CALLS: Cell<u64> = const { Cell::new(0) };
     static SCAN_SCRIPT_BYTES: Cell<u64> = const { Cell::new(0) };
+    static SCAN_SITE_BYTES: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
+    static SCAN_SITE_CALLS: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -827,23 +829,52 @@ pub struct ScanCounts {
     pub bytes: u64,
     pub calls: u64,
     pub script_bytes: u64,
+    pub site_bytes: [u64; SCAN_SITE_COUNT],
+    pub site_calls: [u64; SCAN_SITE_COUNT],
 }
+
+/// Scan sites, split far enough to tell "the staged text pipeline" from the one
+/// post pass that rebuilds a whole-script index after every rewrite.
+pub const SCAN_SITE_STAGED: usize = 0;
+pub const SCAN_SITE_SHADOW_INDEX: usize = 1;
+pub const SCAN_SITE_SHADOW_ENCLOSING: usize = 2;
+pub const SCAN_SITE_SHADOW_BODY: usize = 3;
+pub const SCAN_SITE_COUNT: usize = 4;
+pub const SCAN_SITE_NAMES: [&str; SCAN_SITE_COUNT] =
+    ["staged", "shadow_index", "shadow_enclosing", "shadow_body"];
 
 pub fn take_scan_counts() -> ScanCounts {
     ScanCounts {
         bytes: SCAN_BYTES.with(|c| c.replace(0)),
         calls: SCAN_CALLS.with(|c| c.replace(0)),
         script_bytes: SCAN_SCRIPT_BYTES.with(|c| c.replace(0)),
+        site_bytes: SCAN_SITE_BYTES.with(|c| c.replace([0; SCAN_SITE_COUNT])),
+        site_calls: SCAN_SITE_CALLS.with(|c| c.replace([0; SCAN_SITE_COUNT])),
     }
 }
 
 #[inline]
 pub fn count_scan(bytes: usize) {
+    count_scan_site(SCAN_SITE_STAGED, bytes);
+}
+
+#[inline]
+pub fn count_scan_site(site: usize, bytes: usize) {
     if !timers_enabled() {
         return;
     }
     SCAN_BYTES.with(|c| c.set(c.get() + bytes as u64));
     SCAN_CALLS.with(|c| c.set(c.get() + 1));
+    SCAN_SITE_BYTES.with(|c| {
+        let mut v = c.get();
+        v[site] += bytes as u64;
+        c.set(v);
+    });
+    SCAN_SITE_CALLS.with(|c| {
+        let mut v = c.get();
+        v[site] += 1;
+        c.set(v);
+    });
 }
 
 #[inline]

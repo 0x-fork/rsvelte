@@ -304,6 +304,21 @@ fn main() {
         },
         scan.calls as f64 / files.len() as f64
     );
+    for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::SCAN_SITE_NAMES
+        .iter()
+        .enumerate()
+    {
+        println!(
+            "      SCANSITE {name:<18} {:9} calls {:12} bytes = {:6.2} passes",
+            scan.site_calls[i],
+            scan.site_bytes[i],
+            if scan.script_bytes > 0 {
+                scan.site_bytes[i] as f64 / scan.script_bytes as f64
+            } else {
+                0.0
+            }
+        );
+    }
     // The verdict the split exists for: only parse and output can go away if
     // this stage is fed an AST instead of the text pipeline's output. There is
     // no print column -- the stage splices into a string, it never serialises.
