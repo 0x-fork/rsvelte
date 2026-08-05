@@ -518,7 +518,7 @@ pub fn take_breakdown() -> Phase3Breakdown {
 /// `calls` is the denominator that keeps the coefficient honest. A site with a
 /// high coefficient that runs twice per corpus is not worth touching, and only
 /// the call count distinguishes that from a site that runs everywhere.
-pub const RESCAN_SITE_NAMES: [&str; 7] = [
+pub const RESCAN_SITE_NAMES: [&str; 13] = [
     "transform_prop_reads_in_expr",
     "transform_store_assignments_client",
     "transform_store_sub_calls",
@@ -526,7 +526,18 @@ pub const RESCAN_SITE_NAMES: [&str; 7] = [
     "transform_shadowed_local_state_vars",
     "transform_rest_prop_member_access",
     "wrap_prop_mutation_validation",
+    "A1 local_reactive_vars (script)",
+    "A2 local_reactive_vars (script)",
+    "B1 transform_class_methods",
+    "B2 class_methods_non_this",
+    "B3 constructor_assignment",
+    "C legacy_state_vars",
 ];
+
+/// Scanned bytes for the multi-scan sites are a LOWER bound: one loop pass is
+/// recorded once even where the body performs up to four full scans of the
+/// same text. Under-reporting is the safe direction for a target list.
+pub const RESCAN_LOWER_BOUND_SITES: [usize; 2] = [7, 8];
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RescanSite {
@@ -537,7 +548,7 @@ pub struct RescanSite {
 }
 
 thread_local! {
-    static RESCAN: Cell<[(u64, u64, u64, u64); 7]> = const { Cell::new([(0, 0, 0, 0); 7]) };
+    static RESCAN: Cell<[(u64, u64, u64, u64); 13]> = const { Cell::new([(0, 0, 0, 0); 13]) };
 }
 
 /// One entry into an instrumented site, with the text length it was handed.
@@ -562,8 +573,8 @@ pub fn record_rescan_iter(site: usize, scanned_bytes: usize) {
     });
 }
 
-pub fn take_rescan() -> [RescanSite; 7] {
-    let all = RESCAN.replace([(0, 0, 0, 0); 7]);
+pub fn take_rescan() -> [RescanSite; 13] {
+    let all = RESCAN.replace([(0, 0, 0, 0); 13]);
     all.map(|(calls, iters, scanned, input)| RescanSite {
         calls,
         iters,

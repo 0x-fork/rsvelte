@@ -4549,7 +4549,9 @@ fn transform_instance_script_for_visitors(
                 .and_then(|&idx| analysis.root.bindings.get(idx))
                 .is_some_and(|b| b.reassigned)
     };
+    super::profile::record_rescan_call(7, script_rest.len());
     for (var, is_const, is_state) in &local_reactive_vars {
+        super::profile::record_rescan_iter(7, script_rest.len());
         // Skip top-level bindings - they are already handled by the analysis-based
         // state_vars and non_reactive_state_vars collections above. The text-based
         // reassignment check below only works for script-local code and misses
@@ -4653,7 +4655,9 @@ fn transform_instance_script_for_visitors(
     // reassignment check only sees script code, not template assignments.
     // Top-level vars are already correctly handled by the analysis-based collection above.
     if analysis.immutable {
+        super::profile::record_rescan_call(8, script_rest.len());
         for (var, is_const, is_state) in &local_reactive_vars {
+            super::profile::record_rescan_iter(8, script_rest.len());
             // Skip top-level bindings - they're already handled above
             if top_level_binding_names.contains(var.as_str()) {
                 continue;

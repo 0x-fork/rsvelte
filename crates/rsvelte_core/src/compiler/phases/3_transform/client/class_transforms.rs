@@ -1583,6 +1583,7 @@ pub(super) fn transform_class_methods(content: &str, fields: &[ClassStateField])
     }
 
     let mut result = content.to_string();
+    super::super::profile::record_rescan_call(9, content.len());
 
     // AST-based pre-pass: assignments + updates for ALL private-field
     // prefixes, with $state proxy-detection.
@@ -1590,6 +1591,7 @@ pub(super) fn transform_class_methods(content: &str, fields: &[ClassStateField])
         let mut state_qualified: Vec<String> = Vec::new();
         let mut other_qualified: Vec<String> = Vec::new();
         for field in fields {
+            super::super::profile::record_rescan_iter(9, result.len());
             let prefixes = find_private_field_prefixes(&result, &field.private_backing_name);
             for prefix in &prefixes {
                 let qualified = format!("{}.#{}", prefix, field.private_backing_name);
@@ -1839,6 +1841,7 @@ pub(super) fn transform_class_methods_non_this(
     }
 
     let mut result = content.to_string();
+    super::super::profile::record_rescan_call(10, content.len());
 
     // AST-based pre-pass for simple `q = expr` and compound `q OP= expr`
     // (where OP ∈ +, -, *, /, %, **). Collects all non-`this` qualified
@@ -1848,6 +1851,7 @@ pub(super) fn transform_class_methods_non_this(
     {
         let mut all_qualified = Vec::new();
         for field in fields {
+            super::super::profile::record_rescan_iter(10, result.len());
             let prefixes = find_private_field_prefixes(&result, &field.private_backing_name);
             for prefix in &prefixes {
                 if prefix == "this" {
@@ -1985,9 +1989,11 @@ pub(super) fn transform_class_methods_non_this(
 /// Transform constructor assignments for private state fields and rune calls.
 pub(super) fn transform_constructor_assignment(line: &str, fields: &[ClassStateField]) -> String {
     let mut result = line.trim().to_string();
+    super::super::profile::record_rescan_call(11, line.len());
 
     // Handle constructor-declared rune calls
     for field in fields {
+        super::super::profile::record_rescan_iter(11, result.len());
         if !field.constructor_declared {
             continue;
         }

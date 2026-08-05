@@ -139,8 +139,8 @@ fn main() {
         Vec::with_capacity(files.len());
     let mut scaling: Vec<ScalingRow> = Vec::with_capacity(files.len());
     let mut totals = profile::Phase3Breakdown::default();
-    let mut rescan_total = [profile::RescanSite::default(); 7];
-    let mut rescan_files = [0usize; 7];
+    let mut rescan_total = [profile::RescanSite::default(); 13];
+    let mut rescan_files = [0usize; 13];
     let _ = profile::take_rescan();
 
     // Measure Phase 3 (Transform)

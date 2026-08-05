@@ -1621,7 +1621,9 @@ pub(super) fn transform_legacy_state_declarations(
 
     let mut result = line.to_string();
 
+    super::super::profile::record_rescan_call(12, result.len());
     for (var, _initial, decl_kind) in legacy_state_vars {
+        super::super::profile::record_rescan_iter(12, result.len());
         // Determine the keyword(s) to look for based on declaration kind
         let keywords: Vec<&str> = match decl_kind {
             DeclarationKind::Let => vec!["let"],
