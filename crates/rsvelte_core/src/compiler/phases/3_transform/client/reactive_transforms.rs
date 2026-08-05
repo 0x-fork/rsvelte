@@ -89,7 +89,9 @@ pub(super) fn extract_reactive_statement_deps(
     // This catches patterns like `$: if (cond) { count++ }` where `count` is assigned
     // inside an if block but the top-level is not an assignment expression.
     // We look for `var =`, `var++`, `var--`, `++var`, `--var` patterns.
+    super::super::profile::record_rescan_call(13, body.len());
     for var_name in &all_reactive_vars {
+        super::super::profile::record_rescan_iter(13, body.len());
         if assigned_vars.contains(&var_name.to_string()) {
             continue; // Already detected as assigned
         }

@@ -93,7 +93,9 @@ fn main() {
 
     // Phase 2b: ensure_script_parsed for instance + module scripts (OXC)
     let start = Instant::now();
+    let mut ensure_per_file: Vec<std::time::Duration> = Vec::with_capacity(files.len());
     for (i, (_, content)) in files.iter().enumerate() {
+        let file_start = Instant::now();
         if let Some(ref mut ast) = asts[i] {
             let line_offsets = compute_line_offsets(content, false);
             // SAFETY: same lifetime invariant as 2a.
@@ -106,6 +108,7 @@ fn main() {
             }
             rsvelte_core::ast::arena::clear_serialize_arena();
         }
+        ensure_per_file.push(file_start.elapsed());
     }
     let ensure_script_time = start.elapsed();
 
@@ -139,8 +142,9 @@ fn main() {
         Vec::with_capacity(files.len());
     let mut scaling: Vec<ScalingRow> = Vec::with_capacity(files.len());
     let mut totals = profile::Phase3Breakdown::default();
-    let mut rescan_total = [profile::RescanSite::default(); 13];
-    let mut rescan_files = [0usize; 13];
+    let mut rescan_total = [profile::RescanSite::default(); 14];
+    let mut rescan_files = [0usize; 14];
+    let mut rescan_rows: Vec<(usize, [(u64, u64); 14])> = Vec::with_capacity(files.len());
     let _ = profile::take_rescan();
 
     // Measure Phase 3 (Transform)
@@ -169,6 +173,7 @@ fn main() {
         let (script_bytes, runes) = script_shape(asts[i].as_ref(), content);
         scaling.push(ScalingRow {
             script_bytes,
+            ensure_script: ensure_per_file.get(i).copied().unwrap_or_default(),
             runes,
             analyze: analyze_per_file.get(i).copied().unwrap_or_default(),
             script_text: b.script_text_transform,
@@ -193,6 +198,11 @@ fn main() {
                 *n += 1;
             }
         }
+        let mut per_site = [(0u64, 0u64); 14];
+        for (slot, one) in per_site.iter_mut().zip(per_file.iter()) {
+            *slot = (one.scanned, one.input);
+        }
+        rescan_rows.push((script_bytes, per_site));
     }
     let transform_time = start.elapsed();
     let transform_breakdown = totals;
@@ -324,6 +334,7 @@ fn main() {
         st.entries_outside_parent
     );
     report_reparse(&mut rows, ms(total));
+    report_rescan_quartiles(&mut rescan_rows);
     let rescan = rescan_total;
     println!("\n  === per-variable full-text rescans ===");
     println!(
@@ -384,6 +395,7 @@ fn main() {
 
 struct ScalingRow {
     script_bytes: usize,
+    ensure_script: std::time::Duration,
     runes: usize,
     analyze: std::time::Duration,
     script_text: std::time::Duration,
@@ -470,7 +482,8 @@ fn log_slope(points: &[(f64, f64)]) -> (f64, usize) {
 /// the other compiler's bucket split, which we do not have.
 fn report_scaling(rows: &[ScalingRow], label: &str, predictor: fn(&ScalingRow) -> f64) {
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-    let buckets: [(&str, fn(&ScalingRow) -> std::time::Duration); 4] = [
+    let buckets: [(&str, fn(&ScalingRow) -> std::time::Duration); 5] = [
+        ("ensure_script", |r| r.ensure_script),
         ("Analyze", |r| r.analyze),
         ("script_text", |r| r.script_text),
         ("template", |r| r.template),
@@ -511,13 +524,55 @@ fn report_scaling(rows: &[ScalingRow], label: &str, predictor: fn(&ScalingRow) -
     }
     let total_pts: Vec<(f64, f64)> = rows
         .iter()
-        .map(|r| (predictor(r), ms(r.analyze) + ms(r.transform)))
+        .map(|r| {
+            (
+                predictor(r),
+                ms(r.ensure_script) + ms(r.analyze) + ms(r.transform),
+            )
+        })
         .collect();
     let (total_exp, used) = log_slope(&total_pts);
     println!(
         "    SELF-CHECK  sum c_b {c_sum:.3} vs total exponent {total_exp:.3} (fitted on {used} of {})",
         rows.len()
     );
+}
+
+/// Rescan coefficient per script-byte quartile.
+///
+/// A coefficient that is flat across quartiles is a constant factor; one that
+/// climbs is the superlinear term. This is the only reading that separates the
+/// two, and a corpus-wide average cannot do it.
+fn report_rescan_quartiles(rows: &mut [(usize, [(u64, u64); 14])]) {
+    rows.sort_by_key(|&(bytes, _)| bytes);
+    let n = rows.len();
+    if n < 4 {
+        return;
+    }
+    println!("\n  === rescan coefficient by script-byte quartile ===");
+    println!(
+        "    {:<38} {:>8} {:>8} {:>8} {:>8}",
+        "site", "Q1", "Q2", "Q3", "Q4"
+    );
+    for (site, name) in profile::RESCAN_SITE_NAMES.iter().enumerate() {
+        let mut cells = [0.0f64; 4];
+        let mut any = false;
+        for (q, cell) in cells.iter_mut().enumerate() {
+            let chunk = &rows[n * q / 4..n * (q + 1) / 4];
+            let scanned: u64 = chunk.iter().map(|(_, s)| s[site].0).sum();
+            let input: u64 = chunk.iter().map(|(_, s)| s[site].1).sum();
+            if input > 0 {
+                any = true;
+                *cell = scanned as f64 / input as f64;
+            }
+        }
+        if any {
+            println!(
+                "    {name:<38} {:>7.2}x {:>7.2}x {:>7.2}x {:>7.2}x",
+                cells[0], cells[1], cells[2], cells[3]
+            );
+        }
+    }
 }
 
 /// Re-parse cost overall and per file-size quartile.

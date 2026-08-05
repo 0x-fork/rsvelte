@@ -518,7 +518,7 @@ pub fn take_breakdown() -> Phase3Breakdown {
 /// `calls` is the denominator that keeps the coefficient honest. A site with a
 /// high coefficient that runs twice per corpus is not worth touching, and only
 /// the call count distinguishes that from a site that runs everywhere.
-pub const RESCAN_SITE_NAMES: [&str; 13] = [
+pub const RESCAN_SITE_NAMES: [&str; 14] = [
     "transform_prop_reads_in_expr",
     "transform_store_assignments_client",
     "transform_store_sub_calls",
@@ -532,6 +532,7 @@ pub const RESCAN_SITE_NAMES: [&str; 13] = [
     "B2 class_methods_non_this",
     "B3 constructor_assignment",
     "C legacy_state_vars",
+    "extract_reactive_statement_deps",
 ];
 
 /// Scanned bytes for the multi-scan sites are a LOWER bound: one loop pass is
@@ -548,7 +549,7 @@ pub struct RescanSite {
 }
 
 thread_local! {
-    static RESCAN: Cell<[(u64, u64, u64, u64); 13]> = const { Cell::new([(0, 0, 0, 0); 13]) };
+    static RESCAN: Cell<[(u64, u64, u64, u64); 14]> = const { Cell::new([(0, 0, 0, 0); 14]) };
 }
 
 /// One entry into an instrumented site, with the text length it was handed.
@@ -573,8 +574,8 @@ pub fn record_rescan_iter(site: usize, scanned_bytes: usize) {
     });
 }
 
-pub fn take_rescan() -> [RescanSite; 13] {
-    let all = RESCAN.replace([(0, 0, 0, 0); 13]);
+pub fn take_rescan() -> [RescanSite; 14] {
+    let all = RESCAN.replace([(0, 0, 0, 0); 14]);
     all.map(|(calls, iters, scanned, input)| RescanSite {
         calls,
         iters,
