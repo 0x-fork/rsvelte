@@ -667,6 +667,7 @@ fn transform_client_with_visitors(
     }
 
     let _assembly_start = super::profile::timer_start();
+    super::profile::as_scope_enter();
 
     // Collect results from state
     let hoisted_statements = std::mem::take(&mut context.state.hoisted);
@@ -1926,6 +1927,7 @@ fn transform_client_with_visitors(
     // Process module script content - extract imports separately from other content
     // This is needed because module_level_snippets must come after imports but before exports
     // Reference: transform-client.js line 513: body = [...imports, ...state.module_level_snippets, ...body];
+    let _mod_text = super::profile::timer_start();
     let module_script_non_imports: Option<(String, Option<String>)> =
         if let Some(ref module_content) = analysis.module_script_content {
             // Strip TypeScript syntax before processing
@@ -1975,6 +1977,8 @@ fn transform_client_with_visitors(
             None
         };
 
+    super::profile::record_as_module_text(super::profile::timer_elapsed(_mod_text));
+
     // Add svelte/internal/client import (namespace import as $)
     // In the official compiler (transform-client.js line 154, 506), this is the first
     // item in state.hoisted, which is iterated after module.body. So the order is:
@@ -2018,6 +2022,7 @@ fn transform_client_with_visitors(
     // Transform class fields first (before rune transforms strip the rune names)
     // Then transform remaining rune calls ($state, $derived, etc.) in module-level script
     if let Some((non_imports, retained_comment_stripped)) = module_script_non_imports {
+        let _mod_text = super::profile::timer_start();
         let class_transformed = transform_class_fields_client(&non_imports);
         let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
         // Drop module-level comments esrap's no-`loc` top-level Program omits
@@ -2029,6 +2034,7 @@ fn transform_client_with_visitors(
         } else {
             strip_module_toplevel_comments(&transformed)
         };
+        super::profile::record_as_module_text(super::profile::timer_elapsed(_mod_text));
         body.push(JsStatement::Raw(transformed.into()));
     }
 
@@ -2037,6 +2043,7 @@ fn transform_client_with_visitors(
 
     // Add CSS declaration if needed
     if analysis.css.has_css && analysis.inject_styles {
+        let _css_inject = super::profile::timer_start();
         let hash = b::string(analysis.css.hash.clone());
         // Render the actual scoped CSS code.
         // Injected styles are minified unless in dev mode, matching upstream's
@@ -2097,6 +2104,7 @@ fn transform_client_with_visitors(
                 }),
             ]),
         ));
+        super::profile::record_as_css_inject(super::profile::timer_elapsed(_css_inject));
     }
 
     // Export default component function (with optional HMR wrapping)
@@ -2340,6 +2348,7 @@ fn transform_client_with_visitors(
     let program = JsProgram { body };
 
     // Generate JavaScript code from the program, optionally with source map data
+    super::profile::as_scope_exit();
     super::profile::record_assembly_after_fragment(super::profile::timer_elapsed(_assembly_start));
     let _codegen_start = super::profile::timer_start();
 

@@ -420,6 +420,15 @@ thread_local! {
     static TF_TEMPLATE_STR_CALLS: Cell<u64> = const { Cell::new(0) };
     static TF_AS_JSON_CALLS: Cell<u64> = const { Cell::new(0) };
     static TF_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
+    static AS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static AS_MODULE_TEXT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AS_CSS_INJECT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AS_AS_JSON: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AS_PARSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AS_MODULE_TEXT_CALLS: Cell<u64> = const { Cell::new(0) };
+    static AS_CSS_INJECT_CALLS: Cell<u64> = const { Cell::new(0) };
+    static AS_AS_JSON_CALLS: Cell<u64> = const { Cell::new(0) };
+    static AS_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -475,11 +484,13 @@ pub fn record_direct_parse(parse: Duration, bytes: usize) {
 /// the bucket cannot miss a site the sites themselves already cover.
 #[inline]
 fn record_tf_parse(d: Duration) {
-    if !in_tf_scope() {
-        return;
+    if in_tf_scope() {
+        TF_PARSE.with(|c| c.set(c.get() + d));
+        TF_PARSE_CALLS.with(|c| c.set(c.get() + 1));
+    } else if in_as_scope() {
+        AS_PARSE.with(|c| c.set(c.get() + d));
+        AS_PARSE_CALLS.with(|c| c.set(c.get() + 1));
     }
-    TF_PARSE.with(|c| c.set(c.get() + d));
-    TF_PARSE_CALLS.with(|c| c.set(c.get() + 1));
 }
 
 pub fn take_reparse_breakdown() -> ReparseBreakdown {
@@ -788,6 +799,81 @@ pub fn record_st_post_passes(d: Duration) {
     ST_POST_PASSES.with(|c| c.set(c.get() + d));
 }
 
+/// One level below [`Phase3Breakdown::assembly_after_fragment`].
+///
+/// Same three-way question as [`TemplateFragmentBreakdown`]: only a parse, a
+/// splice, or a string built to be re-parsed can go away if the stage is fed an
+/// AST. `css_inject` is here to be *excluded* from that sum -- the stylesheet
+/// text is what the compiler emits, so it is output, not representation.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AssemblyBreakdown {
+    /// The `<script module>` text pipeline: import extraction, class-field and
+    /// rune rewrites, top-level comment stripping.
+    pub module_text: Duration,
+    /// `render_stylesheet` for `css="injected"`. Output, not representation.
+    pub css_inject: Duration,
+    /// `as_json` materialisation reached from inside the assembly stage.
+    pub as_json: Duration,
+    /// oxc parses reached from inside the assembly stage.
+    pub parse: Duration,
+    pub module_text_calls: u64,
+    pub css_inject_calls: u64,
+    pub as_json_calls: u64,
+    pub parse_calls: u64,
+}
+
+pub fn take_assembly_breakdown() -> AssemblyBreakdown {
+    AssemblyBreakdown {
+        module_text: AS_MODULE_TEXT.with(|c| c.replace(Duration::ZERO)),
+        css_inject: AS_CSS_INJECT.with(|c| c.replace(Duration::ZERO)),
+        as_json: AS_AS_JSON.with(|c| c.replace(Duration::ZERO)),
+        parse: AS_PARSE.with(|c| c.replace(Duration::ZERO)),
+        module_text_calls: AS_MODULE_TEXT_CALLS.with(|c| c.replace(0)),
+        css_inject_calls: AS_CSS_INJECT_CALLS.with(|c| c.replace(0)),
+        as_json_calls: AS_AS_JSON_CALLS.with(|c| c.replace(0)),
+        parse_calls: AS_PARSE_CALLS.with(|c| c.replace(0)),
+    }
+}
+
+#[inline]
+pub fn as_scope_enter() {
+    if !timers_enabled() {
+        return;
+    }
+    AS_DEPTH.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn as_scope_exit() {
+    if !timers_enabled() {
+        return;
+    }
+    AS_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+#[inline]
+fn in_as_scope() -> bool {
+    AS_DEPTH.with(|c| c.get()) > 0
+}
+
+#[inline]
+pub fn record_as_module_text(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AS_MODULE_TEXT.with(|c| c.set(c.get() + d));
+    AS_MODULE_TEXT_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_as_css_inject(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AS_CSS_INJECT.with(|c| c.set(c.get() + d));
+    AS_CSS_INJECT_CALLS.with(|c| c.set(c.get() + 1));
+}
+
 /// One level below [`Phase3Breakdown::template_fragment`].
 ///
 /// The buckets are the three mechanisms that produce or consume text or a
@@ -874,11 +960,16 @@ pub fn record_tf_template_str(d: Duration) {
 
 #[inline]
 pub fn record_tf_as_json(d: Duration) {
-    if !timers_enabled() || !in_tf_scope() {
+    if !timers_enabled() {
         return;
     }
-    TF_AS_JSON.with(|c| c.set(c.get() + d));
-    TF_AS_JSON_CALLS.with(|c| c.set(c.get() + 1));
+    if in_tf_scope() {
+        TF_AS_JSON.with(|c| c.set(c.get() + d));
+        TF_AS_JSON_CALLS.with(|c| c.set(c.get() + 1));
+    } else if in_as_scope() {
+        AS_AS_JSON.with(|c| c.set(c.get() + d));
+        AS_AS_JSON_CALLS.with(|c| c.set(c.get() + 1));
+    }
 }
 
 /// One level below [`ScriptTextBreakdown::ast_transforms`].

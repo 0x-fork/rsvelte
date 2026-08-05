@@ -77,6 +77,7 @@ fn main() {
     let _ = profile::take_script_text_breakdown();
     let _ = profile::take_ast_transforms_breakdown();
     let _ = profile::take_template_fragment_breakdown();
+    let _ = profile::take_assembly_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -151,6 +152,7 @@ fn main() {
     let script_text_breakdown = profile::take_script_text_breakdown();
     let at = profile::take_ast_transforms_breakdown();
     let tf = profile::take_template_fragment_breakdown();
+    let asm = profile::take_assembly_breakdown();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -373,6 +375,33 @@ fn main() {
         "  Assembly (post-frag):{:7.2}ms ({:5.1}%)",
         ms(assembly_after),
         pct(assembly_after)
+    );
+    let as_rest = ms(assembly_after)
+        - [asm.module_text, asm.css_inject, asm.as_json, asm.parse]
+            .iter()
+            .copied()
+            .map(ms)
+            .sum::<f64>();
+    for (label, val, calls) in [
+        ("as_module_text", ms(asm.module_text), asm.module_text_calls),
+        ("as_css_inject", ms(asm.css_inject), asm.css_inject_calls),
+        ("as_as_json", ms(asm.as_json), asm.as_json_calls),
+        ("as_parse", ms(asm.parse), asm.parse_calls),
+        ("as_rest (IR build)", as_rest, 0),
+    ] {
+        println!(
+            "    {label:<18} {val:7.2}ms ({:5.1}% of as) calls {calls}",
+            val / ms(assembly_after) * 100.0
+        );
+    }
+    // `css_inject` is excluded: the stylesheet text is emitted output, so it is
+    // built whatever the intermediate representation is.
+    let as_removable = ms(asm.parse) + ms(asm.module_text) + ms(asm.as_json);
+    println!(
+        "    REMOVABLE-IF-AST parse+moduleText+asJson {:.3}ms = {:.2}% of as | with cssInject {:.2}%",
+        as_removable,
+        as_removable / ms(assembly_after) * 100.0,
+        (as_removable + ms(asm.css_inject)) / ms(assembly_after) * 100.0
     );
     println!(
         "  CSS render:          {:7.2}ms ({:5.1}%)",
