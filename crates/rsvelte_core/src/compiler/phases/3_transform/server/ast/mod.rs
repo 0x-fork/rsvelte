@@ -15,6 +15,8 @@
 //! This module is NOT yet wired into `super::transform_server`; it exists so
 //! the crate keeps compiling while the AST pipeline is built out.
 
+pub mod comment_stats;
+pub mod comments;
 pub mod read_wrap;
 pub mod script;
 pub mod visitors;
@@ -218,6 +220,9 @@ pub struct ServerTransformState<'a> {
     /// so `scope.evaluate` resolves an identifier through the real lexical chain
     /// instead of a flat "every template scope" union.
     pub current_scope_index: usize,
+    /// Leading-comment regions registered by the script transform, replayed onto
+    /// a synthetic buffer at print time. See [`comments`].
+    pub comments: comments::ChunkRegistry,
 }
 
 /// The render position saved by [`ServerTransformState::enter_template_scope`],
@@ -304,6 +309,7 @@ impl<'a> ServerTransformState<'a> {
             shadowed_names: Vec::new(),
             slot_let_shadows: Vec::new(),
             current_scope_index: analysis.root.instance_scope_index,
+            comments: comments::ChunkRegistry::default(),
         }
     }
 
@@ -696,6 +702,8 @@ impl<'a> ServerTransformState<'a> {
         let owned = self.allocator.alloc_str(src.trim());
         let ret =
             oxc_parser::Parser::new(self.allocator, owned, oxc_span::SourceType::mjs()).parse();
+        comment_stats::bump::REPARSE_STMT_CALLS(1);
+        comment_stats::bump::REPARSE_STMT_DROPPED_COMMENTS(ret.program.comments.len() as u64);
         if !ret.diagnostics.is_empty() {
             return None;
         }
@@ -711,7 +719,47 @@ impl<'a> ServerTransformState<'a> {
         let owned = self.allocator.alloc_str(src.trim());
         let ret =
             oxc_parser::Parser::new(self.allocator, owned, oxc_span::SourceType::mjs()).parse();
+        comment_stats::bump::REPARSE_PROGRAM_CALLS(1);
+        // `src` is our own generated text, so a rejection is a compiler bug and
+        // not a user error — and it erases the whole instance body. Two
+        // channels, because the two audiences want different things:
+        //
+        // * the test suite should fail, since that is where this is actionable.
+        //   CI runs `cargo nextest run --profile ci` (no `--release`), so
+        //   `debug_assertions` is on and this fires there.
+        // * a library consumer should not get stderr they cannot suppress, so
+        //   the release-build report sits behind an env var like the other
+        //   diagnostics on this path.
+        //
+        // Measured 0 rejections in 43 `reparse_program` calls over the official
+        // runtime corpus, so neither channel is expected to fire today. The
+        // point is that the next regression is not silent.
+        debug_assert!(
+            ret.diagnostics.is_empty(),
+            "server reparse_program rejected generated source ({} diagnostics); \
+             instance body dropped: {}",
+            ret.diagnostics.len(),
+            ret.diagnostics
+                .iter()
+                .map(|d| d.message.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
         if !ret.diagnostics.is_empty() {
+            comment_stats::bump::REPARSE_PROGRAM_DIAG_DROPS(1);
+            if *REPARSE_PROGRAM_DEBUG {
+                let line = format!(
+                    "rsvelte: server reparse_program rejected generated source ({} diagnostics); \
+                     instance body dropped: {}\n",
+                    ret.diagnostics.len(),
+                    ret.diagnostics
+                        .iter()
+                        .map(|d| d.message.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
+            }
             return Vec::new();
         }
         ret.program.body.into_iter().collect()
@@ -1438,14 +1486,26 @@ See https://svelte.dev/docs/svelte/v5-migration-guide#Components-are-no-longer-c
         program_body.insert(insert_at, filename_stmt);
     }
 
-    let program = b.program(program_body);
+    let mut program = b.program(program_body);
+    // `main`'s `record_esrap_server` timed the bare `rsvelte_esrap::print` that
+    // used to stand here. Comment preservation replaces that call, so the timer
+    // moves onto its replacement rather than being dropped: the site is the
+    // same one, and leaving it untimed would silently empty a bucket that the
+    // esrap breakdown still reports.
     let _t = crate::compiler::phases::phase3_transform::profile::timer_start();
-    let printed = rsvelte_esrap::print(&program, "");
+    let code = comments::print_with_comments(&mut program, &state.comments, allocator);
     crate::compiler::phases::phase3_transform::profile::record_esrap_server(
         crate::compiler::phases::phase3_transform::profile::timer_elapsed(_t),
     );
-    Some(printed)
+    comment_stats::dump();
+    Some(code)
 }
+
+/// Report a `reparse_program` rejection on stderr in a release build. Off by
+/// default: this is a library, and a consumer cannot suppress what we write to
+/// their stderr. `debug_assert!` covers the case where someone can act on it.
+static REPARSE_PROGRAM_DEBUG: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("RSVELTE_SERVER_REPARSE_DEBUG").is_some());
 
 #[cfg(test)]
 mod tests;

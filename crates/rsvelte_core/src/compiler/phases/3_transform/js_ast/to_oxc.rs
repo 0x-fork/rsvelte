@@ -60,6 +60,23 @@ pub struct Converted<'a> {
     pub loc_map: Vec<(u32, u32, Option<u32>)>,
 }
 
+thread_local! {
+    static FALLBACK_REASON: std::cell::Cell<&'static str> =
+        const { std::cell::Cell::new(UNSUPPORTED) };
+}
+
+/// The default: some node kind this converter does not handle bubbled `None`.
+const UNSUPPORTED: &str = "unsupported";
+
+fn note_fallback(reason: &'static str) {
+    FALLBACK_REASON.with(|c| c.set(reason));
+}
+
+/// Why the last [`program_to_oxc`] returned `None`, for the fallback debug log.
+pub fn take_fallback_reason() -> &'static str {
+    FALLBACK_REASON.with(|c| c.replace(UNSUPPORTED))
+}
+
 /// Convert a whole [`JsProgram`] into an oxc [`oxc_ast::ast::Program`].
 ///
 /// Returns `None` if any node in the program is not handled by this converter
@@ -74,6 +91,7 @@ pub fn program_to_oxc<'a>(
     arena: &JsArena,
     allocator: &'a oxc_allocator::Allocator,
 ) -> Option<Converted<'a>> {
+    note_fallback(UNSUPPORTED);
     let (probe, synth) = convert_once(program, arena, allocator, None)?;
     if !synth.saw_comments {
         return Some(probe);
@@ -83,6 +101,7 @@ pub fn program_to_oxc<'a>(
     // Every span the pass produced outside a chunk region must stay below
     // `loc_base`, or the printer would mistake it for a real location.
     if synth.max_span >= loc_base {
+        note_fallback("loc-base");
         return None;
     }
     Some(converted)
@@ -1261,6 +1280,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         let ret = oxc_parser::Parser::new(self.ab.allocator(), owned, oxc_span::SourceType::mjs())
             .parse();
         if !ret.diagnostics.is_empty() {
+            note_fallback("chunk-parse");
             return None;
         }
         if ret.program.comments.is_empty() {
@@ -1292,6 +1312,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         let ret = oxc_parser::Parser::new(self.ab.allocator(), owned, oxc_span::SourceType::mjs())
             .parse();
         if !ret.diagnostics.is_empty() {
+            note_fallback("chunk-parse");
             return None;
         }
         let shift = base - 1;
