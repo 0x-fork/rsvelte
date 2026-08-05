@@ -326,6 +326,13 @@ pub fn napi_take_analyze_split() -> Value {
         "cssAnalyzeCalls": b.css_analyze_calls,
         "cssScope": ns(b.css_scope),
         "cssScopeCalls": b.css_scope_calls,
+        // Deterministic, so one run settles them. TEMPLATE NODES ONLY: both
+        // walks also descend into the scripts, and there is no central hook for
+        // JS nodes in analyze, so `createScopes / createScopesNodes` is a walk
+        // density and not a cost per node. Do not divide a bucket by these and
+        // call the result us/node.
+        "createScopesNodes": b.create_scopes_nodes,
+        "templateNodes": b.template_nodes,
         "totalNs": ns(b.total),
         "compiles": b.compiles,
     })

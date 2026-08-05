@@ -406,6 +406,20 @@ pub struct AnalyzeBreakdown {
     /// `visitors::analyze_template`.
     pub template: Duration,
     pub template_calls: u64,
+    /// Template nodes dispatched by the two walks, counted at their single
+    /// `visit_node` each -- `ScopeBuilder::visit_node` for `create_scopes`,
+    /// `visitors::visit_node` for `template`.
+    ///
+    /// **These count template nodes only, and are not a per-node denominator
+    /// for their buckets.** Both walks also descend into the scripts, and
+    /// analyze has no central hook for JS nodes: the traversal goes through
+    /// `get_js_children` at roughly fifty sites across eight files, so a JS
+    /// count would mean touching every one of them, and counting calls there
+    /// would count parents rather than nodes. For a script-heavy component the
+    /// uncounted part is most of the work, so `time / nodes` here is a walk
+    /// density, not a cost per node.
+    pub create_scopes_nodes: u64,
+    pub template_nodes: u64,
     /// `Analysis::analyze_css` and `css::analyze::analyze_css_with_source`:
     /// the CSS analysis and validation pass.
     pub css_analyze: Duration,
@@ -462,6 +476,11 @@ thread_local! {
     static AN_TEMPLATE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_CSS_ANALYZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_CSS_SCOPE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+
+    // Deterministic node counts, load-independent: one run is enough. Gated by
+    // the same switch as the timers so the shipped compiler pays nothing.
+    static AN_SCOPE_NODES: Cell<u64> = const { Cell::new(0) };
+    static AN_TEMPLATE_NODES: Cell<u64> = const { Cell::new(0) };
 
     static REPARSE: Cell<(Duration, Duration, u64, u64)> =
         const { Cell::new((Duration::ZERO, Duration::ZERO, 0, 0)) };
@@ -966,6 +985,27 @@ pub fn record_analyze_css_scope(d: Duration) {
     record_analyze_bucket(&AN_CSS_SCOPE, d);
 }
 
+/// One template node dispatched by `ScopeBuilder::visit_node`.
+///
+/// See [`AnalyzeBreakdown::create_scopes_nodes`] for what this does and does
+/// not count -- it is a walk density, not a per-node denominator.
+#[inline]
+pub fn count_analyze_scope_node() {
+    if !timers_enabled() {
+        return;
+    }
+    AN_SCOPE_NODES.with(|c| c.set(c.get() + 1));
+}
+
+/// One template node dispatched by `visitors::visit_node`.
+#[inline]
+pub fn count_analyze_template_node() {
+    if !timers_enabled() {
+        return;
+    }
+    AN_TEMPLATE_NODES.with(|c| c.set(c.get() + 1));
+}
+
 /// One compile, timed end to end. Separate from the buckets on purpose: the
 /// two are compared, not derived from each other.
 #[inline]
@@ -1053,6 +1093,8 @@ pub fn take_analyze_breakdown() -> AnalyzeBreakdown {
         store_subs_calls,
         template,
         template_calls,
+        create_scopes_nodes: AN_SCOPE_NODES.with(|c| c.replace(0)),
+        template_nodes: AN_TEMPLATE_NODES.with(|c| c.replace(0)),
         css_analyze,
         css_analyze_calls,
         css_scope,

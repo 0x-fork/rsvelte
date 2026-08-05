@@ -112,7 +112,11 @@ fn main() {
     println!("{} files, {} compiles", sources.len(), a.compiles);
     println!("{:<18}{:>12}{:>10}{:>10}", "bucket", "ms", "share", "calls");
     for (name, d, calls) in [
-        ("extract_scripts", a.extract_scripts, a.extract_scripts_calls),
+        (
+            "extract_scripts",
+            a.extract_scripts,
+            a.extract_scripts_calls,
+        ),
         ("create_scopes", a.create_scopes, a.create_scopes_calls),
         ("store_subs", a.store_subs, a.store_subs_calls),
         ("template", a.template, a.template_calls),
@@ -128,7 +132,18 @@ fn main() {
         pct(a.unattributed()),
         ""
     );
-    println!("{:<18}{total:>12.1}{:>9.1}%{:>10}", "analyze total", 100.0, "");
+    println!(
+        "{:<18}{total:>12.1}{:>9.1}%{:>10}",
+        "analyze total", 100.0, ""
+    );
+
+    // Template nodes only. Both walks also descend into the scripts and no
+    // counter here sees that, so this is walk volume, not a denominator: do not
+    // divide a bucket by it and call the result a cost per node.
+    println!(
+        "\ntemplate nodes dispatched (template only, scripts uncounted): create_scopes {} / analyze_template {}",
+        a.create_scopes_nodes, a.template_nodes
+    );
 
     // One counter read twice. Any difference is a read-order bug in this
     // binary, not a property of the compiler, so it is worth failing loudly.

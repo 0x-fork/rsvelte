@@ -2480,6 +2480,7 @@ impl<'a> ScopeBuilder<'a> {
 
     /// Visit a template node.
     fn visit_node(&mut self, node: &TemplateNode) {
+        crate::compiler::phases::phase3_transform::profile::count_analyze_scope_node();
         match node {
             TemplateNode::RegularElement(element) => self.visit_element(element),
             TemplateNode::EachBlock(block) => self.visit_each_block(block),

@@ -709,6 +709,7 @@ pub fn visit_node<'a, 'b: 'a>(
     node: &mut TemplateNode<'b>,
     context: &mut VisitorContext<'a>,
 ) -> Result<(), AnalysisError> {
+    crate::compiler::phases::phase3_transform::profile::count_analyze_template_node();
     let node_ptr: *const TemplateNode<'b> = node as *const _;
     // SAFETY: see this function's doc comment — `node_ptr` aliases `node` for the
     // duration of the inner visit and is popped before `node` is used again; path
