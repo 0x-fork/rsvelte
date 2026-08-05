@@ -41,10 +41,17 @@ fn main() {
         ..Default::default()
     };
 
+    // `CompileOptions` defaults this on, so every figure this profiler has ever
+    // printed includes source-map generation. The flag exists to measure what
+    // that costs, and where: a cost paid while printing lands in `codegen`, not
+    // in the wrapper's own bucket.
+    let sourcemap = !std::env::args().any(|a| a == "--no-sourcemap");
     let compile_opts = CompileOptions {
         generate: GenerateMode::Client,
+        enable_sourcemap: sourcemap,
         ..Default::default()
     };
+    println!("sourcemap: {sourcemap}");
 
     // Warmup
     for (_, content) in files.iter().take(100) {
