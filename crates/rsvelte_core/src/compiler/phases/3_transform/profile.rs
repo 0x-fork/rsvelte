@@ -941,6 +941,15 @@ pub fn take_pipeline_breakdown() -> PipelineBreakdown {
     }
 }
 
+/// The transform bucket, read without clearing it.
+///
+/// [`Phase3Breakdown`] has no total of its own -- its parent is the pipeline's
+/// `transform` -- so a consumer reading the sub-split needs that figure while
+/// leaving it for whoever reads the pipeline split afterwards.
+pub fn peek_pipeline_transform() -> Duration {
+    PL_TRANSFORM.with(Cell::get)
+}
+
 pub fn take_breakdown() -> Phase3Breakdown {
     Phase3Breakdown {
         visit_program: VISIT_PROGRAM.with(|c| c.replace(Duration::ZERO)),

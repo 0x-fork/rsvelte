@@ -288,6 +288,38 @@ pub fn napi_take_pipeline_split() -> Value {
     })
 }
 
+/// Read the sub-split of the transform phase, and clear it.
+///
+/// Same contract as `takePipelineSplit`: `totalNs` is the whole that the
+/// buckets divide, and the phase keys are disjoint nanosecond parts of it. Here
+/// `totalNs` is the pipeline's `transform` bucket, which is this split's parent
+/// -- there is no separate timer around Phase 3.
+///
+/// **Call this before `takePipelineSplit` for the same compile.** That one
+/// clears the transform bucket, so the other order reports `totalNs: 0`, which
+/// a consumer checking for a zero total catches rather than averaging into a
+/// share.
+///
+/// `codegen` is client-only: every site recording it is on the client path, so
+/// a server or mixed run reports a codegen that is too small rather than one
+/// that is absent. Take this split from a client-only run, or not at all.
+#[napi(js_name = "takePhase3Split", catch_unwind)]
+pub fn napi_take_phase3_split() -> Value {
+    use rsvelte_core::compiler::phases::phase3_transform::profile;
+    let transform = profile::peek_pipeline_transform();
+    let b = profile::take_breakdown();
+    let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
+    serde_json::json!({
+        "visitProgram": ns(b.visit_program),
+        "scriptTextTransform": ns(b.script_text_transform),
+        "templateFragment": ns(b.template_fragment),
+        "assemblyAfterFragment": ns(b.assembly_after_fragment),
+        "cssRender": ns(b.css_render),
+        "codegen": ns(b.codegen),
+        "totalNs": ns(transform),
+    })
+}
+
 #[napi(js_name = "compile", catch_unwind)]
 pub fn napi_compile(source: String, options: Option<NapiCompileOptions>) -> napi::Result<Value> {
     let opts = options_to_compile(options)?;
