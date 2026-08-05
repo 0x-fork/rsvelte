@@ -439,6 +439,9 @@ thread_local! {
     static RS_ASYNC_PRE_CALLS: Cell<u64> = const { Cell::new(0) };
     static RS_WARNINGS_CALLS: Cell<u64> = const { Cell::new(0) };
     static RS_SOURCEMAP_CALLS: Cell<u64> = const { Cell::new(0) };
+    static SCAN_BYTES: Cell<u64> = const { Cell::new(0) };
+    static SCAN_CALLS: Cell<u64> = const { Cell::new(0) };
+    static SCAN_SCRIPT_BYTES: Cell<u64> = const { Cell::new(0) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -807,6 +810,48 @@ pub fn record_st_post_passes(d: Duration) {
         return;
     }
     ST_POST_PASSES.with(|c| c.set(c.get() + d));
+}
+
+/// Bytes handed to a text scan inside the instance-script pipeline, against the
+/// script's own length.
+///
+/// `bytes / script_bytes` is the effective number of times the pipeline walks
+/// its input -- a load-independent integer, which is what a 15x ratio needs
+/// rather than a share table.
+///
+/// **Upper bound.** A scan that finds its needle stops there, so charging the
+/// whole haystack over-counts; a scan that fails does read all of it. The bound
+/// is in the useful direction: it cannot make the excess look smaller than it is.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ScanCounts {
+    pub bytes: u64,
+    pub calls: u64,
+    pub script_bytes: u64,
+}
+
+pub fn take_scan_counts() -> ScanCounts {
+    ScanCounts {
+        bytes: SCAN_BYTES.with(|c| c.replace(0)),
+        calls: SCAN_CALLS.with(|c| c.replace(0)),
+        script_bytes: SCAN_SCRIPT_BYTES.with(|c| c.replace(0)),
+    }
+}
+
+#[inline]
+pub fn count_scan(bytes: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    SCAN_BYTES.with(|c| c.set(c.get() + bytes as u64));
+    SCAN_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn count_script_len(bytes: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    SCAN_SCRIPT_BYTES.with(|c| c.set(c.get() + bytes as u64));
 }
 
 /// The Phase 3 residual, i.e. `transform` minus the six named buckets.

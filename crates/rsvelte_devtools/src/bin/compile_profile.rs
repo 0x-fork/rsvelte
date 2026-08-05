@@ -86,6 +86,7 @@ fn main() {
     let _ = profile::take_template_fragment_breakdown();
     let _ = profile::take_assembly_breakdown();
     let _ = profile::take_residual_breakdown();
+    let _ = profile::take_scan_counts();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -162,6 +163,7 @@ fn main() {
     let tf = profile::take_template_fragment_breakdown();
     let asm = profile::take_assembly_breakdown();
     let rs = profile::take_residual_breakdown();
+    let scan = profile::take_scan_counts();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -288,6 +290,20 @@ fn main() {
         );
     }
     println!("    (statements processed: {})", st.statements);
+    // Load-independent: the question a 15x ratio asks is how many times the
+    // pipeline walks its input, not how long each walk took.
+    println!(
+        "    SCANS  {} calls over {} bytes vs script {} bytes = {:.2} effective passes ({:.1} calls/file)",
+        scan.calls,
+        scan.bytes,
+        scan.script_bytes,
+        if scan.script_bytes > 0 {
+            scan.bytes as f64 / scan.script_bytes as f64
+        } else {
+            0.0
+        },
+        scan.calls as f64 / files.len() as f64
+    );
     // The verdict the split exists for: only parse and output can go away if
     // this stage is fed an AST instead of the text pipeline's output. There is
     // no print column -- the stage splices into a string, it never serialises.

@@ -3395,6 +3395,7 @@ fn cleanup_import_line(import: &str) -> String {
 /// holds iff `<kw> N = $state(` occurs for some keyword. The keyword is matched as
 /// a raw substring (no left word boundary), mirroring the original `contains`.
 fn collect_local_state_decls(script: &str) -> rustc_hash::FxHashSet<&str> {
+    super::profile::count_scan(script.len());
     let mut set: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     for kw in ["let ", "const ", "var "] {
         let mut from = 0;
@@ -3414,6 +3415,7 @@ fn collect_local_state_decls(script: &str) -> rustc_hash::FxHashSet<&str> {
 }
 
 fn extract_shadowed_state_names(script: &str) -> rustc_hash::FxHashSet<String> {
+    super::profile::count_scan(script.len());
     if memmem::find(script.as_bytes(), b"$state").is_none()
         && memmem::find(script.as_bytes(), b"$derived").is_none()
     {
@@ -3503,6 +3505,7 @@ fn extract_shadowed_state_names(script: &str) -> rustc_hash::FxHashSet<String> {
 /// walked the whole script per variable. Both routes run the same
 /// per-occurrence predicate, so the answers agree by construction.
 fn index_reassigned_vars(script: &str) -> rustc_hash::FxHashSet<&str> {
+    super::profile::count_scan(script.len());
     let bytes = script.as_bytes();
     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
     let mut found: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
@@ -3531,6 +3534,7 @@ fn index_reassigned_vars(script: &str) -> rustc_hash::FxHashSet<&str> {
 /// their indifference to what precedes `const`: the caller's pattern was a
 /// plain substring, so `aconst x = $state(` satisfied it and still does.
 fn index_const_state_decls(script: &str) -> rustc_hash::FxHashSet<&str> {
+    super::profile::count_scan(script.len());
     let bytes = script.as_bytes();
     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
     let mut found: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
@@ -3645,6 +3649,7 @@ fn is_reassignment_at(script: &str, abs_pos: usize, var_len: usize) -> bool {
 /// Reassignment: `x = expr`, `x += expr`, `x++`, `++x`, etc.
 /// NOT reassignment: `x.foo = expr`, `x[0] = expr` (member mutation).
 pub(super) fn is_variable_reassigned_in_text(script: &str, var_name: &str) -> bool {
+    super::profile::count_scan(script.len());
     let bytes = script.as_bytes();
     let var_bytes = var_name.as_bytes();
     let var_len = var_bytes.len();
@@ -4412,6 +4417,30 @@ fn instance_has_top_level_multi_declarator(ast: &Root, script: &str) -> bool {
     })
 }
 
+/// `memmem::find` with the haystack length charged to the scan counter.
+///
+/// Wrapped rather than counted at each site so a new scan cannot be added
+/// without being counted: the name is the only way to call the finder here.
+#[inline]
+fn find_counted(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    super::profile::count_scan(haystack.len());
+    memmem::find(haystack, needle)
+}
+
+/// `str::contains` for the script text, charged to the same counter.
+#[inline]
+fn contains_counted(haystack: &str, needle: &str) -> bool {
+    super::profile::count_scan(haystack.len());
+    haystack.contains(needle)
+}
+
+/// `str::lines` over the script text, charged once for the whole walk.
+#[inline]
+fn lines_counted(haystack: &str) -> std::str::Lines<'_> {
+    super::profile::count_scan(haystack.len());
+    haystack.lines()
+}
+
 fn transform_instance_script_for_visitors(
     script: &str,
     analysis: &ComponentAnalysis,
@@ -4429,8 +4458,10 @@ fn transform_instance_script_for_visitors(
     let original_script = script;
 
     // Instance imports are removed by the caller before this pipeline.
+    super::profile::count_script_len(script.len());
+    super::profile::count_scan(script.len());
     let has_dollar = script.contains('$');
-    let has_export = memmem::find(script.as_bytes(), b"export ").is_some();
+    let has_export = find_counted(script.as_bytes(), b"export ").is_some();
     let has_comma_decl = split_top_level_declarations;
     if !has_dollar
         && !has_export
@@ -4488,9 +4519,9 @@ fn transform_instance_script_for_visitors(
     };
 
     // Transform class fields only if the script contains class definitions with runes
-    let script: std::borrow::Cow<str> = if memmem::find(script.as_bytes(), b"class ").is_some()
-        && (memmem::find(script.as_bytes(), b"$state").is_some()
-            || memmem::find(script.as_bytes(), b"$derived").is_some())
+    let script: std::borrow::Cow<str> = if find_counted(script.as_bytes(), b"class ").is_some()
+        && (find_counted(script.as_bytes(), b"$state").is_some()
+            || find_counted(script.as_bytes(), b"$derived").is_some())
     {
         std::borrow::Cow::Owned(transform_class_fields_client(&script))
     } else {
@@ -4498,9 +4529,9 @@ fn transform_instance_script_for_visitors(
     };
 
     // Split comma-separated variable declarations only if needed
-    let class_transform_can_add_declarations = memmem::find(script.as_bytes(), b"class ").is_some()
-        && (memmem::find(script.as_bytes(), b"$state").is_some()
-            || memmem::find(script.as_bytes(), b"$derived").is_some());
+    let class_transform_can_add_declarations = find_counted(script.as_bytes(), b"class ").is_some()
+        && (find_counted(script.as_bytes(), b"$state").is_some()
+            || find_counted(script.as_bytes(), b"$derived").is_some());
     let script: std::borrow::Cow<str> = if split_top_level_declarations
         || (class_transform_can_add_declarations && might_have_comma_separated_declaration(&script))
     {
@@ -4517,8 +4548,8 @@ fn transform_instance_script_for_visitors(
     // Our text-based transform preserves source parens, so we strip them here.
     // This must happen BEFORE transforms to avoid stripping parens from generated code
     // patterns like `() => ($.deep_read_state(...))` in $.legacy_pre_effect.
-    let script_rest = if memmem::find(script_rest_raw.as_bytes(), b"=> (").is_some()
-        || memmem::find(script_rest_raw.as_bytes(), b"=>(").is_some()
+    let script_rest = if find_counted(script_rest_raw.as_bytes(), b"=> (").is_some()
+        || find_counted(script_rest_raw.as_bytes(), b"=>(").is_some()
     {
         strip_unnecessary_arrow_body_parens(&script_rest_raw)
     } else {
@@ -4852,7 +4883,7 @@ fn transform_instance_script_for_visitors(
 
     // Check for legacy mode (export let or export { x })
     // Also detect `export { x }` patterns which create BindableProp bindings
-    let has_legacy_export_let = script_rest.lines().any(|line| {
+    let has_legacy_export_let = lines_counted(&script_rest).any(|line| {
         let trimmed = line.trim();
         trimmed.starts_with("export let ") || trimmed.starts_with("export let\t")
     }) || analysis
@@ -5537,7 +5568,7 @@ fn transform_instance_script_for_visitors(
             || first_line_trimmed.starts_with("export async function ")
         {
             // Remove the "export " prefix from the first line
-            if let Some(pos) = memmem::find(statement.as_bytes(), b"export ") {
+            if let Some(pos) = find_counted(statement.as_bytes(), b"export ") {
                 let mut s = String::with_capacity(statement.len() - 7);
                 s.push_str(&statement[..pos]);
                 s.push_str(&statement[pos + 7..]);
@@ -5579,16 +5610,16 @@ fn transform_instance_script_for_visitors(
         // callee — see the matching comment in
         // `rune_transforms::transform_client_runes_with_skip_and_state`
         // for the migration rationale.
-        if dev && memmem::find(transformed.as_bytes(), b"$state.snapshot(").is_some() {
+        if dev && find_counted(transformed.as_bytes(), b"$state.snapshot(").is_some() {
             let prev_has_ignore = {
                 let mut found = false;
-                for line in result.lines().rev() {
+                for line in lines_counted(result).rev() {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
-                    if memmem::find(trimmed.as_bytes(), b"svelte-ignore").is_some()
-                        && memmem::find(trimmed.as_bytes(), b"state_snapshot_uncloneable").is_some()
+                    if find_counted(trimmed.as_bytes(), b"svelte-ignore").is_some()
+                        && find_counted(trimmed.as_bytes(), b"state_snapshot_uncloneable").is_some()
                     {
                         found = true;
                     }
@@ -5599,7 +5630,7 @@ fn transform_instance_script_for_visitors(
             if prev_has_ignore {
                 let mut new_transformed = String::new();
                 let mut remaining = transformed.as_str();
-                while let Some(pos) = memmem::find(remaining.as_bytes(), b"$state.snapshot(") {
+                while let Some(pos) = find_counted(remaining.as_bytes(), b"$state.snapshot(") {
                     new_transformed.push_str(&remaining[..pos]);
                     let call_start = pos + "$state.snapshot(".len();
                     if let Some(content_end) = find_matching_paren(&remaining[call_start..]) {
@@ -5736,22 +5767,23 @@ fn transform_instance_script_for_visitors(
             && !analysis.runes
             && store_sub_vars
                 .iter()
-                .any(|store| transformed.contains(store.as_str()))
+                .any(|store| contains_counted(&transformed, store.as_str()))
         {
             // Filter out store_sub_vars that appear as function parameters in this statement.
             let mut filtered_store_sub_vars = Vec::new();
-            let effective_store_sub_vars =
-                if transformed.contains("=>") || transformed.contains("function") {
-                    filtered_store_sub_vars.extend(
-                        store_sub_vars
-                            .iter()
-                            .filter(|s| !is_function_parameter_in_statement(&transformed, s))
-                            .cloned(),
-                    );
-                    filtered_store_sub_vars.as_slice()
-                } else {
+            let effective_store_sub_vars = if contains_counted(&transformed, "=>")
+                || contains_counted(&transformed, "function")
+            {
+                filtered_store_sub_vars.extend(
                     store_sub_vars
-                };
+                        .iter()
+                        .filter(|s| !is_function_parameter_in_statement(&transformed, s))
+                        .cloned(),
+                );
+                filtered_store_sub_vars.as_slice()
+            } else {
+                store_sub_vars
+            };
 
             let transformed = transform_store_sub_calls(&transformed, effective_store_sub_vars);
             let transformed = transform_store_assignments_client(
@@ -5861,7 +5893,7 @@ fn transform_instance_script_for_visitors(
 
     // Process script lines
     // Collect lines into a Vec so we can peek at the next line for continuation detection
-    let script_lines: Vec<&str> = script_rest.lines().collect();
+    let script_lines: Vec<&str> = lines_counted(&script_rest).collect();
     let mut line_idx = 0;
 
     // Incremental depth tracking state - avoids O(n^2) re-scanning of accumulated text
@@ -6176,20 +6208,20 @@ fn transform_instance_script_for_visitors(
         // `$state` so we still enter the AST pass in those cases.
         let _probe = super::profile::timer_start();
         let has_effect_calls = !store_sub_vars.iter().any(|v| v == "$effect")
-            && memmem::find(result.as_bytes(), b"$effect").is_some();
+            && find_counted(result.as_bytes(), b"$effect").is_some();
         let has_state_calls = !store_sub_vars.iter().any(|v| v == "$state")
-            && memmem::find(result.as_bytes(), b"$state").is_some();
+            && find_counted(result.as_bytes(), b"$state").is_some();
         let has_derived_calls = !store_sub_vars.iter().any(|v| v == "$derived")
-            && memmem::find(result.as_bytes(), b"$derived").is_some();
+            && find_counted(result.as_bytes(), b"$derived").is_some();
         let has_props_calls = !store_sub_vars.iter().any(|v| v == "$props")
-            && memmem::find(result.as_bytes(), b"$props").is_some();
+            && find_counted(result.as_bytes(), b"$props").is_some();
         let has_host_calls = !store_sub_vars.iter().any(|v| v == "$host")
-            && memmem::find(result.as_bytes(), b"$host").is_some();
+            && find_counted(result.as_bytes(), b"$host").is_some();
         // Dev-mode equality rewrite is now part of the AST pass
         // (replaces `transform_strict_equals` from rune_transforms.rs).
         let has_strict_equals = dev && strict_equals_ast::source_has_equality_op(&result);
         // Dev-mode `await X` → `(await $.track_reactivity_loss(X))()` rewrite.
-        let has_await = dev && memmem::find(result.as_bytes(), b"await").is_some();
+        let has_await = dev && find_counted(result.as_bytes(), b"await").is_some();
         // Dev-mode `$inspect(...)` → `$.inspect(...)`; see the matching probe in
         // `ast_state_transform`. This block already sits under `analysis.runes`.
         let has_inspect = dev && inspect_rune_ast::source_has_inspect_rune(&result);
@@ -6278,6 +6310,7 @@ fn transform_instance_script_for_visitors(
                     );
                     return None;
                 }
+                super::profile::count_scan(result.len());
                 let result_core_start = result.find(result_core).unwrap_or(0);
                 let result_core_end = result_core_start + result_core.len();
                 let prefix = &result[..result_core_start];

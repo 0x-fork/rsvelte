@@ -723,6 +723,7 @@ pub(super) fn transform_constructor_private_reads(
 
 /// Transform class fields with $state and $derived runes for client-side.
 pub(crate) fn transform_class_fields_client(script: &str) -> String {
+    crate::compiler::phases::phase3_transform::profile::count_scan(script.len());
     // Check if script contains a class with $state or $derived fields
     if memmem::find(script.as_bytes(), b"class ").is_none()
         || (memmem::find(script.as_bytes(), b"$state").is_none()
