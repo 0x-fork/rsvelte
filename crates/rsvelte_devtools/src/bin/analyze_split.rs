@@ -85,6 +85,7 @@ fn main() {
     // dispatches against 36,866 from the same walk -- the difference was
     // exactly the hundred warm-up files. The napi reader takes both in one
     // call, so this asymmetry is local to this binary.
+    let _ = profile::take_store_subs_breakdown();
     let _ = profile::take_analyze_breakdown();
     let _ = profile::take_analyze_visits();
     let _ = profile::take_pipeline_breakdown();
@@ -103,6 +104,7 @@ fn main() {
     // Order matters: the analyze split peeks the parent that the pipeline split
     // clears. Reversing these two lines reports a zero total, which the check
     // below turns into a visible failure rather than a plausible share table.
+    let s = profile::take_store_subs_breakdown();
     let a = profile::take_analyze_breakdown();
     let v = profile::take_analyze_visits();
     let p = profile::take_pipeline_breakdown();
@@ -200,6 +202,60 @@ fn main() {
     println!(
         "visits are rsvelte-internal: tplVisits = dispatches, jsSlots = child-slot expansions.\n\
          For a cross-compiler ratio use time per source byte."
+    );
+
+    // Inside store_subs, which spends a fifth of the phase without walking the
+    // AST. The gate ratio is printed with its denominator: a zero here means
+    // the `$`-absent fast path never fired, not that it was not measured.
+    let ss_total = ms(a.store_subs);
+    let ss_pct = |d: Duration| {
+        if ss_total == 0.0 {
+            f64::NAN
+        } else {
+            ms(d) / ss_total * 100.0
+        }
+    };
+    println!(
+        "\nstore_subs: {} calls, gate skipped {} ({:.2}% of calls)",
+        s.calls,
+        s.gate_skipped,
+        if s.calls == 0 {
+            f64::NAN
+        } else {
+            s.gate_skipped as f64 / s.calls as f64 * 100.0
+        }
+    );
+    println!("{:<22}{:>12}{:>10}{:>10}", "part", "ms", "share", "calls");
+    for (name, d, calls) in [
+        ("blank_typescript", s.blank_ts, s.blank_ts_calls),
+        ("lexical scan", s.lex_scan, s.lex_scan_calls),
+        ("fragment recursion", s.fragment, s.fragment_calls),
+    ] {
+        println!("{name:<22}{:>12.1}{:>9.1}%{calls:>10}", ms(d), ss_pct(d));
+    }
+    let ss_rest = a
+        .store_subs
+        .saturating_sub(s.blank_ts + s.lex_scan + s.fragment);
+    println!(
+        "{:<22}{:>12.1}{:>9.1}%{:>10}",
+        "rest of the fn",
+        ms(ss_rest),
+        ss_pct(ss_rest),
+        ""
+    );
+    println!(
+        "{:<22}{ss_total:>12.1}{:>9.1}%{:>10}",
+        "store_subs total", 100.0, ""
+    );
+    println!(
+        "blanked bytes {} ({:.0} per blanking call, source is {:.0} per file)",
+        s.blanked_bytes,
+        if s.blank_ts_calls == 0 {
+            f64::NAN
+        } else {
+            s.blanked_bytes as f64 / s.blank_ts_calls as f64
+        },
+        bytes / files
     );
 
     // One counter read twice. Any difference is a read-order bug in this

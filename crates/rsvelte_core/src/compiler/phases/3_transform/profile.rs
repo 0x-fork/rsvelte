@@ -491,6 +491,12 @@ thread_local! {
     static AN_VISIT_JS: Cell<[u64; ANALYZE_BUCKETS]> = const { Cell::new([0; ANALYZE_BUCKETS]) };
     static AN_SOURCE_BYTES: Cell<u64> = const { Cell::new(0) };
 
+    // Inside `detect_store_subscriptions`.
+    static SS_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static SS_BLANK_TS: Cell<(Duration, u64, u64)> = const { Cell::new((Duration::ZERO, 0, 0)) };
+    static SS_LEX_SCAN: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static SS_FRAGMENT: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+
     static REPARSE: Cell<(Duration, Duration, u64, u64)> =
         const { Cell::new((Duration::ZERO, Duration::ZERO, 0, 0)) };
     static REPARSE_DIRECT: Cell<(Duration, u64, u64)> =
@@ -1030,6 +1036,36 @@ pub enum AnalyzeBucket {
 /// Slots in the per-bucket visit arrays: the six buckets plus the residual.
 pub const ANALYZE_BUCKETS: usize = 7;
 
+/// Inside `detect_store_subscriptions`, which spends its time without walking
+/// the AST at all -- the analyze split measured zero JS child-slot expansions
+/// against a fifth of the phase, and that is what pointed here.
+///
+/// `gate_skipped` counts the compiles that returned immediately because the
+/// source holds no `$` byte. It is reported beside `calls` because the ratio is
+/// the finding, not either number: `$state`, `$derived` and `$props` all
+/// contain `$`, so on runes code the gate cannot fire, and a detector for a
+/// Svelte 4 feature then runs in full on every file.
+///
+/// `blank_ts` is the repository's only `blank_typescript` call site. It copies
+/// the whole script with type syntax blanked out, so that the lexical scan
+/// below it will not read a type annotation as a store reference.
+/// `blanked_bytes` is how much it copied; being deterministic it settles in one
+/// run.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct StoreSubsBreakdown {
+    pub calls: u64,
+    pub gate_skipped: u64,
+    pub blank_ts: Duration,
+    pub blank_ts_calls: u64,
+    pub blanked_bytes: u64,
+    /// The `$`-identifier scan over the instance and module scripts.
+    pub lex_scan: Duration,
+    pub lex_scan_calls: u64,
+    /// `collect_dollar_refs_from_fragment`, the template recursion.
+    pub fragment: Duration,
+    pub fragment_calls: u64,
+}
+
 /// Restores the enclosing bucket on drop, so an early return through `?` cannot
 /// leave a bucket latched and charge the rest of the phase to it.
 pub struct AnalyzeBucketGuard(Option<AnalyzeBucket>);
@@ -1089,6 +1125,74 @@ pub fn count_analyze_visit_js(n: u64) {
     }
     #[cfg(not(feature = "measure-analyze-nodes"))]
     let _ = n;
+}
+
+/// One `detect_store_subscriptions` call; `skipped` if the `$` gate fired.
+#[inline]
+pub fn record_store_subs_call(skipped: bool) {
+    if !timers_enabled() {
+        return;
+    }
+    SS_CALLS.with(|c| {
+        let (calls, gate) = c.get();
+        c.set((calls + 1, gate + u64::from(skipped)));
+    });
+}
+
+/// One `blank_typescript` call: its time and the bytes it copied.
+#[inline]
+pub fn record_store_subs_blank_ts(d: Duration, bytes: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    SS_BLANK_TS.with(|c| {
+        let (t, n, b) = c.get();
+        c.set((t + d, n + 1, b + bytes));
+    });
+}
+
+#[inline]
+pub fn record_store_subs_lex_scan(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    SS_LEX_SCAN.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+#[inline]
+pub fn record_store_subs_fragment(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    SS_FRAGMENT.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+/// Takes the store-subscription sub-split. Its parent is the analyze split's
+/// `store_subs` bucket, which [`take_analyze_breakdown`] clears, so read this
+/// first if both are wanted for the same compiles.
+pub fn take_store_subs_breakdown() -> StoreSubsBreakdown {
+    let (calls, gate_skipped) = SS_CALLS.with(|c| c.replace((0, 0)));
+    let (blank_ts, blank_ts_calls, blanked_bytes) =
+        SS_BLANK_TS.with(|c| c.replace((Duration::ZERO, 0, 0)));
+    let (lex_scan, lex_scan_calls) = SS_LEX_SCAN.with(|c| c.replace((Duration::ZERO, 0)));
+    let (fragment, fragment_calls) = SS_FRAGMENT.with(|c| c.replace((Duration::ZERO, 0)));
+    StoreSubsBreakdown {
+        calls,
+        gate_skipped,
+        blank_ts,
+        blank_ts_calls,
+        blanked_bytes,
+        lex_scan,
+        lex_scan_calls,
+        fragment,
+        fragment_calls,
+    }
 }
 
 /// Source bytes the analyze phase was handed, summed over compiles.

@@ -53,7 +53,13 @@ pub fn detect_store_subscriptions(
     options_runes: Option<bool>,
     is_module_file: bool,
 ) -> Result<(), AnalysisError> {
-    if memchr::memchr(b'$', analysis.source.as_bytes()).is_none() {
+    // The gate and the call are counted together because the ratio is the
+    // finding, not either number: every rune (`$state`, `$derived`, `$props`,
+    // ...) contains a `$`, so on runes code this gate cannot fire and a
+    // Svelte 4 detector then runs in full on every file.
+    let gate_skipped = memchr::memchr(b'$', analysis.source.as_bytes()).is_none();
+    crate::compiler::phases::phase3_transform::profile::record_store_subs_call(gate_skipped);
+    if gate_skipped {
         return Ok(());
     }
 
@@ -88,7 +94,11 @@ pub fn detect_store_subscriptions(
     // (a JS Map keyed by first reference). We must NOT sort by a textual position:
     // a substring search would place `$x` at the offset of `$xGet`/`$xScale` and
     // `$y` inside `$yGet`/`$yRange`, reordering the emitted getters (issue #1229).
+    let _t = crate::compiler::phases::phase3_transform::profile::timer_start();
     collect_dollar_refs_from_fragment(&ast.fragment, &analysis.source, &mut template_refs);
+    crate::compiler::phases::phase3_transform::profile::record_store_subs_fragment(
+        crate::compiler::phases::phase3_transform::profile::timer_elapsed(_t),
+    );
     // Append template references in first-occurrence order, skipping any name already
     // seen in the instance/module scripts (which are visited before the template).
     let mut seen_template: FxHashSet<&str> = FxHashSet::default();
@@ -492,13 +502,25 @@ fn collect_dollar_refs_from_script_with_context(
     // `let foo: $$Props['foo']` is NOT a JS variable reference in upstream's
     // scope analysis, so it must not produce a `$$Props` store ref (which would
     // trigger `global_reference_invalid`). Blanking preserves byte positions.
+    // The blanking and the scan are timed apart on purpose: if the copy
+    // dominates, the lever is to stop blanking here (the pipeline already
+    // strips TypeScript elsewhere); if the scan dominates, blanking is
+    // incidental and the lever is elsewhere. Grouping them would not
+    // distinguish the two.
+    use crate::compiler::phases::phase3_transform::profile;
     if is_typescript {
+        let _t = profile::timer_start();
         let blanked = super::types::blank_typescript(content);
+        profile::record_store_subs_blank_ts(profile::timer_elapsed(_t), blanked.len() as u64);
+        let _t = profile::timer_start();
         collect_dollar_identifiers_from_js_with_context(&blanked, start, refs, in_module);
+        profile::record_store_subs_lex_scan(profile::timer_elapsed(_t));
         return;
     }
 
+    let _t = profile::timer_start();
     collect_dollar_identifiers_from_js_with_context(content, start, refs, in_module);
+    profile::record_store_subs_lex_scan(profile::timer_elapsed(_t));
 }
 
 /// Check if a `$xxx` identifier at position `ident_end` in `chars` is being
