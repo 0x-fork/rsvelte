@@ -76,6 +76,111 @@ const BUCKET_NAMES: [&str; profile::ANALYZE_BUCKETS] = [
     "residual",
 ];
 
+/// Stage 1 of asking whether `feature_detect` + `finalize` walk the same nodes
+/// as `visit_scripts`: do they agree **per file**, not just in the sum.
+///
+/// The aggregate ratio `(R2 + R5) / R3` sits at 0.90-1.08 across four
+/// populations, which is a claim about totals. Totals agree whenever the two
+/// sides happen to be the same size, including when they are walking different
+/// parts of the tree in every single file. Per-file agreement is the weaker-
+/// looking statistic that actually carries the claim.
+///
+/// This is a second pass, run after every aggregate read, so the tables above
+/// are byte-for-byte what they were before it existed. It is free to re-run the
+/// corpus because these counters are deterministic: only the walk volume is
+/// read, never a clock.
+fn per_file_walk_overlap(sources: &[String], files: f64) {
+    const R2: usize = profile::AnalyzeBucket::FeatureDetect as usize;
+    const R3: usize = profile::AnalyzeBucket::VisitScripts as usize;
+    const R5: usize = profile::AnalyzeBucket::Finalize as usize;
+
+    // Drain whatever the aggregate pass left, so the first file is not charged
+    // with a previous reader's remainder.
+    let _ = profile::take_analyze_visits();
+
+    let mut counted = false;
+    let mut within_5 = 0u64;
+    let mut within_20 = 0u64;
+    let mut r3_zero = 0u64;
+    let mut both_zero = 0u64;
+    let mut ratios: Vec<f64> = Vec::with_capacity(sources.len());
+    for source in sources {
+        let _ = compile_with_external_sourcemap_content(
+            source,
+            CompileOptions {
+                generate: GenerateMode::Client,
+                dev: false,
+                ..Default::default()
+            },
+        );
+        let v = profile::take_analyze_visits();
+        counted = v.js_counted;
+        let aux = v.js[R2] + v.js[R5];
+        let main = v.js[R3];
+        // A file with no script walks at all is not evidence either way, and
+        // dividing by its zero would manufacture some. Counted separately.
+        if main == 0 {
+            if aux == 0 {
+                both_zero += 1;
+            } else {
+                r3_zero += 1;
+            }
+            continue;
+        }
+        let ratio = aux as f64 / main as f64;
+        ratios.push(ratio);
+        if (ratio - 1.0).abs() <= 0.05 {
+            within_5 += 1;
+        }
+        if (ratio - 1.0).abs() <= 0.20 {
+            within_20 += 1;
+        }
+    }
+
+    if !counted {
+        println!(
+            "\nper-file walk overlap: [js slots NOT counted: rebuild with --features rsvelte_core/measure-analyze-nodes]"
+        );
+        return;
+    }
+
+    let n = ratios.len();
+    println!(
+        "\nper-file (R2 feature_detect + R5 finalize) / R3 visit_scripts, over {n} of {files:.0} files"
+    );
+    println!(
+        "  excluded: R3 walked nothing but R2+R5 did {r3_zero}, nothing walked at all {both_zero}"
+    );
+    if n == 0 {
+        return;
+    }
+    let mut sorted = ratios.clone();
+    sorted.sort_by(f64::total_cmp);
+    let at = |q: f64| sorted[((n as f64 - 1.0) * q).round() as usize];
+    println!(
+        "  ratio  min {:.3}  p10 {:.3}  median {:.3}  p90 {:.3}  max {:.3}",
+        sorted[0],
+        at(0.10),
+        at(0.50),
+        at(0.90),
+        sorted[n - 1]
+    );
+    // The pre-registered bar: >= 90% of files within +/-5% of 1.0.
+    let pct5 = within_5 as f64 / n as f64 * 100.0;
+    println!(
+        "  within +/-5% of 1.0: {within_5} ({pct5:.1}%)   within +/-20%: {within_20} ({:.1}%)",
+        within_20 as f64 / n as f64 * 100.0
+    );
+    println!(
+        "  pre-registered bar was >= 90% within +/-5%  ->  {}",
+        if pct5 >= 90.0 {
+            "MET: proceed to stage 2 (node identity)"
+        } else {
+            "NOT MET: the sums agree while the files do not, so the two sides are walking different subtrees. Stop here."
+        }
+    );
+}
+
 fn main() {
     // The timers are off in the shipped compiler, so a profiler has to ask.
     profile::set_timers_enabled(true);
@@ -385,6 +490,23 @@ fn main() {
         },
         bytes / files
     );
+    // The blanking preserves byte positions, so all three of its branches return
+    // a string as long as their input. `blanked_bytes == parsed_bytes` is
+    // therefore an identity, not an agreement: while it holds it carries no
+    // information, and the moment it breaks it points at a broken branch or a
+    // broken counter. Printed for that second case.
+    println!(
+        "  identity check: blanked bytes {} == store_subs parsed bytes {} -> {}",
+        s.blanked_bytes,
+        v.parse_bytes[profile::AnalyzeBucket::StoreSubs as usize],
+        if s.blanked_bytes == v.parse_bytes[profile::AnalyzeBucket::StoreSubs as usize] {
+            "ok"
+        } else {
+            "BROKEN"
+        }
+    );
+
+    per_file_walk_overlap(&sources, files);
 
     // One counter read twice. Any difference is a read-order bug in this
     // binary, not a property of the compiler, so it is worth failing loudly.
