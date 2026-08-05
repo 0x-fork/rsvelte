@@ -691,7 +691,17 @@ pub fn compile_both(
     source: &str,
     options: CompileOptions,
 ) -> Result<(CompileResult, CompileResult), CompileError> {
-    crate::toolchain::PreparedComponent::new(source, options)?.compile_both()
+    // Without this the buckets would still fill from the shared phases while
+    // `total` stayed at zero, and a split taken over this entry would divide by
+    // a denominator that never moved. One call counts as one compile even
+    // though it produces two outputs, which is what sharing the parse and the
+    // analysis makes it.
+    let _total_start = phases::phase3_transform::profile::timer_start();
+    let result = crate::toolchain::PreparedComponent::new(source, options)?.compile_both();
+    phases::phase3_transform::profile::record_pipeline_total(
+        phases::phase3_transform::profile::timer_elapsed(_total_start),
+    );
+    result
 }
 
 /// Build a [`CompileResult`] from a finished transform — accessors-deprecation

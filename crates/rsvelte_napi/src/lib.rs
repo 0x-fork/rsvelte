@@ -236,6 +236,52 @@ pub fn napi_parse_envelope(
 ///
 /// Takes source code and an options object, returns a result object
 /// matching the official `svelte/compiler` output shape.
+/// Turn the compiler's phase timers on or off for this process.
+///
+/// They are off in a shipped build because they cost 0.198% of a compile on the
+/// legacy corpus and 0.117% on the rune corpus. A harness that wants the split
+/// has to ask, and should ask once at startup rather than around each compile:
+/// the flag is process-wide, not per-call.
+#[napi(js_name = "setPhaseTimersEnabled", catch_unwind)]
+pub fn napi_set_phase_timers_enabled(enabled: bool) {
+    rsvelte_core::compiler::phases::phase3_transform::profile::set_timers_enabled(enabled);
+}
+
+/// Read the per-phase split accumulated since the last call, and clear it.
+///
+/// The shape is a contract, not a convenience: `totalNs` is the whole compile,
+/// and every other key is a nanosecond duration that is a disjoint part of it.
+/// A consumer can therefore treat "every key but `totalNs`" as the buckets
+/// without knowing their names, which is what lets a bucket be added here
+/// without changing the consumer. A key that is not a duration, or one that
+/// overlaps another, silently becomes a bucket on the other side -- so a call
+/// count does not belong in this object however useful it is elsewhere.
+///
+/// `unattributed` is deliberately absent: the caller subtracts, so a bucket
+/// added here that the caller does not know about shrinks its residual instead
+/// of silently joining a bucket that does exist.
+///
+/// The timers are thread-local and the compile entries are synchronous, so this
+/// returns what the calling thread compiled. `compileWithCssHash` runs the
+/// compile on a libuv worker and is therefore not covered.
+#[napi(js_name = "takePipelineSplit", catch_unwind)]
+pub fn napi_take_pipeline_split() -> Value {
+    let b = rsvelte_core::compiler::phases::phase3_transform::profile::take_pipeline_breakdown();
+    let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
+    serde_json::json!({
+        "parse": ns(b.parse),
+        "lineOffsets": ns(b.line_offsets),
+        "resolveLazy": ns(b.resolve_lazy),
+        "ensureScript": ns(b.ensure_script),
+        "tsRemoval": ns(b.ts_removal),
+        "optionsMerge": ns(b.options_merge),
+        "analyze": ns(b.analyze),
+        "transform": ns(b.transform),
+        "finalize": ns(b.finalize),
+        "totalNs": ns(b.total),
+    })
+}
+
 #[napi(js_name = "compile", catch_unwind)]
 pub fn napi_compile(source: String, options: Option<NapiCompileOptions>) -> napi::Result<Value> {
     let opts = options_to_compile(options)?;

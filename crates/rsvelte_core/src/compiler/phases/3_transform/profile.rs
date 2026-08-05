@@ -290,6 +290,34 @@ pub struct ReparseBreakdown {
 /// is how TypeScript removal stayed missing from the older split unnoticed.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct PipelineBreakdown {
+    // ## Folding these into another compiler's buckets
+    //
+    // Written here rather than at a call site because both the devtools binary
+    // and the napi readout hand these numbers to a comparison, and a fold
+    // decided per consumer would let the same bucket mean two things.
+    //
+    // ```text
+    // parse           ->  parse
+    // analyze         ->  analyze
+    // transform       ->  transform + codegen + css
+    // everything else ->  no fold
+    // ```
+    //
+    // `transform` covers codegen and CSS rendering because both happen inside
+    // `transform_component_with_scripts`: the client transform returns a
+    // finished code string, and `record_css_render` fires from that same call.
+    // A comparison against a compiler that separates them adds its own parts
+    // together rather than expecting this side to split.
+    //
+    // It can be split, but only part way. [`Phase3Breakdown::codegen`] is a
+    // sub-bucket of `transform`, and every site recording it is on the client
+    // path -- the server transform has none. A client-only run can report
+    // codegen separately; a server or mixed run would report a smaller codegen
+    // rather than no codegen, which is the worse failure of the two.
+    //
+    // The unfoldable rows are not necessarily extra work. Another compiler may
+    // do the same thing somewhere its buckets do not name it, so "no fold"
+    // means the correspondence is unknown, not that the work is unique.
     /// Template parse, deferred script split included.
     pub parse: Duration,
     /// The one full-source scan that produces line offsets.
