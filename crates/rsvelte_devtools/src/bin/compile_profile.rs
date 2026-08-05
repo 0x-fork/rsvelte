@@ -139,6 +139,9 @@ fn main() {
         Vec::with_capacity(files.len());
     let mut scaling: Vec<ScalingRow> = Vec::with_capacity(files.len());
     let mut totals = profile::Phase3Breakdown::default();
+    let mut rescan_total = [profile::RescanSite::default(); 7];
+    let mut rescan_files = [0usize; 7];
+    let _ = profile::take_rescan();
 
     // Measure Phase 3 (Transform)
     let start = Instant::now();
@@ -178,6 +181,18 @@ fn main() {
             file_transform,
             profile::take_reparse_breakdown(),
         ));
+        let per_file = profile::take_rescan();
+        for (acc, one) in rescan_total.iter_mut().zip(per_file.iter()) {
+            acc.calls += one.calls;
+            acc.iters += one.iters;
+            acc.scanned += one.scanned;
+            acc.input += one.input;
+        }
+        for (n, one) in rescan_files.iter_mut().zip(per_file.iter()) {
+            if one.calls > 0 {
+                *n += 1;
+            }
+        }
     }
     let transform_time = start.elapsed();
     let transform_breakdown = totals;
@@ -309,15 +324,19 @@ fn main() {
         st.entries_outside_parent
     );
     report_reparse(&mut rows, ms(total));
-    let rescan = profile::take_rescan();
+    let rescan = rescan_total;
     println!("\n  === per-variable full-text rescans ===");
     println!(
-        "    {:<38} {:>9} {:>10} {:>12} {:>7}",
-        "site", "calls", "passes", "scanned MB", "coeff"
+        "    {:<38} {:>7} {:>9} {:>10} {:>11} {:>7}",
+        "site", "files", "calls", "passes", "scanned MB", "coeff"
     );
-    for (name, s) in profile::RESCAN_SITE_NAMES.iter().zip(rescan.iter()) {
+    for ((name, s), files) in profile::RESCAN_SITE_NAMES
+        .iter()
+        .zip(rescan.iter())
+        .zip(rescan_files.iter())
+    {
         println!(
-            "    {name:<38} {:>9} {:>10} {:>12.2} {:>6.2}x",
+            "    {name:<38} {files:>7} {:>9} {:>10} {:>11.2} {:>6.2}x",
             s.calls,
             s.iters,
             s.scanned as f64 / 1e6,
