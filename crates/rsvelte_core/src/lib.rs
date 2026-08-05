@@ -95,6 +95,16 @@ pub fn ast_rewrite_resolved_counts() -> Vec<(&'static str, [u32; 4])> {
     compiler::phases::phase3_transform::shared::ast_rewrite::dual_run::take_resolved()
 }
 
+/// `(in-place nanos, redundant-text nanos)` for the ported Phase-3 passes.
+///
+/// The second number is what deleting the text path would give back, and only
+/// that: on the arm where in-place rewrites the fragment the text half never
+/// runs, so its cost there is already zero. Requires the phase timers to be on.
+#[doc(hidden)]
+pub fn ast_rewrite_resolve_time() -> (u64, u64) {
+    compiler::phases::phase3_transform::shared::ast_rewrite::dual_run::take_resolve_time()
+}
+
 /// `(terminators dropped, of those the ones the gate could not check)` for the
 /// Phase-3 in-place path. A fragment that does not stand alone parses to `None`
 /// on both sides, which the gate reads as agreement, so the second number is

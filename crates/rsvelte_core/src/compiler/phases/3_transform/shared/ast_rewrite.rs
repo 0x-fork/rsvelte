@@ -800,11 +800,19 @@ pub mod dual_run {
         // it is whether the fallback then produced something: that is the case,
         // and the only case, where deleting the text path would lose a rewrite.
         // The extra call costs nothing -- `or_else` made it too.
-        if let Some(out) = in_place() {
+        let _in_place_start = super::super::super::profile::timer_start();
+        let in_place_out = in_place();
+        add_time(&IN_PLACE_NANOS, _in_place_start);
+        if let Some(out) = in_place_out {
             count_resolve(pass, Resolved::InPlace);
             return Some(out);
         }
+        // Timed separately from the in-place half because this is the only time
+        // that deleting the text path would give back: when in-place produces a
+        // rewrite the fallback never runs, so its cost there is already zero.
+        let _spliced_start = super::super::super::profile::timer_start();
         let out = spliced();
+        add_time(&REDUNDANT_SPLICE_NANOS, _spliced_start);
         count_resolve(
             pass,
             if out.is_some() {
@@ -836,6 +844,33 @@ pub mod dual_run {
     thread_local! {
         static RESOLVED: StdRefCell<Vec<(&'static str, [u32; 4])>> =
             const { StdRefCell::new(Vec::new()) };
+        /// Time inside the in-place half, every arm.
+        static IN_PLACE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Time inside the text half on the only arm where it still runs.
+        static REDUNDANT_SPLICE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Two clock reads per call land on the interval being timed, so both totals
+    /// are upper bounds. That is the useful direction here: the question they
+    /// answer is how small the text half's remaining cost is.
+    #[inline]
+    fn add_time(
+        cell: &'static std::thread::LocalKey<std::cell::Cell<u64>>,
+        start: super::super::super::profile::TimerStart,
+    ) {
+        let elapsed = super::super::super::profile::timer_elapsed(start);
+        if elapsed.is_zero() {
+            return;
+        }
+        cell.with(|c| c.set(c.get() + elapsed.as_nanos() as u64));
+    }
+
+    /// `(in-place nanos, redundant-text nanos)`, cleared.
+    pub fn take_resolve_time() -> (u64, u64) {
+        (
+            IN_PLACE_NANOS.with(|c| c.replace(0)),
+            REDUNDANT_SPLICE_NANOS.with(|c| c.replace(0)),
+        )
     }
 
     /// Gated on the phase timers rather than on [`enabled`], because the

@@ -342,7 +342,7 @@ fn main() {
         pipeline.compiles
     );
     println!();
-    report_resolved();
+    report_resolved(script_text, files.len());
     println!(
         "Per-file average:    {:.2}µs",
         total.as_secs_f64() * 1_000_000.0 / files.len() as f64
@@ -361,8 +361,9 @@ fn main() {
 /// case and carries no verdict -- most fragments have nothing for a given pass
 /// to do -- and `text-pref` should be zero unless `RSVELTE_AST_SPLICE` is set,
 /// which makes it the positive control for the whole table.
-fn report_resolved() {
+fn report_resolved(script_text: std::time::Duration, files: usize) {
     let rows = rsvelte_core::ast_rewrite_resolved_counts();
+    let (in_place_ns, redundant_ns) = rsvelte_core::ast_rewrite_resolve_time();
     if rows.is_empty() {
         println!("resolve arms: no rows (the counters need the phase timers on)");
         return;
@@ -396,6 +397,19 @@ fn report_resolved() {
             resc as f64 / decided as f64 * 100.0
         );
     }
+    let st_ns = script_text.as_nanos() as f64;
+    println!(
+        "  in-place half     {:8.3}ms  {:5.2}% of script_text   {:7.3}µs/file",
+        in_place_ns as f64 / 1e6,
+        in_place_ns as f64 / st_ns * 100.0,
+        in_place_ns as f64 / 1e3 / files as f64
+    );
+    println!(
+        "  text half (would vanish) {:8.3}ms  {:5.2}% of script_text   {:7.3}µs/file",
+        redundant_ns as f64 / 1e6,
+        redundant_ns as f64 / st_ns * 100.0,
+        redundant_ns as f64 / 1e3 / files as f64
+    );
 }
 
 /// Writes the per-file rows the scaling table is aggregated from.
