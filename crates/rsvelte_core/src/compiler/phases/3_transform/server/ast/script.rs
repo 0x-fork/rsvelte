@@ -329,6 +329,41 @@ fn register_leading_comments(
     registry.register(gap, &kept)
 }
 
+/// Split a script's comments into the three classes the carry-over sees:
+/// LEADING (inside a `[prev_end, stmt_start)` gap — the only class
+/// [`register_leading_comments`] can capture), INTERIOR (inside a top-level
+/// statement) and TRAILING (after the last one). The classes are exhaustive and
+/// mutually exclusive, so their sum is the total — the denominator the reach
+/// counters are missing.
+fn classify_comments(body: &[Statement<'_>], all: &[Comment]) {
+    if !super::comment_stats::enabled() {
+        return;
+    }
+    super::comment_stats::bump::SCRIPT_COMMENTS_TOTAL(all.len() as u64);
+    // Both sequences are in source order, so one pass over each suffices.
+    let mut cur = 0usize;
+    for c in all {
+        while cur < body.len() && body[cur].span().end <= c.span.start {
+            cur += 1;
+        }
+        match body.get(cur) {
+            None => super::comment_stats::bump::SCRIPT_COMMENTS_TRAILING(1),
+            Some(s) if c.span.end <= s.span().start => {
+                super::comment_stats::bump::SCRIPT_COMMENTS_LEADING(1)
+            }
+            Some(_) => super::comment_stats::bump::SCRIPT_COMMENTS_INTERIOR(1),
+        }
+    }
+}
+
+/// Comments fully inside `[lo, hi]`, for attributing an INTERIOR subset to the
+/// site that drops it.
+fn comments_in(all: &[Comment], lo: u32, hi: u32) -> u64 {
+    all.iter()
+        .filter(|c| c.span.start >= lo && c.span.end <= hi)
+        .count() as u64
+}
+
 /// Parse + lower a single RUNES-mode script into transformed top-level
 /// statements. `import_sink` receives instance-script imports to hoist (`None`
 /// for module).
@@ -381,6 +416,8 @@ fn transform_script<'a>(
         return Vec::new();
     }
 
+    classify_comments(&ret.program.body, &ret.program.comments);
+
     let mut out: Vec<Statement<'a>> = Vec::new();
     let mut prev_end: u32 = 0;
 
@@ -408,6 +445,11 @@ fn transform_script<'a>(
                     }
                 }
                 Statement::VariableDeclaration(vd) => {
+                    super::comment_stats::bump::INTERIOR_NON_REPARSE(comments_in(
+                        &ret.program.comments,
+                        vd.span.start,
+                        vd.span.end,
+                    ));
                     out.extend(lower_variable_declaration(vd, src, is_instance, state));
                 }
                 // INSTANCE-only `ExportNamedDeclaration` override (写经 the per-instance
@@ -425,6 +467,16 @@ fn transform_script<'a>(
                             break 'emit;
                         }
                         Some(oxc_ast::ast::Declaration::VariableDeclaration(vd)) => {
+                            super::comment_stats::bump::INTERIOR_EXPORT_KEYWORD(comments_in(
+                                &ret.program.comments,
+                                exp.span.start,
+                                vd.span.start,
+                            ));
+                            super::comment_stats::bump::INTERIOR_NON_REPARSE(comments_in(
+                                &ret.program.comments,
+                                vd.span.start,
+                                vd.span.end,
+                            ));
                             out.extend(lower_variable_declaration(vd, src, is_instance, state));
                         }
                         Some(decl) => {
@@ -432,6 +484,11 @@ fn transform_script<'a>(
                             // declaration verbatim (re-parsed from its source span)
                             // with the same read-wrap every re-homed statement gets.
                             let span = decl.span();
+                            super::comment_stats::bump::INTERIOR_EXPORT_KEYWORD(comments_in(
+                                &ret.program.comments,
+                                exp.span.start,
+                                span.start,
+                            ));
                             let slice = &src[span.start as usize..span.end as usize];
                             if let Some(mut rehomed) = state.reparse_statement(slice) {
                                 super::read_wrap::wrap_reads_in_statement(
@@ -2598,6 +2655,8 @@ fn transform_script_legacy<'a>(
         return Vec::new();
     }
 
+    classify_comments(&ret.program.body, &ret.program.comments);
+
     let mut out: Vec<Statement<'a>> = Vec::new();
     // Reactive `$:` statements are appended AFTER all other statements (mirrors
     // upstream's `for (const [node] of analysis.reactive_statements) instance
@@ -2661,6 +2720,16 @@ fn transform_script_legacy<'a>(
                     };
                     match decl {
                         oxc_ast::ast::Declaration::VariableDeclaration(vd) => {
+                            super::comment_stats::bump::INTERIOR_EXPORT_KEYWORD(comments_in(
+                                &ret.program.comments,
+                                exp.span.start,
+                                vd.span.start,
+                            ));
+                            super::comment_stats::bump::INTERIOR_NON_REPARSE(comments_in(
+                                &ret.program.comments,
+                                vd.span.start,
+                                vd.span.end,
+                            ));
                             out.extend(lower_legacy_var_decl(
                                 vd,
                                 src,
@@ -2678,6 +2747,11 @@ fn transform_script_legacy<'a>(
                             let is_fn =
                                 matches!(other, oxc_ast::ast::Declaration::FunctionDeclaration(_));
                             let span = other.span();
+                            super::comment_stats::bump::INTERIOR_EXPORT_KEYWORD(comments_in(
+                                &ret.program.comments,
+                                exp.span.start,
+                                span.start,
+                            ));
                             let slice = &src[span.start as usize..span.end as usize];
                             if let Some(mut rehomed) = state.reparse_statement(slice) {
                                 if is_instance && is_fn {
@@ -2695,6 +2769,11 @@ fn transform_script_legacy<'a>(
                     }
                 }
                 Statement::VariableDeclaration(vd) => {
+                    super::comment_stats::bump::INTERIOR_NON_REPARSE(comments_in(
+                        &ret.program.comments,
+                        vd.span.start,
+                        vd.span.end,
+                    ));
                     out.extend(lower_legacy_var_decl(
                         vd,
                         src,
