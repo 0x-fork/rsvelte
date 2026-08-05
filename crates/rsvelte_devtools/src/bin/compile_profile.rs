@@ -75,6 +75,7 @@ fn main() {
     let _ = profile::take_reparse_breakdown();
     let _ = profile::take_pipeline_breakdown();
     let _ = profile::take_script_text_breakdown();
+    let _ = profile::take_ast_transforms_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -147,6 +148,7 @@ fn main() {
     let transform_time = pipeline.transform;
     let transform_breakdown = totals;
     let script_text_breakdown = profile::take_script_text_breakdown();
+    let at = profile::take_ast_transforms_breakdown();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -240,6 +242,18 @@ fn main() {
             residual(st.line_loop, &[st.process_accumulated]),
         ),
         ("ast_transforms", ms(st.ast_transforms)),
+        ("  at_probe", ms(at.probe)),
+        ("  at_parse", ms(at.parse)),
+        ("  at_walk", ms(at.walk)),
+        ("  at_output", ms(at.output)),
+        ("  at_store_unsub", ms(at.store_unsub)),
+        (
+            "  at_rest",
+            residual(
+                st.ast_transforms,
+                &[at.probe, at.parse, at.walk, at.output, at.store_unsub],
+            ),
+        ),
         ("post_passes", ms(st.post_passes)),
         (
             "prologue+earlyout",
@@ -261,6 +275,17 @@ fn main() {
         );
     }
     println!("    (statements processed: {})", st.statements);
+    // The verdict the split exists for: only parse and output can go away if
+    // this stage is fed an AST instead of the text pipeline's output. There is
+    // no print column -- the stage splices into a string, it never serialises.
+    let removable = ms(at.parse) + ms(at.output);
+    println!(
+        "    REMOVABLE-IF-AST-INPUT parse+output {:.3}ms = {:.2}% of ast_transforms | parse_calls {} walk_calls {}",
+        removable,
+        removable / ms(st.ast_transforms) * 100.0,
+        at.parse_calls,
+        at.walk_calls
+    );
     let st_sum =
         st.prenormalize + st.collect_vars + st.line_loop + st.ast_transforms + st.post_passes;
     println!(

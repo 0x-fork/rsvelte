@@ -4389,10 +4389,9 @@ pub(super) fn transform_state_vars_ast(
         let source_type = SourceType::mjs();
         let _pt = super::super::profile::timer_start();
         let parsed = Parser::new(alloc, script, source_type).parse();
-        super::super::profile::record_direct_parse(
-            super::super::profile::timer_elapsed(_pt),
-            script.len(),
-        );
+        let _parse_elapsed = super::super::profile::timer_elapsed(_pt);
+        super::super::profile::record_direct_parse(_parse_elapsed, script.len());
+        super::super::profile::record_at_parse(_parse_elapsed);
 
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             // Parse error - fall back to text-based transform
@@ -4460,49 +4459,59 @@ pub(super) fn transform_state_vars_ast_projected_from_program(
         return Err(());
     }
 
+    let _wt = super::super::profile::timer_start();
+    // Wrapped in a closure so the bail-outs below cannot skip the recorder:
+    // a mapping that gives up still walked the program to find that out.
     let mut mapped = Vec::new();
-    for replacement in collect_state_var_replacements_without_semantic_scan(script, program, config)
-    {
-        let source_range = replacement.start..replacement.end;
-        if let Some(output_range) = projection.output_range_for_source(source_range.clone()) {
-            let output_start = output_range.start as usize;
-            let output_end = output_range.end as usize;
-            if output_end <= projection_output_range.start
-                || output_start >= projection_output_range.end
-            {
+    let mapping = (|| {
+        for replacement in
+            collect_state_var_replacements_without_semantic_scan(script, program, config)
+        {
+            let source_range = replacement.start..replacement.end;
+            if let Some(output_range) = projection.output_range_for_source(source_range.clone()) {
+                let output_start = output_range.start as usize;
+                let output_end = output_range.end as usize;
+                if output_end <= projection_output_range.start
+                    || output_start >= projection_output_range.end
+                {
+                    continue;
+                }
+                if output_start < projection_output_range.start
+                    || output_end > projection_output_range.end
+                {
+                    return Err(());
+                }
+                let candidate_start = output_start - projection_output_range.start;
+                let candidate_end = output_end - projection_output_range.start;
+                if script.get(source_range.start as usize..source_range.end as usize)
+                    != candidate.get(candidate_start..candidate_end)
+                {
+                    return Err(());
+                }
+                mapped.push(Replacement {
+                    start: candidate_start as u32,
+                    end: candidate_end as u32,
+                    text: replacement.text,
+                });
                 continue;
             }
-            if output_start < projection_output_range.start
-                || output_end > projection_output_range.end
-            {
-                return Err(());
-            }
-            let candidate_start = output_start - projection_output_range.start;
-            let candidate_end = output_end - projection_output_range.start;
-            if script.get(source_range.start as usize..source_range.end as usize)
-                != candidate.get(candidate_start..candidate_end)
-            {
-                return Err(());
-            }
-            mapped.push(Replacement {
-                start: candidate_start as u32,
-                end: candidate_end as u32,
-                text: replacement.text,
+
+            let overlaps_copied_source = projection.copied_chunks.iter().any(|chunk| {
+                source_range.start < chunk.source.end && source_range.end > chunk.source.start
             });
-            continue;
+            if source_range.is_empty() || overlaps_copied_source {
+                return Err(());
+            }
         }
+        Ok(())
+    })();
 
-        let overlaps_copied_source = projection.copied_chunks.iter().any(|chunk| {
-            source_range.start < chunk.source.end && source_range.end > chunk.source.start
-        });
-        if source_range.is_empty() || overlaps_copied_source {
-            return Err(());
-        }
-    }
-
+    super::super::profile::record_at_walk(super::super::profile::timer_elapsed(_wt));
+    mapping?;
     if mapped.is_empty() {
         return Ok(None);
     }
+    let _ot = super::super::profile::timer_start();
     mapped.sort_by_key(|replacement| std::cmp::Reverse(replacement.start));
     let mut output = candidate.to_string();
     for replacement in mapped {
@@ -4511,6 +4520,7 @@ pub(super) fn transform_state_vars_ast_projected_from_program(
             &replacement.text,
         );
     }
+    super::super::profile::record_at_output(super::super::profile::timer_elapsed(_ot));
     Ok(Some(output))
 }
 
@@ -4520,15 +4530,18 @@ fn transform_state_vars_ast_from_program_unchecked(
     output_range: std::ops::Range<usize>,
     config: &AstTransformConfig,
 ) -> Option<String> {
+    let _wt = super::super::profile::timer_start();
     let mut replacements = collect_state_var_replacements(script, program, config);
     replacements.retain(|replacement| {
         replacement.start as usize >= output_range.start
             && replacement.end as usize <= output_range.end
     });
+    super::super::profile::record_at_walk(super::super::profile::timer_elapsed(_wt));
     if replacements.is_empty() {
         return None;
     }
 
+    let _ot = super::super::profile::timer_start();
     replacements.sort_by_key(|r| std::cmp::Reverse(r.start));
 
     let mut result = script[output_range.clone()].to_string();
@@ -4538,6 +4551,7 @@ fn transform_state_vars_ast_from_program_unchecked(
             &rep.text,
         );
     }
+    super::super::profile::record_at_output(super::super::profile::timer_elapsed(_ot));
 
     Some(result)
 }

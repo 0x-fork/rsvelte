@@ -6156,6 +6156,7 @@ fn transform_instance_script_for_visitors(
         // is empty even though the script contains runes that the AST
         // pass must rewrite. Probe the script bytes for `$effect` /
         // `$state` so we still enter the AST pass in those cases.
+        let _probe = super::profile::timer_start();
         let has_effect_calls = !store_sub_vars.iter().any(|v| v == "$effect")
             && memmem::find(result.as_bytes(), b"$effect").is_some();
         let has_state_calls = !store_sub_vars.iter().any(|v| v == "$state")
@@ -6187,8 +6188,14 @@ fn transform_instance_script_for_visitors(
             || has_strict_equals
             || has_await
             || has_inspect;
+        // Recorded here rather than only inside the branch: the probes above run
+        // whatever `has_transforms` turns out to be, and letting the false path
+        // skip the recorder would hide exactly the components that pay for the
+        // scans and get nothing back.
+        super::profile::record_at_probe(super::profile::timer_elapsed(_probe));
 
         if has_transforms {
+            let _probe = super::profile::timer_start();
             // Collect $derived / $derived.by binding names so AST assignment transforms
             // can skip proxy wrapping on these (mirrors `binding.kind !== 'derived'` in JS).
             // Exclude any name that is re-declared as a local $state() somewhere in the
@@ -6237,6 +6244,7 @@ fn transform_instance_script_for_visitors(
                 analysis: Some(analysis),
                 exported_names: &exported_names,
             };
+            super::profile::record_at_probe(super::profile::timer_elapsed(_probe));
             let mut used_retained = false;
             #[cfg(feature = "measure-ast-state")]
             if retained_program.is_none() {
@@ -6340,7 +6348,9 @@ fn transform_instance_script_for_visitors(
             }
             // Apply store_unsub wrapping after AST transform (searches for $.set patterns)
             if !store_sub_vars.is_empty() {
+                let _su = super::profile::timer_start();
                 result = wrap_store_unsub_for_state_sets(&result, &state_vars, &store_sub_vars);
+                super::profile::record_at_store_unsub(super::profile::timer_elapsed(_su));
             }
             // The post-AST `wrap_state_derived_with_tag(&result)` pass that
             // used to tag AST-emitted `$.state(...)` / `$.derived(...)`

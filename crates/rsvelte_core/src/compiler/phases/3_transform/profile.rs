@@ -404,6 +404,13 @@ thread_local! {
     static ST_LINE_LOOP: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static ST_AST_TRANSFORMS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static ST_POST_PASSES: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_PROBE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_PARSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_WALK: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_OUTPUT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_STORE_UNSUB: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
+    static AT_WALK_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -755,6 +762,88 @@ pub fn record_st_post_passes(d: Duration) {
         return;
     }
     ST_POST_PASSES.with(|c| c.set(c.get() + d));
+}
+
+/// One level below [`ScriptTextBreakdown::ast_transforms`].
+///
+/// Split to answer whether feeding this stage an AST instead of the text
+/// pipeline's output would pay: only `parse` and `output` can go away, because
+/// `parse` exists solely to recover a program from text and `output` is the
+/// splice back into text. `walk` is the rewrite itself and survives any change
+/// of input. There is no printer to bucket -- this stage never serialises an
+/// AST, it edits the source string in place -- so a parse/walk/print split
+/// would report a structural zero for the third column.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AstTransformsBreakdown {
+    /// Rune probes, local-state collection and derived-name gathering, all of
+    /// which read the script text before any AST work starts.
+    pub probe: Duration,
+    /// `Parser::parse` on the text pipeline's output, i.e. the reparse the
+    /// retained program is meant to avoid.
+    pub parse: Duration,
+    /// Replacement collection, `SemanticBuilder` included.
+    pub walk: Duration,
+    /// Sorting the replacements and splicing them into a fresh `String`.
+    pub output: Duration,
+    /// `wrap_store_unsub_for_state_sets`, a text scan that runs after the AST
+    /// transform and is neither parse nor walk.
+    pub store_unsub: Duration,
+    pub parse_calls: u64,
+    pub walk_calls: u64,
+}
+
+pub fn take_ast_transforms_breakdown() -> AstTransformsBreakdown {
+    AstTransformsBreakdown {
+        probe: AT_PROBE.with(|c| c.replace(Duration::ZERO)),
+        parse: AT_PARSE.with(|c| c.replace(Duration::ZERO)),
+        walk: AT_WALK.with(|c| c.replace(Duration::ZERO)),
+        output: AT_OUTPUT.with(|c| c.replace(Duration::ZERO)),
+        store_unsub: AT_STORE_UNSUB.with(|c| c.replace(Duration::ZERO)),
+        parse_calls: AT_PARSE_CALLS.with(|c| c.replace(0)),
+        walk_calls: AT_WALK_CALLS.with(|c| c.replace(0)),
+    }
+}
+
+#[inline]
+pub fn record_at_probe(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_PROBE.with(|c| c.set(c.get() + d));
+}
+
+#[inline]
+pub fn record_at_parse(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_PARSE.with(|c| c.set(c.get() + d));
+    AT_PARSE_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_at_walk(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_WALK.with(|c| c.set(c.get() + d));
+    AT_WALK_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_at_output(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_OUTPUT.with(|c| c.set(c.get() + d));
+}
+
+#[inline]
+pub fn record_at_store_unsub(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_STORE_UNSUB.with(|c| c.set(c.get() + d));
 }
 
 pub fn take_script_text_breakdown() -> ScriptTextBreakdown {
