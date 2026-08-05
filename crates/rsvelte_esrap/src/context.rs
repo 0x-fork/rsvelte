@@ -24,8 +24,11 @@ pub struct Context {
     /// [`Context::empty`], tracked for the same reason as `measure`).
     has_content: bool,
     /// `true` once this context (or an appended child) emitted a newline.
-    /// Visitors read it to pick a layout.
-    pub multiline: bool,
+    /// Visitors read it to pick a layout. Private with an accessor pair rather
+    /// than a public field so that "how many layout decisions did the printer
+    /// make" has one place to be counted; as a field there was no way to know
+    /// the answer short of enumerating the read sites, which goes quietly stale.
+    multiline: bool,
 }
 
 impl Context {
@@ -99,11 +102,24 @@ impl Context {
         self.commands.push(Command::Location { line, column });
     }
 
+    /// `true` once this context (or an appended child) emitted a newline.
+    pub fn multiline(&self) -> bool {
+        crate::profile::count_multiline_read();
+        self.multiline
+    }
+
+    /// Force the context multiline, for the cases where a visitor knows a break
+    /// is coming that it has not pushed a `Newline` for yet.
+    pub fn set_multiline(&mut self) {
+        self.multiline = true;
+    }
+
     /// Splice `child`'s commands in place, propagating its multiline state.
     pub fn append(&mut self, child: Context) {
         let child_multiline = child.multiline;
         self.measure += child.measure;
         self.has_content |= child.has_content;
+        crate::profile::count_cmd_nested();
         self.commands.push(Command::Nested(child.commands));
         if self.has_newline || child_multiline {
             self.multiline = true;
@@ -112,12 +128,20 @@ impl Context {
 
     /// `true` when nothing with visible content has been written.
     pub fn empty(&self) -> bool {
+        crate::profile::count_empty_read();
         !self.has_content
     }
 
     /// Total length of the literal strings in this context, ignoring whitespace
     /// sentinels — esrap's `measure`, used to decide if a layout fits on a line.
+    ///
+    /// A `usize` kept current by `write`/`append`, where upstream esrap re-walks
+    /// the command array on every call (`context.js`'s recursive `measure`). The
+    /// same is true of [`Context::empty`] against upstream's `some(has_content)`.
+    /// Worth noting because it means **no layout decision in this port reads the
+    /// command tree** — the tree's only consumers are the two flatten drivers.
     pub fn measure(&self) -> usize {
+        crate::profile::count_measure_read();
         self.measure
     }
 
@@ -160,10 +184,10 @@ mod tests {
         let mut child = parent.child();
         child.newline();
         child.write("x");
-        assert!(child.multiline);
+        assert!(child.multiline());
         parent.write("a");
         parent.append(child);
-        assert!(parent.multiline);
+        assert!(parent.multiline());
     }
 
     #[test]

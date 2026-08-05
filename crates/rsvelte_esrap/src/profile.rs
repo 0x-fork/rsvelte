@@ -17,6 +17,14 @@
 //! being deterministic they settle in one run on a loaded machine, where the
 //! timers do not.
 //!
+//! A fourth axis was added after the first pass: **layout decisions**. It is
+//! unlike the other three, because the compiler being measured against does not
+//! reproduce the reference formatter's layout at all (0 of 1296 files byte-match
+//! it, averaging 23 lines shorter), and `oxc_codegen` has no layout machinery to
+//! reproduce it with. So this is a quantity one side has and the other does not,
+//! rather than one both have at different unit prices -- which makes it the only
+//! remaining candidate that the two ruled-out quantities could not have caught.
+//!
 //! # Cost of the instrument
 //!
 //! Every counter is `O(1)` at a single call site. In particular `append_bytes`
@@ -74,7 +82,50 @@ thread_local! {
     static FLATTEN_PLAIN: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static RECYCLE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
 
-    static COUNTS: Cell<PrintCounts> = const { Cell::new(PrintCounts::ZERO) };
+    /// One `Cell` per counter rather than one `Cell<PrintCounts>`. The struct
+    /// version copied all of it in and out on every increment, which at ~293
+    /// increments per print was measurable in the very buckets being split:
+    /// adding the layout counters moved the parent 48.3 -> 51.4 ms and inflated
+    /// `print_program`'s share, because that is where most of them fire. An
+    /// array indexed by [`Slot`] is one TLS lookup and one word-sized
+    /// read-modify-write, and leaves the shares where they were.
+    static COUNTS: [Cell<u64>; Slot::N] = const { [const { Cell::new(0) }; Slot::N] };
+}
+
+/// Index into the counter array. Order is arbitrary; only [`take`] depends on it.
+#[derive(Clone, Copy)]
+enum Slot {
+    StmtDispatch,
+    ExprDispatch,
+    Contexts,
+    PoolHits,
+    CmdStr,
+    CmdLocation,
+    CmdLayout,
+    CmdNested,
+    MeasureReads,
+    MultilineReads,
+    EmptyReads,
+    StrHeap,
+    StrBytes,
+    AppendCalls,
+    AppendBytes,
+    Mappings,
+}
+
+impl Slot {
+    const N: usize = Self::Mappings as usize + 1;
+}
+
+#[inline]
+fn bump(slot: Slot, by: u64) {
+    if !enabled() {
+        return;
+    }
+    COUNTS.with(|c| {
+        let cell = &c[slot as usize];
+        cell.set(cell.get() + by);
+    });
 }
 
 /// Deterministic work counts for the printer, load-independent.
@@ -101,6 +152,24 @@ pub struct PrintCounts {
     pub cmd_location: u64,
     /// Whitespace and indent sentinels pushed.
     pub cmd_layout: u64,
+    /// `Command::Nested`s pushed, which is also `Context::append` calls: every
+    /// append splices exactly one child buffer. The fourth variant, and the one
+    /// the first pass of this instrument left out of "total commands".
+    pub cmd_nested: u64,
+    /// Reads of `Context::measure`, `Context::multiline` and `Context::empty` --
+    /// the three inputs to every layout decision the printer makes, and the
+    /// count of layout decisions themselves up to how many inputs each reads.
+    ///
+    /// Counted in the accessors rather than at the decision sites: `multiline`
+    /// was a public field, and making it private with a getter turns "did I
+    /// enumerate every branch" into "there is one way to ask", which stays true
+    /// when branches are added. The same reason the two dispatch counters sit on
+    /// the two central `match`es.
+    pub measure_reads: u64,
+    /// Reads of `Context::multiline`; see `measure_reads`.
+    pub multiline_reads: u64,
+    /// Reads of `Context::empty`; see `measure_reads`.
+    pub empty_reads: u64,
     /// `Command::Str` payloads that did not fit `CompactString`'s inline
     /// storage. Read from `is_heap_allocated()` rather than comparing against
     /// the 24-byte limit named in a doc comment.
@@ -115,23 +184,6 @@ pub struct PrintCounts {
     pub append_bytes: u64,
     /// `Mapping`s pushed, one per `Command::Location` the map driver consumes.
     pub mappings: u64,
-}
-
-impl PrintCounts {
-    const ZERO: Self = Self {
-        stmt_dispatch: 0,
-        expr_dispatch: 0,
-        contexts: 0,
-        pool_hits: 0,
-        cmd_str: 0,
-        cmd_location: 0,
-        cmd_layout: 0,
-        str_heap: 0,
-        str_bytes: 0,
-        append_calls: 0,
-        append_bytes: 0,
-        mappings: 0,
-    };
 }
 
 /// Timers for the printer's five serial steps, plus the counts.
@@ -242,18 +294,11 @@ recorder!(
 );
 
 macro_rules! counter {
-    ($(#[$doc:meta])* $name:ident, $field:ident) => {
+    ($(#[$doc:meta])* $name:ident, $slot:ident) => {
         $(#[$doc])*
         #[inline]
         pub fn $name() {
-            if !enabled() {
-                return;
-            }
-            COUNTS.with(|c| {
-                let mut v = c.get();
-                v.$field += 1;
-                c.set(v);
-            });
+            bump(Slot::$slot, 1);
         }
     };
 }
@@ -261,79 +306,71 @@ macro_rules! counter {
 counter!(
     /// One `print_statement` dispatch.
     count_stmt_dispatch,
-    stmt_dispatch
+    StmtDispatch
 );
 counter!(
     /// One `print_expression` dispatch.
     count_expr_dispatch,
-    expr_dispatch
+    ExprDispatch
 );
 counter!(
     /// One `Command::Location` pushed onto a context.
     count_cmd_location,
-    cmd_location
+    CmdLocation
 );
 counter!(
     /// One whitespace/indent sentinel pushed onto a context.
     count_cmd_layout,
-    cmd_layout
+    CmdLayout
+);
+counter!(
+    /// One `Command::Nested` pushed, i.e. one `Context::append`.
+    count_cmd_nested,
+    CmdNested
+);
+counter!(
+    /// One read of `Context::measure`.
+    count_measure_read,
+    MeasureReads
+);
+counter!(
+    /// One read of `Context::multiline`.
+    count_multiline_read,
+    MultilineReads
+);
+counter!(
+    /// One read of `Context::empty`.
+    count_empty_read,
+    EmptyReads
 );
 
 /// One `Context` creation, and whether the pool had a buffer for it.
 #[inline]
 pub fn count_context(pool_hit: bool) {
-    if !enabled() {
-        return;
-    }
-    COUNTS.with(|c| {
-        let mut v = c.get();
-        v.contexts += 1;
-        v.pool_hits += u64::from(pool_hit);
-        c.set(v);
-    });
+    bump(Slot::Contexts, 1);
+    bump(Slot::PoolHits, u64::from(pool_hit));
 }
 
 /// One `Command::Str`: its size, and whether the payload spilled to the heap.
 #[inline]
 pub fn count_cmd_str(bytes: usize, heap: bool) {
-    if !enabled() {
-        return;
-    }
-    COUNTS.with(|c| {
-        let mut v = c.get();
-        v.cmd_str += 1;
-        v.str_bytes += bytes as u64;
-        v.str_heap += u64::from(heap);
-        c.set(v);
-    });
+    bump(Slot::CmdStr, 1);
+    bump(Slot::StrBytes, bytes as u64);
+    bump(Slot::StrHeap, u64::from(heap));
 }
 
 /// One `Driver::append`, with the byte length it was handed. See the module
 /// docs for why this is bytes and not characters.
 #[inline]
 pub fn count_append(bytes: usize) {
-    if !enabled() {
-        return;
-    }
-    COUNTS.with(|c| {
-        let mut v = c.get();
-        v.append_calls += 1;
-        v.append_bytes += bytes as u64;
-        c.set(v);
-    });
+    bump(Slot::AppendCalls, 1);
+    bump(Slot::AppendBytes, bytes as u64);
 }
 
 /// One `Mapping` pushed.
 #[inline]
 pub fn count_mapping() {
-    if !enabled() {
-        return;
-    }
-    COUNTS.with(|c| {
-        let mut v = c.get();
-        v.mappings += 1;
-        c.set(v);
-    });
+    bump(Slot::Mappings, 1);
 }
 
 /// Read the breakdown and clear it. Calling twice for one batch reports the
@@ -365,6 +402,26 @@ pub fn take() -> PrintBreakdown {
         flatten_plain_calls,
         recycle,
         recycle_calls,
-        counts: COUNTS.with(|c| c.replace(PrintCounts::ZERO)),
+        counts: COUNTS.with(|c| {
+            let get = |slot: Slot| c[slot as usize].replace(0);
+            PrintCounts {
+                stmt_dispatch: get(Slot::StmtDispatch),
+                expr_dispatch: get(Slot::ExprDispatch),
+                contexts: get(Slot::Contexts),
+                pool_hits: get(Slot::PoolHits),
+                cmd_str: get(Slot::CmdStr),
+                cmd_location: get(Slot::CmdLocation),
+                cmd_layout: get(Slot::CmdLayout),
+                cmd_nested: get(Slot::CmdNested),
+                measure_reads: get(Slot::MeasureReads),
+                multiline_reads: get(Slot::MultilineReads),
+                empty_reads: get(Slot::EmptyReads),
+                str_heap: get(Slot::StrHeap),
+                str_bytes: get(Slot::StrBytes),
+                append_calls: get(Slot::AppendCalls),
+                append_bytes: get(Slot::AppendBytes),
+                mappings: get(Slot::Mappings),
+            }
+        }),
     }
 }

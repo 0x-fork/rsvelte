@@ -17,8 +17,15 @@
 //! segment count.
 //!
 //! The counters below name the remaining axes — node count, command count,
-//! allocation count. They are deterministic, so unlike the timers beside them
-//! they settle in one run on a loaded machine.
+//! allocation count, and layout decisions. They are deterministic, so unlike the
+//! timers beside them they settle in one run on a loaded machine.
+//!
+//! The last axis is the odd one out, and worth the extra column: the compiler
+//! being compared against reproduces the reference formatter's layout in 0 of
+//! 1296 files (averaging 23 lines shorter), and `oxc_codegen` carries no layout
+//! machinery to reproduce it with. So it is a quantity one side has and the
+//! other structurally does not — which is exactly the shape a mechanism has to
+//! have to survive the two ruled-out quantities above.
 //!
 //! # Parent
 //!
@@ -209,6 +216,12 @@ fn main() {
 
     let c = inner.counts;
     let per = |n: u64| n as f64 / prints.max(1) as f64;
+    // All four variants. The first pass of this reader summed three and called
+    // it "total"; `Nested` is a command like any other -- pushed by the builder,
+    // matched by both drivers, and freed by `recycle`.
+    let commands = c.cmd_str + c.cmd_location + c.cmd_layout + c.cmd_nested;
+    let nodes = c.stmt_dispatch + c.expr_dispatch;
+    let decisions = c.measure_reads + c.multiline_reads + c.empty_reads;
     println!("\n-- work counts (deterministic, load-independent) --");
     println!(
         "{:<24}{:>14}{:>14}",
@@ -217,24 +230,58 @@ fn main() {
     for (name, n) in [
         ("stmt dispatches", c.stmt_dispatch),
         ("expr dispatches", c.expr_dispatch),
-        ("nodes (stmt+expr)", c.stmt_dispatch + c.expr_dispatch),
+        ("nodes (stmt+expr)", nodes),
         ("contexts created", c.contexts),
         ("  of which pooled", c.pool_hits),
         ("  of which allocated", c.contexts - c.pool_hits),
         ("commands: Str", c.cmd_str),
         ("commands: Location", c.cmd_location),
         ("commands: layout", c.cmd_layout),
-        (
-            "commands: total",
-            c.cmd_str + c.cmd_location + c.cmd_layout,
-        ),
+        ("commands: Nested", c.cmd_nested),
+        ("commands: total", commands),
         ("  Str payload bytes", c.str_bytes),
         ("  Str heap-allocated", c.str_heap),
         ("append calls (map only)", c.append_calls),
         ("append bytes (map only)", c.append_bytes),
         ("mappings pushed", c.mappings),
+        ("layout: measure reads", c.measure_reads),
+        ("layout: multiline reads", c.multiline_reads),
+        ("layout: empty reads", c.empty_reads),
+        ("layout: decision inputs", decisions),
     ] {
         println!("{name:<24}{n:>14}{:>14.1}", per(n));
+    }
+
+    // Counts are not time. Dividing the step that produced or consumed a
+    // quantity by that quantity gives the unit price the numbers imply, and a
+    // price that is implausible for the operation is the counter's own check:
+    // too high and work nobody counted is sitting in the bucket, too low and the
+    // counter is counting more than the bucket does.
+    println!("\n-- implied unit price (bucket time / its count) --");
+    println!("{:<40}{:>12}", "operation", "ns each");
+    let ns = |d: Duration, n: u64| {
+        if n == 0 {
+            f64::NAN
+        } else {
+            d.as_secs_f64() * 1e9 / n as f64
+        }
+    };
+    for (name, d, n) in [
+        (
+            "print_program / command pushed",
+            inner.print_program,
+            commands,
+        ),
+        ("print_program / node dispatched", inner.print_program, nodes),
+        ("flatten_map / command read", inner.flatten_map, commands),
+        (
+            "flatten_map / output byte",
+            inner.flatten_map,
+            c.append_bytes,
+        ),
+        ("recycle / buffer returned", inner.recycle, c.contexts),
+    ] {
+        println!("{name:<40}{:>12.2}", ns(d, n));
     }
 
     // `cmd_location` counts what the printer emitted; `mappings` counts what the

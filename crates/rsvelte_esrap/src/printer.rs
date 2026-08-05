@@ -717,7 +717,7 @@ impl<'opt> Printer<'opt> {
             let mut child = parent.child();
             (node.render)(self, &mut child);
 
-            let node_multiline = child.multiline;
+            let node_multiline = child.multiline();
 
             // esrap writes the separator for every non-final element, and also
             // for a trailing elision (`[a, ,]`): `i < n-1 || !child`.
@@ -733,7 +733,7 @@ impl<'opt> Printer<'opt> {
             }
 
             length += child.measure() as i64 + 1;
-            multiline |= child.multiline;
+            multiline |= child.multiline();
 
             items.push(SeqItem {
                 ctx: child,
@@ -856,12 +856,12 @@ impl<'opt> Printer<'opt> {
             elem.print(self, &mut child);
 
             if let Some((prev_elem, prev_multiline)) = prev {
-                if child.multiline || prev_multiline || !elem.same_kind(prev_elem) {
+                if child.multiline() || prev_multiline || !elem.same_kind(prev_elem) {
                     ctx.margin();
                 }
                 ctx.newline();
             }
-            let multiline = child.multiline;
+            let multiline = child.multiline();
             ctx.append(child);
 
             let next = non_empty.get(i + 1).map(|e| e.span_start());
@@ -1244,14 +1244,14 @@ impl<'opt> Printer<'opt> {
             // A newline *inside* the literal makes the enclosing context
             // multiline (esrap), which drives statement-margin decisions.
             if raw.contains('\n') {
-                ctx.multiline = true;
+                ctx.set_multiline();
             }
         }
         if let Some(last) = node.quasis.last() {
             let raw = last.value.raw.as_str();
             ctx.write(format_compact!("{raw}`"));
             if raw.contains('\n') {
-                ctx.multiline = true;
+                ctx.set_multiline();
             }
         }
     }
@@ -2058,7 +2058,7 @@ impl<'opt> Printer<'opt> {
                 self.print_expression(init, &mut child);
             }
             total_measure += child.measure();
-            any_multiline |= child.multiline;
+            any_multiline |= child.multiline();
             rendered.push(child);
         }
 
@@ -2709,8 +2709,8 @@ impl<'opt> Printer<'opt> {
         let mut alternate = ctx.child();
         self.print_expression(&node.alternate, &mut alternate);
 
-        let multiline = consequent.multiline
-            || alternate.multiline
+        let multiline = consequent.multiline()
+            || alternate.multiline()
             || consequent.measure() + alternate.measure() > 50;
 
         if multiline {
@@ -2963,7 +2963,7 @@ impl<'opt> Printer<'opt> {
             // trailing line comment's pending newline into `child_context.multiline`
             // and forces the wrapped layout. Mirror that per non-final arg.
             if emitted_line && !is_last {
-                child.multiline = true;
+                child.set_multiline();
             }
 
             rendered.push(child);
@@ -2977,7 +2977,7 @@ impl<'opt> Printer<'opt> {
             || rendered
                 .iter()
                 .take(n.saturating_sub(1))
-                .any(|c| c.multiline);
+                .any(|c| c.multiline());
 
         ctx.write("(");
         if wrap {
@@ -3194,7 +3194,7 @@ impl<'opt> Printer<'opt> {
                     self.print_type(inner, ctx);
                     ctx.write("}");
                     if raw.contains('\n') {
-                        ctx.multiline = true;
+                        ctx.set_multiline();
                     }
                 }
                 if let Some(last) = t.quasis.last() {
