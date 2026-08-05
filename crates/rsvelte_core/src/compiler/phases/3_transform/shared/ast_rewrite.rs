@@ -176,6 +176,19 @@ fn keep_fragment_termination(source: &str, printed: &mut String) {
 /// when it closes a block but not when it closes an object literal, and both
 /// readings produce valid JavaScript, so nothing downstream can catch a wrong
 /// guess. The probe suffixes are the ones that bind leftwards.
+///
+/// `None` on both sides is read as agreement by the caller, which is a blind
+/// spot rather than a check: measured over the official fixtures, 2 of 48
+/// terminator drops go through it, all from `inspect-trace-class`, whose
+/// fragment is a class member body. `dual_run_tally` ratchets that 2.
+///
+/// **Do not close the blind spot by treating "did not parse" as a difference.**
+/// It is the change the shape of this function suggests, and it would stop the
+/// 46 correct drops as well as the 2 unverified ones — a class member body
+/// never parses here, whether or not dropping its terminator was safe. The
+/// suffixes above bind leftwards *in statement position*; inside a class body
+/// all three are syntax errors, so closing this needs a second set chosen for
+/// that context and a way to say which context a fragment is in.
 fn statements_with_following_text(fragment: &str) -> Option<Vec<usize>> {
     ["(c)", "[c]", "`t`"]
         .into_iter()

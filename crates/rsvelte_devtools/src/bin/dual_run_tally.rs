@@ -15,6 +15,24 @@ use std::path::{Path, PathBuf};
 
 use rsvelte_core::{CompileOptions, GenerateMode, compile};
 
+/// Terminator drops the gate could not evaluate.
+///
+/// A ratchet rather than a zero, because it is not zero. Both are in
+/// `runtime-runes/samples/inspect-trace-class`, whose rewritten fragment is a
+/// class member body: `statements_with_following_text` probes it as a program,
+/// which it is not, so both sides come back `None` and the comparison reads
+/// that as agreement. Gating on zero would either fail every run or, once
+/// someone noticed, be deleted; gating on "no more than before" keeps the check
+/// alive and still catches a change that widens the blind spot.
+///
+/// **Do not close this by making the probe treat "did not parse" as a
+/// difference.** It is the first thing the shape of the code suggests, and it
+/// would block the 46 drops that are currently correct along with the 2 that
+/// are unverified. Closing it properly needs suffixes that bind leftwards
+/// *inside a class body*; the current three (`(c)`, `[c]`, `` `t` ``) are
+/// syntax errors there.
+const UNCHECKED_BASELINE: u32 = 2;
+
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -93,7 +111,14 @@ fn main() {
 
     let (pops, unchecked) = rsvelte_core::ast_rewrite_termination_counts();
     println!("\nterminators dropped:                {pops}");
-    println!("of those, the gate could not check: {unchecked}");
+    println!("of those, the gate could not check: {unchecked}  (baseline {UNCHECKED_BASELINE})");
+    let unchecked_regressed = unchecked > UNCHECKED_BASELINE;
+    if unchecked_regressed {
+        println!(
+            "REGRESSION: {} more unverified terminator drops than the baseline",
+            unchecked - UNCHECKED_BASELINE
+        );
+    }
     if total_unverified > 0 {
         println!("\nunverified by pass:");
         for (pass, _, _, _, unverified) in tally.iter().filter(|e| e.4 > 0) {
@@ -131,7 +156,7 @@ fn main() {
         );
     }
 
-    if total_mismatches > 0 || total_unverified > 0 {
+    if total_mismatches > 0 || total_unverified > 0 || unchecked_regressed {
         std::process::exit(2);
     }
 }
