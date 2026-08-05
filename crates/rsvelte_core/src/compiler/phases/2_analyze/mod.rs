@@ -346,7 +346,29 @@ pub(crate) fn analyze_prepared_component_with_retained(
         rustc_hash::FxHashSet::default()
     };
 
-    let can_have_features = memchr::memchr(b'$', source.as_bytes()).is_some()
+    // Two questions share the walks below: does this component await, and does it
+    // reference a rune. They need different gates, and ORing them cost the cheap
+    // one all of its power.
+    //
+    // Every rune name begins with `$`, so `$` is the right gate for the rune
+    // question -- but it passes 53-94% of real components, while `await` appears
+    // in 0.5-1.5% of them. ORed, the `await` test can never exclude anything.
+    //
+    // When runes mode is already settled `needs_rune_detection` is false, and the
+    // rune half of the answer is then discarded at the one place it is read (the
+    // `if needs_rune_detection` below; `instance_has_rune_reference`,
+    // `module_has_rune_reference` and `fragment_results.has_rune_reference` have
+    // no other reader in the crate). The walks can only report an await, and a
+    // source holding no `await` byte sequence cannot contain one.
+    //
+    // Skipping in that case is observationally equivalent: the old gate walked
+    // and produced `(has_await: false, has_rune_reference: <discarded>)`, this
+    // one produces `(false, false)` without walking. Measured on shipped sources
+    // it drops 54.66% (shadcn), 85.98% (flowbite) and 96.03% (bits-ui) of these
+    // walks -- and 0.00% of them on a legacy codebase (svelte-ux), where runes
+    // mode is never pre-settled and every walk is load-bearing.
+    let can_have_features = (needs_rune_detection
+        && memchr::memchr(b'$', source.as_bytes()).is_some())
         || memchr::memmem::find(source.as_bytes(), b"await").is_some();
 
     // Check the template fragment for both await expressions and rune references
