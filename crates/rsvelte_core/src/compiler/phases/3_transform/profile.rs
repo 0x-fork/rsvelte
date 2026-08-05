@@ -248,14 +248,23 @@ pub struct ScriptTextBreakdown {
     pub entries_outside_parent: u64,
 }
 
-/// The `*_ast` rewrite passes all reach the parser through one choke point,
-/// [`super::shared::ast_rewrite::with_program`], so counting there covers every
-/// pass at once.
+/// The `*_ast` passes reach the parser through two entry points in
+/// `super::shared::ast_rewrite` -- `with_program` for the eight that only read
+/// a program, `with_program_mut` for the ten that rewrite one -- and both are
+/// counted here.
 ///
-/// `bytes` is the load-independent quantity: it is the total source length
-/// handed to the parser across a compile, so `bytes / file_len` says how many
-/// times over the pipeline re-reads the same script. A ratio that grows with
-/// file size is superlinear re-parsing; a flat ratio is a constant factor.
+/// `bytes` is the load-independent quantity: the total source length handed to
+/// the parser across a compile. Divided by the length of *what was handed to
+/// it*, the script text, it says how many times over the pipeline re-reads the
+/// same script, and a ratio that grows with size is superlinear re-parsing.
+///
+/// Two earlier claims in this note were wrong, and both inflate confidence
+/// rather than merely blur it. It said to divide by the file length: that
+/// denominator includes template and style bytes the parser never sees, so a
+/// template-heavy file scores low for having a large denominator rather than
+/// for being re-parsed less. And it said one choke point covered every pass,
+/// while `with_program_mut` parsed without recording -- so any re-parse figure
+/// taken before this was the reading passes only.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ReparseBreakdown {
     /// Time inside `Parser::parse` only.
