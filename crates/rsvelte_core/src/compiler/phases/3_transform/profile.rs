@@ -79,6 +79,12 @@ static TIMERS_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Profiling binaries call this at startup. Leaving it off is what the shipped
 /// compiler does, and the two states differ only in a branch, so there is no
 /// build in which the timers exist and no build in which they are free.
+///
+/// Every recorder below, and every timer guard's `Drop`, opens by returning on
+/// this. The check comes before the thread-local access rather than around the
+/// accumulate because the thread-local is the expensive half: a shut gate
+/// costs 0.33ns against 44.5ns for a timed pair, which is where the 99.5% in
+/// the module note comes from.
 pub fn set_timers_enabled(on: bool) {
     TIMERS_ENABLED.store(on, Ordering::Relaxed);
 }
@@ -425,8 +431,6 @@ thread_local! {
 
 #[inline]
 pub fn record_reparse(parse: Duration, visit: Duration, bytes: usize) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -438,8 +442,6 @@ pub fn record_reparse(parse: Duration, visit: Duration, bytes: usize) {
 
 #[inline]
 pub fn record_direct_parse(parse: Duration, bytes: usize) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -465,8 +467,6 @@ pub fn take_reparse_breakdown() -> ReparseBreakdown {
 
 #[inline]
 pub fn record_esrap_client_split(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -478,8 +478,6 @@ pub fn record_esrap_client_split(d: Duration) {
 
 #[inline]
 pub fn record_esrap_client_map(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -491,8 +489,6 @@ pub fn record_esrap_client_map(d: Duration) {
 
 #[inline]
 pub fn record_esrap_client_plain(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -504,8 +500,6 @@ pub fn record_esrap_client_plain(d: Duration) {
 
 #[inline]
 pub fn record_esrap_server(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -517,8 +511,6 @@ pub fn record_esrap_server(d: Duration) {
 
 #[inline]
 pub fn record_esrap_pipe(print: Duration, reparse: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -530,8 +522,6 @@ pub fn record_esrap_pipe(print: Duration, reparse: Duration) {
 
 #[inline]
 pub fn record_esrap_normalize(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -571,8 +561,6 @@ pub fn take_esrap_breakdown() -> EsrapBreakdown {
 
 #[inline]
 pub fn record_visit_program(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -581,8 +569,6 @@ pub fn record_visit_program(d: Duration) {
 
 #[inline]
 pub fn record_script_text(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -592,8 +578,6 @@ pub fn record_script_text(d: Duration) {
 
 #[inline]
 pub fn record_parent_site(is_pub: bool) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -639,8 +623,6 @@ impl ParentScope {
 
 impl Drop for ParentScope {
     fn drop(&mut self) {
-        // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-        // the measured difference is the timers plus their recorders, not a subset.
         if !timers_enabled() {
             return;
         }
@@ -650,8 +632,6 @@ impl Drop for ParentScope {
 
 impl Drop for EntryGuard {
     fn drop(&mut self) {
-        // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-        // the measured difference is the timers plus their recorders, not a subset.
         if !timers_enabled() {
             return;
         }
@@ -663,8 +643,6 @@ impl Drop for EntryGuard {
 
 #[inline]
 pub fn record_st_entry() {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -673,8 +651,6 @@ pub fn record_st_entry() {
 
 #[inline]
 pub fn record_template_fragment(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -683,8 +659,6 @@ pub fn record_template_fragment(d: Duration) {
 
 #[inline]
 pub fn record_assembly_after_fragment(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -693,8 +667,6 @@ pub fn record_assembly_after_fragment(d: Duration) {
 
 #[inline]
 pub fn record_css_render(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -703,8 +675,6 @@ pub fn record_css_render(d: Duration) {
 
 #[inline]
 pub fn record_codegen(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -717,8 +687,6 @@ pub struct ProcessAccumulatedGuard(pub TimerStart);
 
 impl Drop for ProcessAccumulatedGuard {
     fn drop(&mut self) {
-        // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-        // the measured difference is the timers plus their recorders, not a subset.
         if !timers_enabled() {
             return;
         }
@@ -729,8 +697,6 @@ impl Drop for ProcessAccumulatedGuard {
 
 #[inline]
 pub fn record_st_runes(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -742,8 +708,6 @@ pub struct ReactiveStmtGuard(pub TimerStart);
 
 impl Drop for ReactiveStmtGuard {
     fn drop(&mut self) {
-        // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-        // the measured difference is the timers plus their recorders, not a subset.
         if !timers_enabled() {
             return;
         }
@@ -754,8 +718,6 @@ impl Drop for ReactiveStmtGuard {
 
 #[inline]
 pub fn record_st_prenormalize(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -765,8 +727,6 @@ pub fn record_st_prenormalize(d: Duration) {
 
 #[inline]
 pub fn record_st_collect_vars(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -775,8 +735,6 @@ pub fn record_st_collect_vars(d: Duration) {
 
 #[inline]
 pub fn record_st_line_loop(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -785,8 +743,6 @@ pub fn record_st_line_loop(d: Duration) {
 
 #[inline]
 pub fn record_st_ast_transforms(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -795,8 +751,6 @@ pub fn record_st_ast_transforms(d: Duration) {
 
 #[inline]
 pub fn record_st_post_passes(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -828,8 +782,6 @@ pub fn take_script_text_breakdown() -> ScriptTextBreakdown {
 
 #[inline]
 pub fn record_pipeline_parse(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -838,8 +790,6 @@ pub fn record_pipeline_parse(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_line_offsets(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -856,8 +806,6 @@ pub fn record_pipeline_resolve_lazy(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_ensure_script(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -866,8 +814,6 @@ pub fn record_pipeline_ensure_script(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_ts_removal(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -876,8 +822,6 @@ pub fn record_pipeline_ts_removal(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_options_merge(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -886,8 +830,6 @@ pub fn record_pipeline_options_merge(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_analyze(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -896,8 +838,6 @@ pub fn record_pipeline_analyze(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_transform(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
@@ -916,8 +856,6 @@ pub fn record_pipeline_finalize(d: Duration) {
 
 #[inline]
 pub fn record_pipeline_total(d: Duration) {
-    // Arm A of the instrumentation-cost A/B: the whole body folds away, so
-    // the measured difference is the timers plus their recorders, not a subset.
     if !timers_enabled() {
         return;
     }
