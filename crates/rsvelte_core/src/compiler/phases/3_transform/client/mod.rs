@@ -6287,6 +6287,8 @@ fn transform_instance_script_for_visitors(
                 used_retained = true;
                 #[cfg(test)]
                 AST_STATE_RETAINED_USES.with(|count| count.set(count.get() + 1));
+                #[cfg(feature = "measure-ast-state")]
+                crate::measure_ast_state::record_retained_use();
                 transformed.map(|transformed| {
                     let mut output =
                         String::with_capacity(prefix.len() + transformed.len() + suffix.len());
@@ -6303,6 +6305,8 @@ fn transform_instance_script_for_visitors(
                 {
                     AST_STATE_REPARSES.with(|count| count.set(count.get() + 1));
                 }
+                #[cfg(feature = "measure-ast-state")]
+                crate::measure_ast_state::record_reparse();
                 ast_state_transform::transform_state_vars_ast(&result, &ast_config)
             };
             if let Some(ast_result) = ast_result {
