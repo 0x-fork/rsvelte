@@ -490,10 +490,21 @@ thread_local! {
         const { Cell::new([0; ANALYZE_BUCKETS]) };
     static AN_VISIT_JS: Cell<[u64; ANALYZE_BUCKETS]> = const { Cell::new([0; ANALYZE_BUCKETS]) };
     static AN_SOURCE_BYTES: Cell<u64> = const { Cell::new(0) };
+    // Analyze-side oxc parses, per bucket. Not behind the node-count feature:
+    // there are three call sites and each runs about once per script, so this
+    // is nothing like the hot path `get_js_children` is on.
+    static AN_PARSE_CALLS: Cell<[u64; ANALYZE_BUCKETS]> =
+        const { Cell::new([0; ANALYZE_BUCKETS]) };
+    static AN_PARSE_BYTES: Cell<[u64; ANALYZE_BUCKETS]> =
+        const { Cell::new([0; ANALYZE_BUCKETS]) };
 
     // Inside `detect_store_subscriptions`.
     static SS_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
     static SS_BLANK_TS: Cell<(Duration, u64, u64)> = const { Cell::new((Duration::ZERO, 0, 0)) };
+    // Which of `blank_typescript`'s three exits was taken: parse failed, parse
+    // succeeded with nothing to blank, or blanked. The first two still paid for
+    // the parse, so the exit mix is what says whether the parse is wasted.
+    static SS_BLANK_EXITS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
     static SS_LEX_SCAN: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static SS_FRAGMENT: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
 
@@ -1064,6 +1075,12 @@ pub struct StoreSubsBreakdown {
     /// `collect_dollar_refs_from_fragment`, the template recursion.
     pub fragment: Duration,
     pub fragment_calls: u64,
+    /// `blank_typescript`'s three exits. All of them paid for the oxc TS parse
+    /// first, so `diag_exits + empty_exits` is the number of parses whose only
+    /// product was a `source.to_string()` copy.
+    pub blank_diag_exits: u64,
+    pub blank_empty_exits: u64,
+    pub blank_blanked_exits: u64,
 }
 
 /// Restores the enclosing bucket on drop, so an early return through `?` cannot
@@ -1127,6 +1144,49 @@ pub fn count_analyze_visit_js(n: u64) {
     let _ = n;
 }
 
+/// One analyze-side oxc parse of `bytes` bytes, charged to the running bucket.
+///
+/// The reparse instrumentation does not see these: all fifteen `record_reparse`
+/// and `record_direct_parse` sites are under `3_transform/`, and there are none
+/// under `2_analyze/`. Any earlier statement about "the re-parse time share"
+/// was therefore scoped to Phase 3 and did not include this phase.
+#[inline]
+pub fn record_analyze_parse(bytes: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    if let Some(bucket) = AN_CURRENT.with(Cell::get) {
+        AN_PARSE_CALLS.with(|c| {
+            let mut v = c.get();
+            v[bucket as usize] += 1;
+            c.set(v);
+        });
+        AN_PARSE_BYTES.with(|c| {
+            let mut v = c.get();
+            v[bucket as usize] += bytes;
+            c.set(v);
+        });
+    }
+}
+
+/// Which exit `blank_typescript` took. All three paid for the parse first.
+#[inline]
+pub fn record_blank_ts_exit(parse_failed: bool, no_removals: bool) {
+    if !timers_enabled() {
+        return;
+    }
+    SS_BLANK_EXITS.with(|c| {
+        let (diag, empty, blanked) = c.get();
+        if parse_failed {
+            c.set((diag + 1, empty, blanked));
+        } else if no_removals {
+            c.set((diag, empty + 1, blanked));
+        } else {
+            c.set((diag, empty, blanked + 1));
+        }
+    });
+}
+
 /// One `detect_store_subscriptions` call; `skipped` if the `$` gate fired.
 #[inline]
 pub fn record_store_subs_call(skipped: bool) {
@@ -1182,7 +1242,12 @@ pub fn take_store_subs_breakdown() -> StoreSubsBreakdown {
         SS_BLANK_TS.with(|c| c.replace((Duration::ZERO, 0, 0)));
     let (lex_scan, lex_scan_calls) = SS_LEX_SCAN.with(|c| c.replace((Duration::ZERO, 0)));
     let (fragment, fragment_calls) = SS_FRAGMENT.with(|c| c.replace((Duration::ZERO, 0)));
+    let (blank_diag_exits, blank_empty_exits, blank_blanked_exits) =
+        SS_BLANK_EXITS.with(|c| c.replace((0, 0, 0)));
     StoreSubsBreakdown {
+        blank_diag_exits,
+        blank_empty_exits,
+        blank_blanked_exits,
         calls,
         gate_skipped,
         blank_ts,
@@ -1218,6 +1283,11 @@ pub struct AnalyzeVisits {
     pub js: [u64; ANALYZE_BUCKETS],
     pub source_bytes: u64,
     pub js_counted: bool,
+    /// Analyze-side oxc parses per bucket, and the bytes handed to them. Live
+    /// whenever the timers are on -- unlike the visit arrays, these do not need
+    /// the node-count feature.
+    pub parse_calls: [u64; ANALYZE_BUCKETS],
+    pub parse_bytes: [u64; ANALYZE_BUCKETS],
 }
 
 pub fn take_analyze_visits() -> AnalyzeVisits {
@@ -1226,6 +1296,8 @@ pub fn take_analyze_visits() -> AnalyzeVisits {
         js: AN_VISIT_JS.with(|c| c.replace([0; ANALYZE_BUCKETS])),
         source_bytes: AN_SOURCE_BYTES.with(|c| c.replace(0)),
         js_counted: cfg!(feature = "measure-analyze-nodes"),
+        parse_calls: AN_PARSE_CALLS.with(|c| c.replace([0; ANALYZE_BUCKETS])),
+        parse_bytes: AN_PARSE_BYTES.with(|c| c.replace([0; ANALYZE_BUCKETS])),
     }
 }
 

@@ -649,6 +649,9 @@ impl<'a> ScopeBuilder<'a> {
             let mut alloc = cell.borrow_mut();
             alloc.reset();
             let ret = OxcParser::new(&alloc, content, source_type).parse();
+            crate::compiler::phases::phase3_transform::profile::record_analyze_parse(
+                content.len() as u64
+            );
             if ret.diagnostics.is_empty() {
                 self.process_program(&ret.program);
             }

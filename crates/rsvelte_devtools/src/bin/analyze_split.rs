@@ -247,8 +247,51 @@ fn main() {
         "{:<22}{ss_total:>12.1}{:>9.1}%{:>10}",
         "store_subs total", 100.0, ""
     );
+    // `blank_typescript` is an oxc TypeScript parse plus a full AST visit; the
+    // byte blanking is only its last branch, and both early exits have already
+    // paid for the parse. The exit mix is what says how often that parse bought
+    // nothing but a `source.to_string()`.
     println!(
-        "blanked bytes {} ({:.0} per blanking call, source is {:.0} per file)",
+        "blank_typescript exits: parse-failed {} / nothing-to-blank {} / blanked {}",
+        s.blank_diag_exits, s.blank_empty_exits, s.blank_blanked_exits
+    );
+    // Analyze parses the same scripts again and no reparse counter sees it: all
+    // fifteen `record_reparse` / `record_direct_parse` sites are under
+    // `3_transform/`, none under `2_analyze/`.
+    let parses: u64 = v.parse_calls.iter().sum();
+    let parsed_bytes: u64 = v.parse_bytes.iter().sum();
+    println!(
+        "analyze-side oxc parses {} ({:.2}/file, {} bytes = {:.0}% of source re-read)",
+        parses,
+        parses as f64 / files,
+        parsed_bytes,
+        if bytes == 0.0 {
+            f64::NAN
+        } else {
+            parsed_bytes as f64 / bytes * 100.0
+        }
+    );
+    for (i, name) in [
+        "extract_scripts",
+        "create_scopes",
+        "store_subs",
+        "template",
+        "css_analyze",
+        "css_scope",
+        "residual",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if v.parse_calls[i] != 0 {
+            println!(
+                "  {name:<18}parses {:>6}   parsedBytes {:>10}",
+                v.parse_calls[i], v.parse_bytes[i]
+            );
+        }
+    }
+    println!(
+        "bytes handed to blank_typescript {} ({:.0} per call, source is {:.0} per file)",
         s.blanked_bytes,
         if s.blank_ts_calls == 0 {
             f64::NAN

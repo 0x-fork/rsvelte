@@ -574,6 +574,7 @@ pub fn strip_typescript(source: &str) -> String {
     let source_type = SourceType::ts();
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
+    crate::compiler::phases::phase3_transform::profile::record_analyze_parse(source.len() as u64);
 
     if !result.diagnostics.is_empty() {
         // If parsing fails, return original source and let downstream handle errors
@@ -823,12 +824,22 @@ pub fn blank_typescript(source: &str) -> String {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
+    use crate::compiler::phases::phase3_transform::profile;
+
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
+    // Another full TypeScript parse of a script the pipeline has already parsed
+    // (`ensure_script`) and already stripped TypeScript from
+    // (`record_pipeline_ts_removal`). None of the reparse counters see it: all
+    // fifteen live under `3_transform/`, none under `2_analyze/`.
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
+    profile::record_analyze_parse(source.len() as u64);
 
+    // Both early exits below have already paid for that parse, so the exit mix
+    // is what says how often it bought nothing but a copy.
     if !result.diagnostics.is_empty() {
+        profile::record_blank_ts_exit(true, false);
         return source.to_string();
     }
 
@@ -836,8 +847,10 @@ pub fn blank_typescript(source: &str) -> String {
     collect_ts_removals_from_program(&result.program, source, &mut removals);
 
     if removals.is_empty() {
+        profile::record_blank_ts_exit(false, true);
         return source.to_string();
     }
+    profile::record_blank_ts_exit(false, false);
 
     let mut out = source.as_bytes().to_vec();
     for (start, end) in removals {
