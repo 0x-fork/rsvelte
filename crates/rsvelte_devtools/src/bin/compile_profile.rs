@@ -122,6 +122,11 @@ fn main() {
             // that no clock enters, so it can be read on a loaded machine.
             reparse_bytes: r.bytes + r.direct_bytes,
             reparse_calls: r.calls + r.direct_calls,
+            reparse_parse: r.parse,
+            direct_parse: r.direct_parse,
+            visit_program: b.visit_program,
+            assembly: b.assembly_after_fragment,
+            css_render: b.css_render,
         });
         rows.push((content.len(), p.transform, r));
     }
@@ -348,12 +353,12 @@ fn main() {
 fn dump_rows(rows: &[ScalingRow], path: &str) {
     let ns = |d: std::time::Duration| d.as_nanos();
     let mut out = String::from(
-        "file_bytes,script_bytes,runes,ensure_script,analyze,script_text,template,codegen,transform,reparse_bytes,reparse_calls\n",
+        "file_bytes,script_bytes,runes,ensure_script,analyze,script_text,template,codegen,transform,reparse_bytes,reparse_calls,reparse_parse,direct_parse,visit_program,assembly,css_render\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.file_bytes,
             r.script_bytes,
             r.runes,
@@ -364,7 +369,12 @@ fn dump_rows(rows: &[ScalingRow], path: &str) {
             ns(r.codegen),
             ns(r.transform),
             r.reparse_bytes,
-            r.reparse_calls
+            r.reparse_calls,
+            ns(r.reparse_parse),
+            ns(r.direct_parse),
+            ns(r.visit_program),
+            ns(r.assembly),
+            ns(r.css_render)
         );
     }
     match std::fs::write(path, out) {
@@ -385,6 +395,19 @@ struct ScalingRow {
     transform: std::time::Duration,
     reparse_bytes: u64,
     reparse_calls: u64,
+    /// Time inside `Parser::parse` on the re-parse path, split by which entry
+    /// reached the parser. The visitor half is deliberately absent: it means
+    /// different things on the two halves of the choke point -- the mutable one
+    /// prints inside it and the immutable one does not -- so a sum of the two
+    /// has no single interpretation.
+    reparse_parse: std::time::Duration,
+    direct_parse: std::time::Duration,
+    /// The three Phase 3 buckets the rows did not already carry, so the
+    /// residual `transform - Σ(sub-buckets)` can be read per size bin instead
+    /// of only as one corpus-wide figure.
+    visit_program: std::time::Duration,
+    assembly: std::time::Duration,
+    css_render: std::time::Duration,
 }
 
 /// Script size and rune count for one file.
