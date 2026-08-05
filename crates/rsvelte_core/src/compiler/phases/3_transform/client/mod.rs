@@ -4423,15 +4423,26 @@ fn instance_has_top_level_multi_declarator(ast: &Root, script: &str) -> bool {
 /// without being counted: the name is the only way to call the finder here.
 #[inline]
 fn find_counted(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    super::profile::count_scan(haystack.len());
-    memmem::find(haystack, needle)
+    let found = memmem::find(haystack, needle);
+    // Charged after the search, not before: a hit stops at the match, so
+    // charging the whole haystack over-counts, and the over-count grows with
+    // script size -- which is exactly the axis the band table reads.
+    super::profile::count_scan(match found {
+        Some(pos) => pos + needle.len(),
+        None => haystack.len(),
+    });
+    found
 }
 
 /// `str::contains` for the script text, charged to the same counter.
 #[inline]
 fn contains_counted(haystack: &str, needle: &str) -> bool {
-    super::profile::count_scan(haystack.len());
-    haystack.contains(needle)
+    let found = memmem::find(haystack.as_bytes(), needle.as_bytes());
+    super::profile::count_scan(match found {
+        Some(pos) => pos + needle.len(),
+        None => haystack.len(),
+    });
+    found.is_some()
 }
 
 /// `str::lines` over the script text, charged once for the whole walk.
@@ -6843,8 +6854,20 @@ fn index_shadowed_decls(
 
 /// Find the enclosing function body (from `{` to matching `}`) that contains `pos`.
 fn find_enclosing_function_body(script: &str, pos: usize) -> Option<(usize, usize)> {
-    // Backward then forward brace walk; both are bounded by the script length.
-    super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_ENCLOSING, script.len());
+    // Wrapped so the charge cannot be skipped: the body returns early through
+    // `?` on both walks, and a recorder placed after them would miss every call
+    // that fails to find an enclosing function -- which is most of them.
+    let mut walked = 0usize;
+    let out = find_enclosing_function_body_inner(script, pos, &mut walked);
+    super::profile::count_scan_site(super::profile::SCAN_SITE_SHADOW_ENCLOSING, walked);
+    out
+}
+
+fn find_enclosing_function_body_inner(
+    script: &str,
+    pos: usize,
+    walked: &mut usize,
+) -> Option<(usize, usize)> {
     let bytes = script.as_bytes();
 
     // Scan backwards from pos to find the opening `{` of the enclosing function
@@ -6865,6 +6888,7 @@ fn find_enclosing_function_body(script: &str, pos: usize) -> Option<(usize, usiz
             _ => {}
         }
     }
+    *walked += pos - i;
     let func_start = func_open?;
 
     // Find the matching closing `}` by scanning forward
@@ -6883,6 +6907,7 @@ fn find_enclosing_function_body(script: &str, pos: usize) -> Option<(usize, usiz
             _ => {}
         }
     }
+    *walked += func_end.unwrap_or(script.len()) - func_start;
     Some((func_start, func_end?))
 }
 

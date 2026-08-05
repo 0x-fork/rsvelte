@@ -94,6 +94,7 @@ fn main() {
     // its total is not. The count is the denominator that says whether that
     // matters here.
     let mut failed = 0usize;
+    let mut scan_total = profile::ScanCounts::default();
     for (_, content) in &files {
         if rsvelte_core::compile(content, compile_opts.clone()).is_err() {
             failed += 1;
@@ -128,6 +129,14 @@ fn main() {
         let ast = parse(content, &arena, parse_opts).ok();
         let (script_bytes, runes) = script_shape(ast.as_ref(), content);
         let r = profile::take_reparse_breakdown();
+        let sc = profile::take_scan_counts();
+        scan_total.bytes += sc.bytes;
+        scan_total.calls += sc.calls;
+        scan_total.script_bytes += sc.script_bytes;
+        for i in 0..profile::SCAN_SITE_COUNT {
+            scan_total.site_bytes[i] += sc.site_bytes[i];
+            scan_total.site_calls[i] += sc.site_calls[i];
+        }
         scaling.push(ScalingRow {
             file_bytes: content.len(),
             script_bytes,
@@ -147,6 +156,9 @@ fn main() {
             visit_program: b.visit_program,
             assembly: b.assembly_after_fragment,
             css_render: b.css_render,
+            scan_bytes: sc.bytes,
+            scan_calls: sc.calls,
+            scan_staged_bytes: sc.site_bytes[profile::SCAN_SITE_STAGED],
         });
         rows.push((content.len(), p.transform, r));
     }
@@ -163,7 +175,7 @@ fn main() {
     let tf = profile::take_template_fragment_breakdown();
     let asm = profile::take_assembly_breakdown();
     let rs = profile::take_residual_breakdown();
-    let scan = profile::take_scan_counts();
+    let scan = scan_total;
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -361,6 +373,7 @@ fn main() {
     {
         dump_rows(&scaling, &path);
     }
+    report_scan_bands(&scaling);
     report_scaling(&scaling, "script bytes", |r| r.script_bytes as f64);
     report_scaling(&scaling, "rune count", |r| r.runes as f64);
     let oracle = profile::take_index_oracle();
@@ -718,6 +731,12 @@ struct ScalingRow {
     visit_program: std::time::Duration,
     assembly: std::time::Duration,
     css_render: std::time::Duration,
+    /// Scan volume for this file alone. Carried per row because the question
+    /// "does the pass count grow with script size" cannot be answered from a
+    /// corpus-wide total, and no clock enters these three.
+    scan_bytes: u64,
+    scan_calls: u64,
+    scan_staged_bytes: u64,
 }
 
 /// Script size and rune count for one file.
@@ -789,6 +808,57 @@ fn log_slope(points: &[(f64, f64)]) -> (f64, usize) {
     let num: f64 = used.iter().map(|&(x, y)| (x - mx) * (y - my)).sum();
     let den: f64 = used.iter().map(|&(x, _)| (x - mx) * (x - mx)).sum();
     (num / den, n)
+}
+
+/// Effective pass count per script-size band.
+///
+/// The band edges are the ones the wall-clock ns/B table already uses, so the
+/// two can be read against each other: a flat ns/B and a growing pass count
+/// cannot both be right. `impl ns/B` divides the measured 60 ns/B by the pass
+/// count, which says what one pass would have to cost -- a number that can be
+/// checked against what the code in that pass actually does.
+fn report_scan_bands(rows: &[ScalingRow]) {
+    const EDGES: [(usize, usize); 6] = [
+        (0, 200),
+        (200, 500),
+        (500, 1000),
+        (1000, 2000),
+        (2000, 5000),
+        (5000, usize::MAX),
+    ];
+    println!("\n  === scan volume by script size (deterministic) ===");
+    println!("    band          n   script B    scan B   passes  staged  calls/f  impl ns/B");
+    for (lo, hi) in EDGES {
+        let band: Vec<&ScalingRow> = rows
+            .iter()
+            .filter(|r| r.script_bytes >= lo && r.script_bytes < hi && r.script_bytes > 0)
+            .collect();
+        if band.is_empty() {
+            continue;
+        }
+        let script: u64 = band.iter().map(|r| r.script_bytes as u64).sum();
+        let scan: u64 = band.iter().map(|r| r.scan_bytes).sum();
+        let staged: u64 = band.iter().map(|r| r.scan_staged_bytes).sum();
+        let passes = scan as f64 / script as f64;
+        // Wall clock for the same band, so the two halves of
+        // `time = passes x unit price` are printed side by side.
+        let st: f64 = band.iter().map(|r| r.script_text.as_nanos() as f64).sum();
+        let ns_per_byte = st / script as f64;
+        let calls: u64 = band.iter().map(|r| r.scan_calls).sum();
+        println!(
+            "    {:>5}-{:<6} {:>5} {:>10} {:>9} {:>8.2} {:>7.2} {:>8.1} {:>10.2}",
+            lo,
+            if hi == usize::MAX { 0 } else { hi },
+            band.len(),
+            script,
+            scan,
+            passes,
+            staged as f64 / script as f64,
+            calls as f64 / band.len() as f64,
+            if passes > 0.0 { ns_per_byte / passes } else { 0.0 }
+        );
+    }
+    println!("    (last column = measured ns/B for this band / effective passes = what one pass costs)");
 }
 
 /// Bucket shares and scaling exponents against one predictor.
