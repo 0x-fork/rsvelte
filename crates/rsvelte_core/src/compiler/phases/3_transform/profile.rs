@@ -521,6 +521,13 @@ thread_local! {
     static AN_VISIT_SCRIPTS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_BINDING_FIXUPS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_FINALIZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_FINALIZE_FACTS: Cell<FinalizeBreakdown> =
+        const { Cell::new(FinalizeBreakdown {
+            calls: 0,
+            names_collected: 0,
+            names_surviving: 0,
+            name_deconflicted: 0,
+        }) };
     static AN_FEATURE_FACTS: Cell<FeatureDetectBreakdown> =
         const { Cell::new(FeatureDetectBreakdown {
             calls: 0,
@@ -1102,6 +1109,26 @@ pub fn take_feature_detect_breakdown() -> FeatureDetectBreakdown {
     AN_FEATURE_FACTS.with(|c| c.replace(FeatureDetectBreakdown::default()))
 }
 
+/// One compile's worth of `Finalize` facts. Deterministic, like the rest.
+pub fn record_finalize(collected: u64, surviving: u64, deconflicted: bool) {
+    if !timers_enabled() {
+        return;
+    }
+    AN_FINALIZE_FACTS.with(|c| {
+        let mut b = c.get();
+        b.calls += 1;
+        b.names_collected += collected;
+        b.names_surviving += surviving;
+        b.name_deconflicted += u64::from(deconflicted);
+        c.set(b);
+    });
+}
+
+/// The `Finalize` facts, and clear them.
+pub fn take_finalize_breakdown() -> FinalizeBreakdown {
+    AN_FINALIZE_FACTS.with(|c| c.replace(FinalizeBreakdown::default()))
+}
+
 /// One template node dispatched by `ScopeBuilder::visit_node`.
 ///
 /// See [`AnalyzeBreakdown::create_scopes_nodes`] for what this does and does
@@ -1183,6 +1210,31 @@ pub struct FeatureDetectBreakdown {
     pub fragment_walks: u64,
     pub fragment_walks_await_only: u64,
     pub fragment_walks_wasted: u64,
+}
+
+/// Inside the `Finalize` span, whose script walk collects every identifier name
+/// in the instance and module scripts and then discards the ones the scope
+/// builder already knows about.
+///
+/// Unlike `FeatureDetect` there is no gate to find here: the survivors go into
+/// `ScopeRoot::conflicts`, which Phase 3 clones and deconflicts every generated
+/// name against, so the output is live for every component. What is countable is
+/// how much of the walk's product survives -- a walk that collects many names to
+/// keep few is a candidate for being folded into the scope builder's walk, which
+/// already visits the same scripts, rather than for being skipped.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct FinalizeBreakdown {
+    pub calls: u64,
+    /// Distinct names the script and template walks collected, before the
+    /// already-declared ones are filtered out.
+    pub names_collected: u64,
+    /// The ones that survived, i.e. unbound references that reach
+    /// `ScopeRoot::conflicts`.
+    pub names_surviving: u64,
+    /// Compiles where the component name actually had to be suffixed. The whole
+    /// deconfliction exists for this; if it is near zero the collection is
+    /// feeding `conflicts` and nothing else.
+    pub name_deconflicted: u64,
 }
 
 /// The facts one compile presents to the `FeatureDetect` counters.

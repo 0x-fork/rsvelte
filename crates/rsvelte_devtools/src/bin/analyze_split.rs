@@ -111,6 +111,7 @@ fn main() {
     // call, so this asymmetry is local to this binary.
     let _ = profile::take_store_subs_breakdown();
     let _ = profile::take_feature_detect_breakdown();
+    let _ = profile::take_finalize_breakdown();
     let _ = profile::take_analyze_breakdown();
     let _ = profile::take_analyze_visits();
     let _ = profile::take_pipeline_breakdown();
@@ -131,6 +132,7 @@ fn main() {
     // below turns into a visible failure rather than a plausible share table.
     let s = profile::take_store_subs_breakdown();
     let fd = profile::take_feature_detect_breakdown();
+    let fin = profile::take_finalize_breakdown();
     let a = profile::take_analyze_breakdown();
     let v = profile::take_analyze_visits();
     let p = profile::take_pipeline_breakdown();
@@ -283,6 +285,31 @@ fn main() {
             fd_pct(wasted, ran)
         );
     }
+
+    // No gate to report here: `ScopeRoot::conflicts` is consumed by Phase 3 for
+    // every component, so this walk's output is always live. What the pair says
+    // is how much of the product survives the filter -- a walk that collects
+    // many to keep few is a candidate for being folded into the scope builder's
+    // walk over the same scripts, not for being skipped.
+    println!(
+        "\nfinalize: {} compiles, names collected {} ({:.1}/file), surviving {} ({:.1}/file, {:.2}% kept), component renamed {} ({:.2}%)",
+        fin.calls,
+        fin.names_collected,
+        fin.names_collected as f64 / files,
+        fin.names_surviving,
+        fin.names_surviving as f64 / files,
+        if fin.names_collected == 0 {
+            f64::NAN
+        } else {
+            fin.names_surviving as f64 / fin.names_collected as f64 * 100.0
+        },
+        fin.name_deconflicted,
+        if fin.calls == 0 {
+            f64::NAN
+        } else {
+            fin.name_deconflicted as f64 / fin.calls as f64 * 100.0
+        },
+    );
 
     println!(
         "\nstore_subs: {} calls, gate skipped {} ({:.2}% of calls)",

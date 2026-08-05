@@ -961,6 +961,7 @@ pub(crate) fn analyze_prepared_component_with_retained(
         // directives and block heads). An unbound one (e.g. `{progress.current}`
         // with no `let progress`) is a global and must enter `root.conflicts`.
         collect_template_reference_names(&ast.fragment.nodes, &mut global_names);
+        let names_collected = global_names.len() as u64;
         // Filter to only those NOT already declared (true globals/unbound).
         global_names.retain(|n| !used_names.contains(n.as_str()));
 
@@ -981,6 +982,10 @@ pub(crate) fn analyze_prepared_component_with_retained(
             name = format!("{}_{}", base, counter);
             counter += 1;
         }
+        // Deterministic, one call per compile. `names_collected` is read before
+        // the retain and `global_names.len()` after it, so the pair says how
+        // much of the walk's product the filter keeps.
+        profile::record_finalize(names_collected, global_names.len() as u64, name != base);
         analysis.name = name;
     }
 
