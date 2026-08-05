@@ -334,6 +334,7 @@ fn main() {
         pipeline.compiles
     );
     println!();
+    report_resolved();
     println!(
         "Per-file average:    {:.2}µs",
         total.as_secs_f64() * 1_000_000.0 / files.len() as f64
@@ -342,6 +343,51 @@ fn main() {
         "Throughput:          {:.1} MB/s",
         total_bytes as f64 / total.as_secs_f64() / 1_000_000.0
     );
+}
+
+/// Which arm of the rewrite driver answered, per pass.
+///
+/// `rescued` is the load-bearing column: those are the fragments the in-place
+/// path declined and the text path then rewrote, so it is the count that says
+/// whether deleting the text path would lose work. `neither` is the ordinary
+/// case and carries no verdict -- most fragments have nothing for a given pass
+/// to do -- and `text-pref` should be zero unless `RSVELTE_AST_SPLICE` is set,
+/// which makes it the positive control for the whole table.
+fn report_resolved() {
+    let rows = rsvelte_core::ast_rewrite_resolved_counts();
+    if rows.is_empty() {
+        println!("resolve arms: no rows (the counters need the phase timers on)");
+        return;
+    }
+    let (mut ip, mut resc, mut neither, mut pref) = (0u64, 0u64, 0u64, 0u64);
+    println!("resolve arms by pass");
+    println!(
+        "  {:<34} {:>9} {:>9} {:>10} {:>10}",
+        "pass", "in-place", "rescued", "neither", "text-pref"
+    );
+    let mut rows = rows;
+    rows.sort_by_key(|(_, c)| std::cmp::Reverse(u64::from(c[1])));
+    for (pass, c) in &rows {
+        ip += u64::from(c[0]);
+        resc += u64::from(c[1]);
+        neither += u64::from(c[2]);
+        pref += u64::from(c[3]);
+        println!(
+            "  {:<34} {:>9} {:>9} {:>10} {:>10}",
+            pass, c[0], c[1], c[2], c[3]
+        );
+    }
+    println!(
+        "  {:<34} {:>9} {:>9} {:>10} {:>10}",
+        "TOTAL", ip, resc, neither, pref
+    );
+    let decided = ip + resc;
+    if decided > 0 {
+        println!(
+            "  text path rescued {:.4}% of the rewrites that happened ({resc} of {decided})",
+            resc as f64 / decided as f64 * 100.0
+        );
+    }
 }
 
 /// Writes the per-file rows the scaling table is aggregated from.

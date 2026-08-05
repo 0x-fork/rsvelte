@@ -777,9 +777,79 @@ pub mod dual_run {
             };
         }
         if !prefer_in_place() {
+            count_resolve(pass, Resolved::TextPreferred);
             return spliced();
         }
-        in_place().or_else(spliced)
+        // Spelled out rather than `in_place().or_else(spliced)` so the fallback
+        // can be split in two. Both halves return `None` for "nothing to
+        // rewrite" as well as for "could not do it", so a bare count of in-place
+        // `None`s cannot say whether the text path is load-bearing. What can say
+        // it is whether the fallback then produced something: that is the case,
+        // and the only case, where deleting the text path would lose a rewrite.
+        // The extra call costs nothing -- `or_else` made it too.
+        if let Some(out) = in_place() {
+            count_resolve(pass, Resolved::InPlace);
+            return Some(out);
+        }
+        let out = spliced();
+        count_resolve(
+            pass,
+            if out.is_some() {
+                Resolved::TextRescued
+            } else {
+                Resolved::NeitherRewrote
+            },
+        );
+        out
+    }
+
+    /// Which arm of [`resolve`] produced the answer.
+    #[derive(Clone, Copy)]
+    pub enum Resolved {
+        /// The in-place path rewrote the fragment.
+        InPlace,
+        /// In-place declined and the text path rewrote it instead. **This is
+        /// the count that decides whether the text path can be deleted.**
+        TextRescued,
+        /// Neither rewrote it, which for these passes is the ordinary case:
+        /// most fragments have nothing for a given pass to do.
+        NeitherRewrote,
+        /// `RSVELTE_AST_SPLICE` sent the work to the text path. Zero in a
+        /// shipped run, so a non-zero value here means the run was configured,
+        /// not that the in-place path failed.
+        TextPreferred,
+    }
+
+    thread_local! {
+        static RESOLVED: StdRefCell<Vec<(&'static str, [u32; 4])>> =
+            const { StdRefCell::new(Vec::new()) };
+    }
+
+    /// Gated on the phase timers rather than on [`enabled`], because the
+    /// question is what the shipped configuration does and the harness answers
+    /// a different one: under the harness both paths run by construction.
+    #[inline]
+    fn count_resolve(pass: &'static str, arm: Resolved) {
+        if !super::super::super::profile::timers_enabled() {
+            return;
+        }
+        let slot = arm as usize;
+        RESOLVED.with(|r| {
+            let mut r = r.borrow_mut();
+            match r.iter_mut().find(|(name, _)| *name == pass) {
+                Some(entry) => entry.1[slot] += 1,
+                None => {
+                    let mut fresh = [0; 4];
+                    fresh[slot] += 1;
+                    r.push((pass, fresh));
+                }
+            }
+        });
+    }
+
+    /// `(pass, [in-place, text-rescued, neither, text-preferred])`, cleared.
+    pub fn take_resolved() -> Vec<(&'static str, [u32; 4])> {
+        RESOLVED.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
 
     /// Which implementation of a pass did the work being counted.

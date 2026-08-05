@@ -82,6 +82,19 @@ pub fn ast_rewrite_dual_run_work() -> Vec<(&'static str, AstRewriteWork, AstRewr
     compiler::phases::phase3_transform::shared::ast_rewrite::dual_run::work()
 }
 
+/// `(pass, [in-place, text-rescued, neither rewrote, text preferred])`, cleared.
+///
+/// Counted in the shipped configuration rather than under the equivalence
+/// harness, because the harness runs both paths by construction and so cannot
+/// say which one the compiler would have used. `text-rescued` is the column
+/// that decides whether the text path can be deleted: it counts the fragments
+/// the in-place path declined and the text path then rewrote. Requires the
+/// phase timers to be on.
+#[doc(hidden)]
+pub fn ast_rewrite_resolved_counts() -> Vec<(&'static str, [u32; 4])> {
+    compiler::phases::phase3_transform::shared::ast_rewrite::dual_run::take_resolved()
+}
+
 /// `(terminators dropped, of those the ones the gate could not check)` for the
 /// Phase-3 in-place path. A fragment that does not stand alone parses to `None`
 /// on both sides, which the gate reads as agreement, so the second number is
