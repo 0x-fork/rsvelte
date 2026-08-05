@@ -6542,6 +6542,7 @@ fn find_matching_paren_bytes(bytes: &[u8], open_pos: usize) -> Option<usize> {
 /// finds each function body containing such a declaration and applies `$.get()`, `$.set()`,
 /// `$.update()` transforms only within that scope.
 fn transform_shadowed_local_state_vars(script: &str, shadowed_vars: &[String]) -> String {
+    super::profile::record_rescan_call(4, script.len());
     let mut result = script.to_string();
     // Every top-level rune binding lands in `shadowed_vars`, so probing the
     // twelve declaration shapes with a `find` per variable ran
@@ -6551,6 +6552,7 @@ fn transform_shadowed_local_state_vars(script: &str, shadowed_vars: &[String]) -
     let mut decls = index_shadowed_decls(&result);
 
     for var in shadowed_vars {
+        super::profile::record_rescan_iter(4, result.len());
         // Shapes are probed in order and each one searches the *current*
         // `result`, so the index is refreshed as soon as a rewrite lands.
         for shape in 0..SHADOWED_DECL_SHAPE_COUNT {

@@ -309,6 +309,21 @@ fn main() {
         st.entries_outside_parent
     );
     report_reparse(&mut rows, ms(total));
+    let rescan = profile::take_rescan();
+    println!("\n  === per-variable full-text rescans ===");
+    println!(
+        "    {:<38} {:>9} {:>10} {:>12} {:>7}",
+        "site", "calls", "passes", "scanned MB", "coeff"
+    );
+    for (name, s) in profile::RESCAN_SITE_NAMES.iter().zip(rescan.iter()) {
+        println!(
+            "    {name:<38} {:>9} {:>10} {:>12.2} {:>6.2}x",
+            s.calls,
+            s.iters,
+            s.scanned as f64 / 1e6,
+            s.scanned as f64 / s.input.max(1) as f64
+        );
+    }
     report_scaling(&scaling, "script bytes", |r| r.script_bytes as f64);
     report_scaling(&scaling, "rune count", |r| r.runes as f64);
     println!(

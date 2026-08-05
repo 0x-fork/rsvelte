@@ -507,3 +507,67 @@ pub fn take_breakdown() -> Phase3Breakdown {
         codegen: CODEGEN.with(|c| c.replace(Duration::ZERO)),
     }
 }
+
+/// The per-variable full-text rescans in the script-text path.
+///
+/// Each site loops over a variable list and scans the whole current text once
+/// per variable, so its cost is `variables x text length`. The reported
+/// coefficient is scanned bytes over input bytes: 1.0 means one pass, 10.0
+/// means the text was walked ten times over.
+///
+/// `calls` is the denominator that keeps the coefficient honest. A site with a
+/// high coefficient that runs twice per corpus is not worth touching, and only
+/// the call count distinguishes that from a site that runs everywhere.
+pub const RESCAN_SITE_NAMES: [&str; 7] = [
+    "transform_prop_reads_in_expr",
+    "transform_store_assignments_client",
+    "transform_store_sub_calls",
+    "transform_store_reads_client",
+    "transform_shadowed_local_state_vars",
+    "transform_rest_prop_member_access",
+    "wrap_prop_mutation_validation",
+];
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct RescanSite {
+    pub calls: u64,
+    pub iters: u64,
+    pub scanned: u64,
+    pub input: u64,
+}
+
+thread_local! {
+    static RESCAN: Cell<[(u64, u64, u64, u64); 7]> = const { Cell::new([(0, 0, 0, 0); 7]) };
+}
+
+/// One entry into an instrumented site, with the text length it was handed.
+#[inline]
+pub fn record_rescan_call(site: usize, input_bytes: usize) {
+    RESCAN.with(|c| {
+        let mut all = c.get();
+        all[site].0 += 1;
+        all[site].3 += input_bytes as u64;
+        c.set(all);
+    });
+}
+
+/// One pass over the text inside such a site, with the length actually walked.
+#[inline]
+pub fn record_rescan_iter(site: usize, scanned_bytes: usize) {
+    RESCAN.with(|c| {
+        let mut all = c.get();
+        all[site].1 += 1;
+        all[site].2 += scanned_bytes as u64;
+        c.set(all);
+    });
+}
+
+pub fn take_rescan() -> [RescanSite; 7] {
+    let all = RESCAN.replace([(0, 0, 0, 0); 7]);
+    all.map(|(calls, iters, scanned, input)| RescanSite {
+        calls,
+        iters,
+        scanned,
+        input,
+    })
+}

@@ -93,6 +93,7 @@ fn is_arrow_param_binding(chars: &[char], var_start: usize, var_len: usize) -> b
 ///
 /// For example, `a + b` where `a` and `b` are props becomes `a() + b()`.
 pub(super) fn transform_prop_reads_in_expr(expr: &str, prop_vars: &[String]) -> String {
+    super::super::profile::record_rescan_call(0, expr.len());
     #[cfg(feature = "measure-prop-reads")]
     crate::measure_prop_reads::record_call();
     if prop_vars.is_empty() {
@@ -115,6 +116,7 @@ pub(super) fn transform_prop_reads_in_expr(expr: &str, prop_vars: &[String]) -> 
     let mut result = expr.to_string();
 
     for prop_name in prop_vars {
+        super::super::profile::record_rescan_iter(0, result.len());
         // Use word boundary matching to replace identifier references
         // But avoid replacing function calls that already have ()
         // Note: Rust's regex crate doesn't support lookahead, so we use a different approach:
@@ -2803,6 +2805,7 @@ pub(super) fn transform_props_destructuring(
 
 /// Transform rest_prop member access to $$props.
 pub(super) fn transform_rest_prop_member_access(line: &str, rest_prop_vars: &[String]) -> String {
+    super::super::profile::record_rescan_call(5, line.len());
     // AST-based fast path: handles the same identifier boundary,
     // computed-access, and direct-assignment exclusions for free.
     // Falls back to the regex text version when the AST helper
@@ -2817,6 +2820,7 @@ pub(super) fn transform_rest_prop_member_access(line: &str, rest_prop_vars: &[St
     let mut result = line.to_string();
 
     for var_name in rest_prop_vars {
+        super::super::profile::record_rescan_iter(5, result.len());
         let pattern = format!(r"\b{}\.", var_name);
         let re = match get_or_compile_regex(&pattern) {
             Some(r) => r,
@@ -2898,10 +2902,12 @@ pub(super) fn wrap_prop_mutation_validation(
     source: &str,
 ) -> String {
     let _trimmed = stmt.trim();
+    super::super::profile::record_rescan_call(6, stmt.len());
 
     let mut result = stmt.to_string();
 
     for (var_name, prop_alias) in prop_vars {
+        super::super::profile::record_rescan_iter(6, result.len());
         // First, try the runes-mode pattern: `prop().member = value` (not wrapped in prop(..., true))
         // This handles the case where transform_prop_assignments skips member mutation wrapping in runes mode.
         let runes_prefix = format!("{}().", var_name);

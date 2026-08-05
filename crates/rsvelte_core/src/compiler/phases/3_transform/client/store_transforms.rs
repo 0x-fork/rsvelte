@@ -20,6 +20,7 @@ pub(super) fn transform_store_assignments_client(
     state_vars: &[String],
     non_reactive_state_vars: &[String],
 ) -> String {
+    super::super::profile::record_rescan_call(1, line.len());
     if store_sub_vars.is_empty() {
         return line.to_string();
     }
@@ -65,6 +66,7 @@ pub(super) fn transform_store_assignments_client(
     // call `store()`, so prop-backed stores need that form rather than the bare
     // name (other binding kinds keep the bare name).
     for store_sub in store_sub_vars {
+        super::super::profile::record_rescan_iter(1, result.len());
         let store_name = store_sub[1..].to_string();
         let prop_store_names: Vec<String> = if prop_vars.contains(&store_name) {
             vec![store_name]
@@ -205,6 +207,7 @@ pub(super) fn is_function_parameter_in_statement(statement: &str, store_sub: &st
 /// It's called BEFORE `transform_store_reads_client` so that the `is_already_call` check
 /// in that function will see `$state()` and correctly skip adding another `()`.
 pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -> String {
+    super::super::profile::record_rescan_call(2, line.len());
     if store_sub_vars.is_empty() {
         return line.to_string();
     }
@@ -218,6 +221,7 @@ pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -
     let mut result = line.to_string();
 
     for store_sub in store_sub_vars {
+        super::super::profile::record_rescan_iter(2, result.len());
         // Find pattern: $name( where $name is a store sub and is followed by `(`
         // but NOT by `()` (which would be the getter call itself, already inserted).
         // Also skip when preceded by `const $name = ` (store getter declaration).
@@ -351,6 +355,7 @@ pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -
 ///
 /// This is similar to `transform_prop_reads_in_expr` but for store subscriptions.
 pub(super) fn transform_store_reads_client(line: &str, store_sub_vars: &[String]) -> String {
+    super::super::profile::record_rescan_call(3, line.len());
     if store_sub_vars.is_empty() {
         return line.to_string();
     }
@@ -364,6 +369,7 @@ pub(super) fn transform_store_reads_client(line: &str, store_sub_vars: &[String]
     let mut result = line.to_string();
 
     for store_sub in store_sub_vars {
+        super::super::profile::record_rescan_iter(3, result.len());
         // Use word boundary matching to replace identifier references
         // But avoid replacing function calls that already have ()
         let mut new_result = String::with_capacity(result.len() * 2);
