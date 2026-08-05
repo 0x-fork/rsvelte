@@ -3655,6 +3655,23 @@ fn get_literal_value_json(
                     }
                 }
 
+                // A non-literal initializer is kept as AST JSON rather than in
+                // `initial`; upstream's `scope.evaluate` recurses into the init
+                // node whatever its shape, so mirror that before giving up.
+                {
+                    use crate::compiler::phases::phase2_analyze::scope::BindingKind;
+                    if binding.initial.is_none()
+                        && !matches!(binding.kind, BindingKind::Derived)
+                        && INITIAL_EVAL_DEPTH.with(|d| d.get()) < MAX_INITIAL_EVAL_DEPTH
+                        && let Some(init_json) = binding.init_expr_json_parsed()
+                    {
+                        INITIAL_EVAL_DEPTH.with(|d| d.set(d.get() + 1));
+                        let folded = get_literal_value_json(init_json, context);
+                        INITIAL_EVAL_DEPTH.with(|d| d.set(d.get() - 1));
+                        return folded;
+                    }
+                }
+
                 // Check if we have a known initial value (stored as source string)
                 let init = binding.initial.as_ref()?;
                 // Parse simple string literals like 'world' or "world"
@@ -3799,6 +3816,20 @@ fn get_literal_value_json(
     }
 }
 
+/// Mirrors upstream `get_global_keypath`, which yields a rune keypath only when
+/// the name is unbound: in legacy mode `$state` is the store subscription of an
+/// imported `state`, not a rune.
+fn is_rune_callee(name: &str, context: &ComponentContext) -> bool {
+    context.state.analysis.runes && context.state.get_binding(name).is_none()
+}
+
+const MAX_INITIAL_EVAL_DEPTH: u8 = 8;
+
+thread_local! {
+    /// Caps mutually-referential initializers (`const a = b; const b = a;`).
+    static INITIAL_EVAL_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
 /// Format an `f64` the way JS `String(n)` would for a known constant fold:
 /// `NaN`, `Infinity`, `-Infinity`, an integer with no decimal point, or the
 /// shortest float representation. Mirrors the value upstream's `scope.evaluate`
@@ -3906,7 +3937,11 @@ fn get_literal_value_complex(
                 }
 
                 // Fix C: $state.raw(arg) — MemberExpression callee with object=$state, property=raw
-                if obj_type == "Identifier" && obj_name == "$state" && prop_name == "raw" {
+                if obj_type == "Identifier"
+                    && obj_name == "$state"
+                    && prop_name == "raw"
+                    && is_rune_callee(obj_name, context)
+                {
                     let args = obj.get("arguments").and_then(|a| a.as_array());
                     if let Some(args) = args
                         && let Some(first_arg) = args.first()
@@ -3923,7 +3958,8 @@ fn get_literal_value_complex(
             let callee_type = callee.get("type").and_then(|t| t.as_str())?;
             if callee_type == "Identifier" {
                 let rune_name = callee.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                if matches!(rune_name, "$state" | "$derived") {
+                if matches!(rune_name, "$state" | "$derived") && is_rune_callee(rune_name, context)
+                {
                     let args = obj.get("arguments").and_then(|a| a.as_array());
                     if let Some(args) = args
                         && let Some(first_arg) = args.first()
@@ -6221,7 +6257,9 @@ fn is_expression_known_json(json_value: &serde_json::Value, context: &ComponentC
                 // $state(arg) / $derived(arg)
                 if callee_type == Some("Identifier") {
                     let rune_name = callee.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    if matches!(rune_name, "$state" | "$derived") {
+                    if matches!(rune_name, "$state" | "$derived")
+                        && is_rune_callee(rune_name, context)
+                    {
                         if let Some(args) = obj.get("arguments").and_then(|a| a.as_array())
                             && let Some(first_arg) = args.first()
                         {
@@ -6244,7 +6282,10 @@ fn is_expression_known_json(json_value: &serde_json::Value, context: &ComponentC
                         .and_then(|p| p.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
-                    if obj_name == "$state" && prop_name == "raw" {
+                    if obj_name == "$state"
+                        && prop_name == "raw"
+                        && is_rune_callee(obj_name, context)
+                    {
                         if let Some(args) = obj.get("arguments").and_then(|a| a.as_array())
                             && let Some(first_arg) = args.first()
                         {
