@@ -87,6 +87,12 @@ static TIMERS_ENABLED: AtomicBool = AtomicBool::new(false);
 /// the module note comes from.
 pub fn set_timers_enabled(on: bool) {
     TIMERS_ENABLED.store(on, Ordering::Relaxed);
+    // The printer keeps its own switch, because `rsvelte_esrap` is a dependency
+    // of this crate and cannot see this flag. It is driven from here so there is
+    // one control rather than two that can disagree: a profiler that turned only
+    // this one on would read the printer's split as all zeros, and nothing in
+    // the output would distinguish that from a printer that did no work.
+    rsvelte_esrap::profile::set_enabled(on);
 }
 
 #[inline]

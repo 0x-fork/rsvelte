@@ -897,6 +897,9 @@ impl<'opt> Printer<'opt> {
     }
 
     fn print_statement(&mut self, stmt: &Statement, ctx: &mut Context) {
+        // One of the printer's two central `match`es, so a counter here
+        // covers every statement without touching the arms.
+        crate::profile::count_stmt_dispatch();
         // esrap's `_` wildcard: emit comments positioned before this node first.
         let start = stmt.span().start;
         self.flush_leading(ctx, start, self.line_of(start));
@@ -2102,6 +2105,7 @@ impl<'opt> Printer<'opt> {
     // ----- expressions ------------------------------------------------------
 
     fn print_expression(&mut self, expr: &Expression, ctx: &mut Context) {
+        crate::profile::count_expr_dispatch();
         // esrap's `_` wildcard: emit comments positioned before this node first.
         let start = expr.span().start;
         self.flush_leading(ctx, start, self.line_of(start));

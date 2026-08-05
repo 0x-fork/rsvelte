@@ -25,8 +25,15 @@ thread_local! {
 }
 
 /// An empty command buffer, reusing a parked allocation when one is available.
-pub(crate) fn take() -> Vec<Command> {
-    BUFFERS.with(|buffers| buffers.borrow_mut().pop().unwrap_or_default())
+///
+/// Returns whether the free list supplied it, so the caller can count buffers
+/// that had to be allocated instead. How many contexts a print builds is a
+/// measured number, not the "nearly every node" in this module's own doc.
+pub(crate) fn take() -> (Vec<Command>, bool) {
+    BUFFERS.with(|buffers| match buffers.borrow_mut().pop() {
+        Some(buffer) => (buffer, true),
+        None => (Vec::new(), false),
+    })
 }
 
 /// Drain a finished command tree, parking every buffer in it for reuse. Replaces

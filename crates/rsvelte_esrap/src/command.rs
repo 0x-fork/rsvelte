@@ -199,6 +199,7 @@ impl Driver<'_> {
                 // mapping at the current generated position. Mirrors esrap's
                 // `command.type === 'Location'` branch in `run`.
                 self.flush_pending();
+                crate::profile::count_mapping();
                 self.mappings.push(Mapping {
                     gen_line: self.current_line,
                     gen_column: self.current_column,
@@ -214,6 +215,11 @@ impl Driver<'_> {
     /// char and rolling over to the next line on each `\n`. A faithful port of
     /// esrap's `append`.
     fn append(&mut self, str: &str) {
+        // Bytes, not `chars().count()`: the quantity wanted is how many times
+        // the loop below iterates, and counting characters to learn that would
+        // run the loop twice. Bytes bound it from above, and are equal for the
+        // ASCII the printer overwhelmingly emits.
+        crate::profile::count_append(str.len());
         self.code.push_str(str);
         for ch in str.chars() {
             if ch == '\n' {

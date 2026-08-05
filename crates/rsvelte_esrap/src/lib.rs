@@ -36,6 +36,7 @@ mod command;
 mod context;
 mod pool;
 mod printer;
+pub mod profile;
 
 #[cfg(test)]
 mod internal_tests;
@@ -85,14 +86,28 @@ pub fn print(program: &Program<'_>, source: &str) -> String {
 
 /// Print `program` to JavaScript with explicit options, interleaving comments.
 pub fn print_with(program: &Program<'_>, source: &str, options: &PrintOptions) -> String {
+    let _t = profile::start();
     let line_starts = printer::line_starts(source);
+    profile::record_line_starts(profile::elapsed(_t));
+
+    let _t = profile::start();
     let comments = printer::build_comments(program, source, &line_starts);
+    profile::record_build_comments(profile::elapsed(_t));
+
     let mut printer = printer::Printer::with_comments(options, comments, line_starts);
     let mut ctx = context::Context::new();
+    let _t = profile::start();
     printer.print_program(program, &mut ctx);
+    profile::record_print_program(profile::elapsed(_t));
+
     let commands = ctx.into_commands();
+    let _t = profile::start();
     let code = command::print(&commands, &options.indent);
+    profile::record_flatten_plain(profile::elapsed(_t));
+
+    let _t = profile::start();
     pool::recycle(commands);
+    profile::record_recycle(profile::elapsed(_t));
     code
 }
 
@@ -122,24 +137,48 @@ pub fn print_split(
     loc_map: &[(u32, u32, Option<u32>)],
     options: &PrintOptions,
 ) -> PrintWithMap {
+    let _t = profile::start();
     let line_starts = printer::line_starts(comment_source);
+    profile::record_line_starts(profile::elapsed(_t));
+
+    let _t = profile::start();
     let comments = printer::build_comments(program, comment_source, &line_starts);
+    profile::record_build_comments(profile::elapsed(_t));
+
+    // Charged apart from the scan above: this one exists only because source
+    // maps were asked for, so it belongs to the map cost rather than to
+    // printing. With `map_source: None` it does not run at all.
+    let _t = profile::start();
     let map_line_starts = map_source.map(printer::line_starts).unwrap_or_default();
+    if map_source.is_some() {
+        profile::record_map_line_starts(profile::elapsed(_t));
+    }
+
     let mut printer = printer::Printer::with_comments(options, comments, line_starts)
         .with_split_coordinates(map_line_starts, loc_base, loc_map);
     let mut ctx = context::Context::new();
+    let _t = profile::start();
     printer.print_program(program, &mut ctx);
+    profile::record_print_program(profile::elapsed(_t));
+
     let commands = ctx.into_commands();
     let printed = if map_source.is_some() {
+        let _t = profile::start();
         let (code, mappings) = command::flatten_with_map(&commands, &options.indent);
+        profile::record_flatten_map(profile::elapsed(_t));
         PrintWithMap { code, mappings }
     } else {
+        let _t = profile::start();
+        let code = command::print(&commands, &options.indent);
+        profile::record_flatten_plain(profile::elapsed(_t));
         PrintWithMap {
-            code: command::print(&commands, &options.indent),
+            code,
             mappings: Vec::new(),
         }
     };
+    let _t = profile::start();
     pool::recycle(commands);
+    profile::record_recycle(profile::elapsed(_t));
     printed
 }
 
@@ -159,13 +198,27 @@ pub struct PrintWithMap {
 /// [`print_with`] returns — `Location` anchors only carry mapping data, never
 /// add text.
 pub fn print_with_map(program: &Program<'_>, source: &str, options: &PrintOptions) -> PrintWithMap {
+    let _t = profile::start();
     let line_starts = printer::line_starts(source);
+    profile::record_line_starts(profile::elapsed(_t));
+
+    let _t = profile::start();
     let comments = printer::build_comments(program, source, &line_starts);
+    profile::record_build_comments(profile::elapsed(_t));
+
     let mut printer = printer::Printer::with_comments(options, comments, line_starts);
     let mut ctx = context::Context::new();
+    let _t = profile::start();
     printer.print_program(program, &mut ctx);
+    profile::record_print_program(profile::elapsed(_t));
+
     let commands = ctx.into_commands();
+    let _t = profile::start();
     let (code, mappings) = command::flatten_with_map(&commands, &options.indent);
+    profile::record_flatten_map(profile::elapsed(_t));
+
+    let _t = profile::start();
     pool::recycle(commands);
+    profile::record_recycle(profile::elapsed(_t));
     PrintWithMap { code, mappings }
 }

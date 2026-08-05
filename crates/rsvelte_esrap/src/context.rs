@@ -31,8 +31,10 @@ pub struct Context {
 impl Context {
     /// A fresh, empty context.
     pub fn new() -> Self {
+        let (commands, pool_hit) = crate::pool::take();
+        crate::profile::count_context(pool_hit);
         Context {
-            commands: crate::pool::take(),
+            commands,
             ..Self::default()
         }
     }
@@ -45,16 +47,19 @@ impl Context {
 
     /// Grow the newline indentation by one level for subsequent newlines.
     pub fn indent(&mut self) {
+        crate::profile::count_cmd_layout();
         self.commands.push(Command::Indent);
     }
 
     /// Shrink the newline indentation by one level.
     pub fn dedent(&mut self) {
+        crate::profile::count_cmd_layout();
         self.commands.push(Command::Dedent);
     }
 
     /// Request a blank line ahead of the next newline.
     pub fn margin(&mut self) {
+        crate::profile::count_cmd_layout();
         self.commands.push(Command::Margin);
     }
 
@@ -62,11 +67,13 @@ impl Context {
     /// context multiline.
     pub fn newline(&mut self) {
         self.has_newline = true;
+        crate::profile::count_cmd_layout();
         self.commands.push(Command::Newline);
     }
 
     /// Emit a single space before the next write.
     pub fn space(&mut self) {
+        crate::profile::count_cmd_layout();
         self.commands.push(Command::Space);
     }
 
@@ -76,6 +83,10 @@ impl Context {
         let content = content.into();
         self.measure += content.len();
         self.has_content |= !content.is_empty();
+        // `is_heap_allocated` rather than a comparison against the 24-byte
+        // inline limit named in `command.rs`'s doc: the limit is the library's
+        // to change, and the question is which payloads actually allocated.
+        crate::profile::count_cmd_str(content.len(), content.is_heap_allocated());
         self.commands.push(Command::Str(content));
         if self.has_newline {
             self.multiline = true;
@@ -84,6 +95,7 @@ impl Context {
 
     /// Record a source-map anchor (1-based line, 0-based column).
     pub fn location(&mut self, line: u32, column: u32) {
+        crate::profile::count_cmd_location();
         self.commands.push(Command::Location { line, column });
     }
 
