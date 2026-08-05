@@ -191,6 +191,63 @@ in-place 化が副次的に持ち込む効果（1 回パース化、順序固定
 **M1 は M2/M3 の前提**で、そちらは gap の 78% を占める transform+codegen 本体に当たる。
 **M1 を単独 ROI で正当化しないこと**（依存関係の下にある投資を ROI で切ることになる）。
 
+### ★ scriptText の実測（2026-08-06、commit `515dc4c9`）— 16.4 回読み直している ★
+
+決定論カウンタ（走査バイト ÷ script バイト = 実効走査回数）。実出荷 5,681、run 間バイト完全一致。
+
+```
+TOTAL             77,478 calls / 45.02MB vs script 1.90MB = 23.68 実効パス（13.6 calls/file）
+  staged          65,933 calls / 31.19MB =  16.40   ← script_text の本体
+  shadow_index     7,420 calls /  6.42MB =   3.37
+  shadow_enclosing 4,115 calls /  7.41MB =   3.90
+  shadow_body         10 calls /  0.01MB =   0.00
+```
+
+`staged` は flowbite 16.74 / bits-ui 16.28 / shadcn 16.92 / layerchart 15.94 / skeleton 16.11 /
+svelte-ux 12.71 で、**1 ファイル集中でも母集団依存でもない構造的な定数**。
+
+**走査バイトは時間の代理ではない**: `shadow_*` は走査バイトの 30.7% だが、時間は
+`post_passes` 4.58ms = script_text の **≤3.1%**。`memmem::find_iter` は SIMD なので
+「全長を読む」だけならほぼ無料で、`staged` が高いのは alloc / `format!` / 行分割を伴うため。
+
+svelte-rs に対応工程が無い分（script_text 148.21ms の内訳）:
+
+| stage | ms | script_text 内 | 分類 |
+|---|---:|---:|---|
+| prenormalize | 4.26 | 2.9% | 純テキスト機構 |
+| collect_vars | 44.18 | 29.8% | 純テキスト機構 |
+| line_loop | 33.99 | 22.9% | 純テキスト機構 |
+| post_passes | 4.58 | 3.1% | 純テキスト機構 |
+| prologue+earlyout | 4.76 | 3.2% | 純テキスト機構 |
+| at_probe + at_parse | 17.36 | 11.7% | テキスト→AST 橋渡し（**AST 入力なら消える**） |
+| at_walk+output+rest | 39.07 | 26.4% | 別形で同じ仕事（値段未測定） |
+
+合計 **73.6% に対応工程が無い**。`0.736 × 31.89µs/file = 23.5µs/file`、gap 108.44 →
+**ギャップの約 21%**（母集団跨ぎ: 内訳は実出荷 5,681、µs/file と gap は flowbite 1296）。
+
+**⚠ `script_text` のスケーリング指数 1.95 を根拠に使わないこと。** script ≥659 バイトで
+当てはめ直すと 0.973 に崩れる（対照 4 本は不動）。極小 script でゲートが発火しない段差の産物で、
+2026-08-05 に追跡終了済み。
+
+**⚠ `transform_shadowed_local_state_vars` の「12×full-script find」は 2026-07-31 に索引化済み。**
+残っているのは内側の per-(var, shape) `find_enclosing_function_body` で、上記の通り ≤3.1%。
+
+### ★ Phase 3 残差の分割（2026-08-06、汚染ゲート合格 median/min 1.018）★
+
+residual 72.1ms = Phase 3 の 9.6% = 12.69 µs/file。
+
+```
+rs_sourcemap  22.05ms  30.6%  3.88 µs/file   ← ON 22.03 / OFF 0.12 = 183x。本当に消える
+rs_shadow_fix  7.34ms  10.2%  1.29 µs/file   ← transform_shadowed_local_state_vars とは別物
+rs_setup       2.86ms   4.0%  0.50 µs/file
+rs_warnings    0.82ms   1.1%  0.14 µs/file
+rs_async_pre   0.11ms   0.2%  0.02 µs/file
+rs_rest       38.95ms  54.0%  6.87 µs/file   ← ★まだ無名。分割は 46% しか進んでいない★
+```
+
+Phase 3 全体の sourcemap ON/OFF は**分解能未満**（清浄な 2 ペアで 0.988 と 1.068、符号が反転）。
+22ms は Phase 3 の 2.9% で run 間幅 ±7% に埋まる。**バケット単体は測れて総額は測れない。**
+
 ### ★ M1 再開（2026-08-02、ユーザー指示）— 保留は解除された ★
 
 以下の「保留中」節は**歴史的経緯**として残す。現状は再開済みで、判断が 3 つ変わっている。
