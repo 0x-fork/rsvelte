@@ -427,6 +427,7 @@ fn transform_client_with_visitors(
 ) -> Result<CodegenResult, TransformError> {
     use crate::compiler::phases::phase3_transform::client::visitors::fragment::fragment;
 
+    let _rs_setup = super::profile::timer_start();
     // Create initial node (anchor) for the transformation
     let initial_node = b::id("$$anchor");
 
@@ -461,9 +462,11 @@ fn transform_client_with_visitors(
     // Visit the program to set up transforms for props, store subscriptions, etc.
     // This handles state, legacy props, and store subscriptions.
     use crate::compiler::phases::phase3_transform::client::visitors::program::visit_program;
+    super::profile::record_rs_setup(super::profile::timer_elapsed(_rs_setup));
     let _vp_start = super::profile::timer_start();
     visit_program(&mut context);
     super::profile::record_visit_program(super::profile::timer_elapsed(_vp_start));
+    let _rs_shadow = super::profile::timer_start();
 
     // Remove transforms for variables that have shadowed $state declarations.
     // Due to a known analysis bug where inner-scope $state() declarations overwrite
@@ -510,6 +513,7 @@ fn transform_client_with_visitors(
     // This also determines how many $$array names it consumes (for template generation)
     // and is used for blocker_map computation and the final output.
     let mut instance_script_imports = Vec::new();
+    super::profile::record_rs_shadow_fix(super::profile::timer_elapsed(_rs_shadow));
     let mut pre_transformed_script = if let Some(instance_script) =
         &analysis.instance_script_content
     {
@@ -588,6 +592,7 @@ fn transform_client_with_visitors(
     };
 
     // Pre-compute blocker map for async components.
+    let _rs_async = super::profile::timer_start();
     if options.experimental.r#async
         && let Some(ref transformed) = pre_transformed_script
     {
@@ -651,6 +656,8 @@ fn transform_client_with_visitors(
             }
         }
     }
+
+    super::profile::record_rs_async_pre(super::profile::timer_elapsed(_rs_async));
 
     // Call the fragment visitor to transform the template
     // This is the root fragment of the component, so is_root_fragment=true

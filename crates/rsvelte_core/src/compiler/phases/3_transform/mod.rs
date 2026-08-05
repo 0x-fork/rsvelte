@@ -245,6 +245,7 @@ pub(crate) fn transform_component_with_scripts(
     };
 
     // Convert Phase 2 analysis warnings to transform warnings
+    let _rs_warn = profile::timer_start();
     let mut warnings: Vec<TransformWarning> = analysis
         .warnings
         .iter()
@@ -290,7 +291,10 @@ pub(crate) fn transform_component_with_scripts(
         }
     }
 
+    profile::record_rs_warnings(profile::timer_elapsed(_rs_warn));
+
     // Generate JS source map only when sourcemaps are enabled
+    let _rs_map = profile::timer_start();
     let js_map = if options.enable_sourcemap {
         // Extract original source info from preprocessor map if available
         struct PreprocessorInfo {
@@ -540,6 +544,7 @@ pub(crate) fn transform_component_with_scripts(
         // Sourcemaps disabled - skip all mapping generation for performance
         None
     };
+    profile::record_rs_sourcemap(profile::timer_elapsed(_rs_map));
 
     Ok(TransformResult {
         js,

@@ -429,6 +429,16 @@ thread_local! {
     static AS_CSS_INJECT_CALLS: Cell<u64> = const { Cell::new(0) };
     static AS_AS_JSON_CALLS: Cell<u64> = const { Cell::new(0) };
     static AS_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
+    static RS_SETUP: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static RS_SHADOW_FIX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static RS_ASYNC_PRE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static RS_WARNINGS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static RS_SOURCEMAP: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static RS_SETUP_CALLS: Cell<u64> = const { Cell::new(0) };
+    static RS_SHADOW_FIX_CALLS: Cell<u64> = const { Cell::new(0) };
+    static RS_ASYNC_PRE_CALLS: Cell<u64> = const { Cell::new(0) };
+    static RS_WARNINGS_CALLS: Cell<u64> = const { Cell::new(0) };
+    static RS_SOURCEMAP_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -798,6 +808,66 @@ pub fn record_st_post_passes(d: Duration) {
     }
     ST_POST_PASSES.with(|c| c.set(c.get() + d));
 }
+
+/// The Phase 3 residual, i.e. `transform` minus the six named buckets.
+///
+/// `analyze` taught the shape of this question: its residual was the largest
+/// bucket by both time and work, and splitting it found not "cost with no
+/// name" but a walk nobody had named. These four are the regions of the client
+/// transform and its wrapper that no timer covered.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ResidualBreakdown {
+    /// Transform options, state and context construction, before `visit_program`.
+    pub setup: Duration,
+    /// The shadowed-`$state` transform cleanup between `visit_program` and the
+    /// script-text stage.
+    pub shadow_fix: Duration,
+    /// The async blocker-map precompute between the script and the fragment.
+    pub async_pre: Duration,
+    /// Warning conversion and the unused-CSS-selector scan.
+    pub warnings: Duration,
+    /// Source-map assembly in the transform wrapper.
+    pub sourcemap: Duration,
+    pub setup_calls: u64,
+    pub shadow_fix_calls: u64,
+    pub async_pre_calls: u64,
+    pub warnings_calls: u64,
+    pub sourcemap_calls: u64,
+}
+
+pub fn take_residual_breakdown() -> ResidualBreakdown {
+    ResidualBreakdown {
+        setup: RS_SETUP.with(|c| c.replace(Duration::ZERO)),
+        shadow_fix: RS_SHADOW_FIX.with(|c| c.replace(Duration::ZERO)),
+        async_pre: RS_ASYNC_PRE.with(|c| c.replace(Duration::ZERO)),
+        warnings: RS_WARNINGS.with(|c| c.replace(Duration::ZERO)),
+        sourcemap: RS_SOURCEMAP.with(|c| c.replace(Duration::ZERO)),
+        setup_calls: RS_SETUP_CALLS.with(|c| c.replace(0)),
+        shadow_fix_calls: RS_SHADOW_FIX_CALLS.with(|c| c.replace(0)),
+        async_pre_calls: RS_ASYNC_PRE_CALLS.with(|c| c.replace(0)),
+        warnings_calls: RS_WARNINGS_CALLS.with(|c| c.replace(0)),
+        sourcemap_calls: RS_SOURCEMAP_CALLS.with(|c| c.replace(0)),
+    }
+}
+
+macro_rules! residual_recorder {
+    ($name:ident, $cell:ident, $calls:ident) => {
+        #[inline]
+        pub fn $name(d: Duration) {
+            if !timers_enabled() {
+                return;
+            }
+            $cell.with(|c| c.set(c.get() + d));
+            $calls.with(|c| c.set(c.get() + 1));
+        }
+    };
+}
+
+residual_recorder!(record_rs_setup, RS_SETUP, RS_SETUP_CALLS);
+residual_recorder!(record_rs_shadow_fix, RS_SHADOW_FIX, RS_SHADOW_FIX_CALLS);
+residual_recorder!(record_rs_async_pre, RS_ASYNC_PRE, RS_ASYNC_PRE_CALLS);
+residual_recorder!(record_rs_warnings, RS_WARNINGS, RS_WARNINGS_CALLS);
+residual_recorder!(record_rs_sourcemap, RS_SOURCEMAP, RS_SOURCEMAP_CALLS);
 
 /// One level below [`Phase3Breakdown::assembly_after_fragment`].
 ///

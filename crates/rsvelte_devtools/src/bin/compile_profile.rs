@@ -78,6 +78,7 @@ fn main() {
     let _ = profile::take_ast_transforms_breakdown();
     let _ = profile::take_template_fragment_breakdown();
     let _ = profile::take_assembly_breakdown();
+    let _ = profile::take_residual_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -153,6 +154,7 @@ fn main() {
     let at = profile::take_ast_transforms_breakdown();
     let tf = profile::take_template_fragment_breakdown();
     let asm = profile::take_assembly_breakdown();
+    let rs = profile::take_residual_breakdown();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -431,7 +433,7 @@ fn main() {
     );
     println!();
     report_resolved(script_text, files.len());
-    report_phase3_map(&scaling);
+    report_phase3_map(&scaling, rs);
     println!(
         "Per-file average:    {:.2}µs",
         total.as_secs_f64() * 1_000_000.0 / files.len() as f64
@@ -452,7 +454,7 @@ fn main() {
 /// file pays, and top1 says how much of the sum a single file contributed. When
 /// the median is far below the sum ratio and top1 is large, the bucket is one
 /// file wearing a mechanism's name.
-fn report_phase3_map(rows: &[ScalingRow]) {
+fn report_phase3_map(rows: &[ScalingRow], rs: profile::ResidualBreakdown) {
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
     let buckets: [(&str, fn(&ScalingRow) -> std::time::Duration); 6] = [
         ("visitProgram", |r| r.visit_program),
@@ -504,6 +506,36 @@ fn report_phase3_map(rows: &[ScalingRow]) {
         "  {:<18} {residual:>10.2} {:>7.1}%",
         "unattributed",
         residual / parent * 100.0
+    );
+    let named: [(&str, std::time::Duration, u64); 5] = [
+        ("rs_setup", rs.setup, rs.setup_calls),
+        ("rs_shadow_fix", rs.shadow_fix, rs.shadow_fix_calls),
+        ("rs_async_pre", rs.async_pre, rs.async_pre_calls),
+        ("rs_warnings", rs.warnings, rs.warnings_calls),
+        ("rs_sourcemap", rs.sourcemap, rs.sourcemap_calls),
+    ];
+    let mut named_sum = 0.0;
+    for (label, d, calls) in named {
+        let v = ms(d);
+        named_sum += v;
+        println!(
+            "    {label:<16} {v:>10.2} {:>7.1}% of residual  calls {calls}",
+            if residual > 0.0 {
+                v / residual * 100.0
+            } else {
+                0.0
+            }
+        );
+    }
+    println!(
+        "    {:<16} {:>10.2} {:>7.1}% of residual",
+        "rs_rest",
+        residual - named_sum,
+        if residual > 0.0 {
+            (residual - named_sum) / residual * 100.0
+        } else {
+            0.0
+        }
     );
     // Printed as a line of its own because the buckets are drained from the same
     // per-file breakdown as the parent: a non-zero difference here is an
