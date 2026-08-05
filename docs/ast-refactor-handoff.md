@@ -120,25 +120,62 @@ legacy_state_member_mutate / prop_assign / state_set_reactive / store_assign / r
 （既存パターン: `js_ast/to_oxc.rs:1176` の `allocator.alloc_str(text)` → `Parser::new(allocator, …)`）。
 このため `with_program_mut` は `&Allocator` も渡す。
 
-#### 移植の形（(2) フェーズ中は本番を切り替えない）
+#### 移植の形（★ 2026-08-06 更新: フリップは済んでいる ★）
 
-各パスは移植後も **production ではテキスト経路の結果を返す**。`&mut Program` 経路は
-`RSVELTE_AST_DUAL_RUN` 下でのみ走り、`dual_run::compare_pass` が両者を突き合わせる。
-理由: splice 出力は**触っていない領域の元の整形を保つ**のに対し esrap 印字は全体を再整形するため、
-1 本だけ本番切り替えすると中間テキストが変わり下流の `parse_chunk` に波及する。
-**最終フリップだけが不可分**という既存の設計判断と一致する。
+**この節は「production ではテキスト経路の結果を返す」と書いていたが、もう当てはまらない。**
+`shared/ast_rewrite.rs` の `resolve()` を読むこと:
+
+```rust
+if enabled() { ... }                     // RSVELTE_AST_DUAL_RUN 時だけ両方走る
+if !prefer_in_place() { return spliced(); }
+in_place().or_else(spliced)              // ★ 環境変数なし = production はここ
+// prefer_in_place() = env RSVELTE_AST_SPLICE が無い → 既定 true
+```
+
+**環境変数を設定しない production は in-place を返す。`RSVELTE_AST_SPLICE=1` が差し戻し。**
+テキスト経路は**フォールバック**として残っている（in-place が `None` を返す断片 — 単体では
+プログラムとしてパースできない class-member body など — でだけ使われる）。
+
+以下は移行中の理由づけとして残す: splice 出力は**触っていない領域の元の整形を保つ**のに対し
+esrap 印字は全体を再整形するため、1 本だけ本番切り替えすると中間テキストが変わり下流の
+`parse_chunk` に波及する。**最終フリップだけが不可分**という設計判断はそのとおりに運用された。
 
 `compare_pass` は両側を `normalize`（= `esrap(parse(x))`）に 1 回ずつ通す。esrap の整形が相殺され、
 パスの挙動差だけが残る。**2 経路は適用順序が違う**（collect-then-splice vs post-order in-place）ので、
 順序依存のパスを検出するのがこの比較の役目。**ミスマッチを「順序差だから正当」と説明してはいけない。**
 
-#### 進捗
+#### 進捗（★ 2026-08-06 実測で更新 — 「1/12」は古い ★）
 
-| | 状態 |
+**load-bearing 12 本はすべて origin/main に入っている。** `RSVELTE_AST_DUAL_RUN=1 dual_run_tally` の
+tally に `:inplace` が 12 本出る: state_assigns_combined / prop_assign / state_set_reactive /
+legacy_state_member_mutate / store_unsub_wrap / store_assign / private_class_assign /
+prop_member_mutate / reactive_update / state_pipeline / store_update / store_member_mutate。
+
+**残作業はゲート。** 公式フィクスチャ 4,459 本の全数:
+
+| | |
 |---|---|
-| ドライバ `with_program_mut` + `dual_run::compare_pass` | 完了（`fcf59761`） |
-| 1/12 `legacy_state_member_mutate`（443 行・splice 26） | 移植完了（`890dd622`）、dual-run 検証中 |
-| 残り 11 本 | 純 wrap から順に。`state_pipeline`（read-wrap 同時収集）と `state_assigns_combined`（最多 splice 152）は最後 |
+| raw diffs | 678 |
+| **mismatches** | **2** |
+| unverified | 0 |
+| terminators dropped | 48（うちゲートが検査できなかったもの 2） |
+
+**mismatch 2 件は `runtime-legacy/samples/store-auto-resubscribe-immediate` の 1 本だけ**
+（dev=false/true で 2 件。distinct な原因は 1 つ）。他 8 カテゴリはすべて 0。再現:
+
+```
+RSVELTE_AST_DUAL_RUN=1 RSVELTE_AST_DUAL_RUN_DUMP=4 dual_run_tally \
+  submodules/svelte/packages/svelte/tests/runtime-legacy/samples/store-auto-resubscribe-immediate/main.svelte
+```
+
+機構は**再印字による行末コメント 2 本の再アンカー**。`$.store_set(...)` の構造・入れ子・引数は
+両側で完全一致し、`}) )` が `}))` に畳まれてコメントが隣り合う。`normalize`（= `esrap(parse(x))`）は
+コメント位置を消さないので相殺されない。
+
+**★ これはパリティの問題ではない。** このフィクスチャは client / client-dev / server の
+どの known-failures にも入っておらず、**現行 production（= in-place）の出力は公式と一致している。**
+mismatch が阻害するのは**テキスト経路の削除**（2 経路が交換可能でないと言っている）であって、
+フリップでも現在のパリティでもない。
 
 着手順は**公式フィクスチャの踏み方**に合わせる。`prop_source_reads` は splice 0 の parse-only なので
 load-bearing 12 本に入らない（flowbite 基準の module_state_runes 先行案も公式で 0 回なので棄却済み）。
