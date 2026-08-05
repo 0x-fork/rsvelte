@@ -111,4 +111,40 @@ fn main() {
         "strings:          {strings} total, {:.1}/file  (keys + string values)",
         strings as f64 / n
     );
+
+    // The counts above say how much work a typed reader would not do; this says
+    // what that work costs. Both are needed: a count without a constant cannot
+    // be turned into microseconds, and a constant without a count cannot be
+    // turned into a saving.
+    let (nanos, sum_e2, sum_et) = measure_json::timing();
+    if materializations == 0 {
+        return;
+    }
+    let (m, e, t) = (materializations as f64, entries as f64, nanos as f64);
+    println!(
+        "\ntime spent materializing: {:.2}ms total, {:.2}us/file",
+        t / 1e6,
+        t / 1e3 / n
+    );
+    println!("  {:.1} ns per materialization", t / m);
+    println!("  {:.1} ns per map entry (flat)", t / e);
+    // Least squares through (entries, nanos) with an intercept: nanos = a + b*entries.
+    // The flat figure above divides one total by another, which silently
+    // attributes all of a per-call cost to whatever entry count happens to
+    // accompany it.
+    let den = m * sum_e2 as f64 - e * e;
+    if den.abs() > f64::EPSILON {
+        let b = (m * sum_et as f64 - e * t) / den;
+        let a = (t - b * e) / m;
+        println!("  fitted: {a:.1} ns per call + {b:.2} ns per entry");
+        println!(
+            "  => removing all of it saves {:.2}us/file (calls {:.2} + entries {:.2})",
+            (a * m + b * e) / 1e3 / n,
+            a * m / 1e3 / n,
+            b * e / 1e3 / n
+        );
+    }
+    println!(
+        "  NOTE: two clock reads per materialization are inside this total, so it is an upper bound"
+    );
 }

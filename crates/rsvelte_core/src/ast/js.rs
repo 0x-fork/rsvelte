@@ -42,9 +42,17 @@ impl<'a> TypedExpr<'a> {
     #[inline]
     pub fn as_json(&self) -> &serde_json::Value {
         self.json_cache.get_or_init(|| {
+            // Timed in situ rather than in a loop. A synthetic benchmark of the
+            // same call would run with a hot cache and a perfect branch
+            // predictor, so it could only ever bound this from below -- and the
+            // question it is asked (is the JSON path worth removing) needs the
+            // cost at the real call sites, where the node was built long ago and
+            // the allocator is in whatever state the compile left it.
+            #[cfg(feature = "measure-json")]
+            let started = std::time::Instant::now();
             let value = Box::new(self.node.to_value());
             #[cfg(feature = "measure-json")]
-            measure_json::record(&value);
+            measure_json::record(&value, started.elapsed());
             value
         })
     }
@@ -62,6 +70,9 @@ pub mod measure_json {
         static NODES: Cell<u64> = const { Cell::new(0) };
         static MAP_ENTRIES: Cell<u64> = const { Cell::new(0) };
         static STRINGS: Cell<u64> = const { Cell::new(0) };
+        static NANOS: Cell<u64> = const { Cell::new(0) };
+        static SUM_E2: Cell<u64> = const { Cell::new(0) };
+        static SUM_ET: Cell<u64> = const { Cell::new(0) };
     }
 
     fn walk(value: &serde_json::Value, nodes: &mut u64, entries: &mut u64, strings: &mut u64) {
@@ -85,13 +96,21 @@ pub mod measure_json {
         }
     }
 
-    pub(super) fn record(value: &serde_json::Value) {
+    pub(super) fn record(value: &serde_json::Value, elapsed: std::time::Duration) {
         let (mut nodes, mut entries, mut strings) = (0, 0, 0);
         walk(value, &mut nodes, &mut entries, &mut strings);
         MATERIALIZATIONS.with(|c| c.set(c.get() + 1));
         NODES.with(|c| c.set(c.get() + nodes));
         MAP_ENTRIES.with(|c| c.set(c.get() + entries));
         STRINGS.with(|c| c.set(c.get() + strings));
+        NANOS.with(|c| c.set(c.get() + elapsed.as_nanos() as u64));
+        // Two sums are not enough to separate a per-call cost from a per-entry
+        // one: their ratio is a single number and fits any split. Accumulating
+        // the second moment of the entry count lets the two be regressed apart,
+        // which is the difference between "removing this saves N x cost" and
+        // "removing this saves the calls but keeps the bytes".
+        SUM_E2.with(|c| c.set(c.get() + entries * entries));
+        SUM_ET.with(|c| c.set(c.get() + entries * elapsed.as_nanos() as u64));
     }
 
     /// `(materializations, objects, map_entries, strings)` since the last reset.
@@ -104,11 +123,27 @@ pub mod measure_json {
         )
     }
 
+    /// `(total nanos, sum of entries^2, sum of entries * nanos)`.
+    ///
+    /// The clock is read twice per materialization, which the counts above do
+    /// not pay. Report it as an upper bound on the cost, or subtract a measured
+    /// pair cost -- do not present it as if the timer were free.
+    pub fn timing() -> (u64, u64, u64) {
+        (
+            NANOS.with(|c| c.get()),
+            SUM_E2.with(|c| c.get()),
+            SUM_ET.with(|c| c.get()),
+        )
+    }
+
     pub fn reset() {
         MATERIALIZATIONS.with(|c| c.set(0));
         NODES.with(|c| c.set(0));
         MAP_ENTRIES.with(|c| c.set(0));
         STRINGS.with(|c| c.set(0));
+        NANOS.with(|c| c.set(0));
+        SUM_E2.with(|c| c.set(0));
+        SUM_ET.with(|c| c.set(0));
     }
 }
 
