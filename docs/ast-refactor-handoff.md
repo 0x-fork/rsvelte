@@ -196,15 +196,34 @@ in-place 化が副次的に持ち込む効果（1 回パース化、順序固定
 決定論カウンタ（走査バイト ÷ script バイト = 実効走査回数）。実出荷 5,681、run 間バイト完全一致。
 
 ```
-TOTAL             77,478 calls / 45.02MB vs script 1.90MB = 23.68 実効パス（13.6 calls/file）
-  staged          65,933 calls / 31.19MB =  16.40   ← script_text の本体
-  shadow_index     7,420 calls /  6.42MB =   3.37
-  shadow_enclosing 4,115 calls /  7.41MB =   3.90
-  shadow_body         10 calls /  0.01MB =   0.00
+実出荷 5,681      77,478 calls / 37.88MB vs script 1.90MB = 19.92 実効パス（13.6 calls/file）
+  staged          65,933 calls / 28.47MB                  =  14.97   ← script_text の本体
+  shadow_index     7,420 calls /  6.42MB                  =   3.37
+  shadow_enclosing 4,115 calls /  2.98MB                  =   1.57
+  shadow_body         10 calls /  0.01MB                  =   0.00
 ```
 
-`staged` は flowbite 16.74 / bits-ui 16.28 / shadcn 16.92 / layerchart 15.94 / skeleton 16.11 /
-svelte-ux 12.71 で、**1 ファイル集中でも母集団依存でもない構造的な定数**。
+**⚠ 「16.4 は 6 プロジェクトで定数」は撤回（2026-08-06）。** プロジェクト合計が似ていたのは
+サイズ構成が似ていたからで、サイズ帯で割ると単調増加する:
+
+```
+flowbite 1296   script B    n   実効パス  staged  含意される単価
+                  0-200    592    2.42     2.23    ~9.7 ns/B
+                200-500    273    7.99     6.65     6.2
+               500-1000    188   13.44    10.18     4.1
+              1000-2000     97   14.75    10.85     3.6
+              2000-5000     83   17.37    11.83     3.0
+                  5000-     17   18.13    12.68     3.2
+```
+
+`≥200 B` でパス数 2.27 倍 × 単価 0.50 倍 ≈ 一定 なので、**ns/B が平坦なのと矛盾しない**。
+含意される単価 3.0〜6.2 ns/B は svelte-rs の「traverse 1 回 + rewrite」2.7〜5.2 と同じ帯 =
+**数えすぎでも被覆漏れでもなく、超過は回数**。正しい言い方は「16 倍」ではなく
+**「200 B で 8 回、5000 B 超で 18 回、相手は常に 1 回」**。
+
+計器は 2 度直している: 課金を haystack 全長 → **実際に読んだバイト**（上限のゆるさが
+サイズとともに増えるため、帯別表で傾きが測れなかった）、および
+`find_enclosing_function_body` の **`?` 穴**（4,115 calls のうち 2 件しか記録されていなかった）。
 
 **走査バイトは時間の代理ではない**: `shadow_*` は走査バイトの 30.7% だが、時間は
 `post_passes` 4.58ms = script_text の **≤3.1%**。`memmem::find_iter` は SIMD なので
