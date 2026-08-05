@@ -442,6 +442,9 @@ thread_local! {
     static SCAN_BYTES: Cell<u64> = const { Cell::new(0) };
     static SCAN_CALLS: Cell<u64> = const { Cell::new(0) };
     static SCAN_SCRIPT_BYTES: Cell<u64> = const { Cell::new(0) };
+    static REWRITE_CALLS: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
+    static REWRITE_FILES: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
+    static REWRITE_SEEN: Cell<[bool; REWRITE_SITE_COUNT]> = const { Cell::new([false; REWRITE_SITE_COUNT]) };
     static SCAN_SITE_BYTES: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
     static SCAN_SITE_CALLS: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
@@ -842,6 +845,76 @@ pub const SCAN_SITE_SHADOW_BODY: usize = 3;
 pub const SCAN_SITE_COUNT: usize = 4;
 pub const SCAN_SITE_NAMES: [&str; SCAN_SITE_COUNT] =
     ["staged", "shadow_index", "shadow_enclosing", "shadow_body"];
+
+/// Where the staged script pipeline first stops being a reader.
+///
+/// The question these answer is not "how expensive is this rewrite" but "is the
+/// Phase 2 AST still valid here": every site below replaces the script text, so
+/// the spans the parser produced stop lining up from that point on. A file that
+/// trips none of them reaches the line loop byte-identical to what was parsed.
+pub const REWRITE_PN_COMMENTS: usize = 0;
+pub const REWRITE_PN_CLASS_FIELDS: usize = 1;
+pub const REWRITE_PN_SPLIT_DECLS: usize = 2;
+pub const REWRITE_PN_ARROW_PARENS: usize = 3;
+/// Set by every site above, so files that trip two of them are counted once.
+pub const REWRITE_PN_ANY: usize = 4;
+pub const REWRITE_SITE_COUNT: usize = 5;
+pub const REWRITE_SITE_NAMES: [&str; REWRITE_SITE_COUNT] = [
+    "pn_strip_comments",
+    "pn_class_fields",
+    "pn_split_decls",
+    "pn_arrow_parens",
+    "pn_ANY (union)",
+];
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct RewriteCounts {
+    pub calls: [u64; REWRITE_SITE_COUNT],
+    pub files: [u64; REWRITE_SITE_COUNT],
+}
+
+#[inline]
+pub fn count_rewrite(site: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    if site != REWRITE_PN_ANY {
+        count_rewrite(REWRITE_PN_ANY);
+    }
+    REWRITE_CALLS.with(|c| {
+        let mut v = c.get();
+        v[site] += 1;
+        c.set(v);
+    });
+    REWRITE_SEEN.with(|c| {
+        let mut v = c.get();
+        if !v[site] {
+            v[site] = true;
+            c.set(v);
+            REWRITE_FILES.with(|f| {
+                let mut fv = f.get();
+                fv[site] += 1;
+                f.set(fv);
+            });
+        }
+    });
+}
+
+/// Clears the per-file "already counted" flags so `files` counts files, not calls.
+#[inline]
+pub fn rewrite_file_boundary() {
+    if !timers_enabled() {
+        return;
+    }
+    REWRITE_SEEN.with(|c| c.set([false; REWRITE_SITE_COUNT]));
+}
+
+pub fn take_rewrite_counts() -> RewriteCounts {
+    RewriteCounts {
+        calls: REWRITE_CALLS.with(|c| c.replace([0; REWRITE_SITE_COUNT])),
+        files: REWRITE_FILES.with(|c| c.replace([0; REWRITE_SITE_COUNT])),
+    }
+}
 
 pub fn take_scan_counts() -> ScanCounts {
     ScanCounts {

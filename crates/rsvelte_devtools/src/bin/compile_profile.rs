@@ -176,6 +176,7 @@ fn main() {
     let asm = profile::take_assembly_breakdown();
     let rs = profile::take_residual_breakdown();
     let scan = scan_total;
+    let rw = profile::take_rewrite_counts();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -316,6 +317,17 @@ fn main() {
         },
         scan.calls as f64 / files.len() as f64
     );
+    for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::REWRITE_SITE_NAMES
+        .iter()
+        .enumerate()
+    {
+        println!(
+            "      REWRITE {name:<18} {:8} calls {:8} files ({:5.1}% of staged)",
+            rw.calls[i],
+            rw.files[i],
+            rw.files[i] as f64 / st.calls.max(1) as f64 * 100.0
+        );
+    }
     for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::SCAN_SITE_NAMES
         .iter()
         .enumerate()

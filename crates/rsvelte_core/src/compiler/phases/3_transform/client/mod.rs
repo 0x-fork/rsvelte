@@ -4462,6 +4462,7 @@ fn transform_instance_script_for_visitors(
     source_projection: Option<&ScriptProjection>,
 ) -> String {
     super::profile::record_st_entry();
+    super::profile::rewrite_file_boundary();
     let _entry_guard = super::profile::EntryGuard::new();
     if script.is_empty() {
         return String::new();
@@ -4526,6 +4527,7 @@ fn transform_instance_script_for_visitors(
     {
         std::borrow::Cow::Borrowed(script)
     } else {
+        super::profile::count_rewrite(super::profile::REWRITE_PN_COMMENTS);
         std::borrow::Cow::Owned(strip_reactive_statement_comments(script))
     };
 
@@ -4534,6 +4536,7 @@ fn transform_instance_script_for_visitors(
         && (find_counted(script.as_bytes(), b"$state").is_some()
             || find_counted(script.as_bytes(), b"$derived").is_some())
     {
+        super::profile::count_rewrite(super::profile::REWRITE_PN_CLASS_FIELDS);
         std::borrow::Cow::Owned(transform_class_fields_client(&script))
     } else {
         script
@@ -4546,7 +4549,10 @@ fn transform_instance_script_for_visitors(
     let script: std::borrow::Cow<str> = if split_top_level_declarations
         || (class_transform_can_add_declarations && might_have_comma_separated_declaration(&script))
     {
+        {
+        super::profile::count_rewrite(super::profile::REWRITE_PN_SPLIT_DECLS);
         std::borrow::Cow::Owned(crate::compiler::phases::phase3_transform::server::transform_script::split_comma_separated_declarations(&script))
+        }
     } else {
         script
     };
@@ -4562,6 +4568,7 @@ fn transform_instance_script_for_visitors(
     let script_rest = if find_counted(script_rest_raw.as_bytes(), b"=> (").is_some()
         || find_counted(script_rest_raw.as_bytes(), b"=>(").is_some()
     {
+        super::profile::count_rewrite(super::profile::REWRITE_PN_ARROW_PARENS);
         strip_unnecessary_arrow_body_parens(&script_rest_raw)
     } else {
         script_rest_raw
