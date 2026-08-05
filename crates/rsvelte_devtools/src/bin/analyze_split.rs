@@ -80,7 +80,13 @@ fn main() {
     for source in sources.iter().take(100) {
         let _ = compile_with_external_sourcemap_content(source, CompileOptions::default());
     }
+    // All three readers, not two. Draining only the timers left the warm-up's
+    // visits in the counters, and the timed pass then reported 39,757 template
+    // dispatches against 36,866 from the same walk -- the difference was
+    // exactly the hundred warm-up files. The napi reader takes both in one
+    // call, so this asymmetry is local to this binary.
     let _ = profile::take_analyze_breakdown();
+    let _ = profile::take_analyze_visits();
     let _ = profile::take_pipeline_breakdown();
 
     for source in &sources {
@@ -98,6 +104,7 @@ fn main() {
     // clears. Reversing these two lines reports a zero total, which the check
     // below turns into a visible failure rather than a plausible share table.
     let a = profile::take_analyze_breakdown();
+    let v = profile::take_analyze_visits();
     let p = profile::take_pipeline_breakdown();
 
     let total = ms(a.total);
@@ -143,6 +150,56 @@ fn main() {
     println!(
         "\ntemplate nodes dispatched (template only, scripts uncounted): create_scopes {} / analyze_template {}",
         a.create_scopes_nodes, a.template_nodes
+    );
+
+    let files = sources.len() as f64;
+    let bytes = v.source_bytes as f64;
+    println!(
+        "\nsource bytes {} ({:.0} per file){}",
+        v.source_bytes,
+        bytes / files,
+        if v.js_counted {
+            ""
+        } else {
+            "   [js slots NOT counted: rebuild with --features measure-analyze-nodes]"
+        }
+    );
+    println!(
+        "{:<18}{:>14}{:>14}{:>13}{:>12}",
+        "bucket", "tplVisits", "jsSlots", "visits/file", "visits/KB"
+    );
+    for (i, name) in [
+        "extract_scripts",
+        "create_scopes",
+        "store_subs",
+        "template",
+        "css_analyze",
+        "css_scope",
+        "residual",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let visits = (v.template[i] + v.js[i]) as f64;
+        println!(
+            "{name:<18}{:>14}{:>14}{:>13.1}{:>12.2}",
+            v.template[i],
+            v.js[i],
+            visits / files,
+            if bytes == 0.0 {
+                f64::NAN
+            } else {
+                visits / (bytes / 1024.0)
+            }
+        );
+    }
+    // `jsSlots` counts child-slot expansions, not distinct nodes, and a walk
+    // that reads one node's children twice charges them twice. Another
+    // compiler's "visit" is a different definition, so a cross-compiler ratio
+    // has to use the byte denominator, which both sides define identically.
+    println!(
+        "visits are rsvelte-internal: tplVisits = dispatches, jsSlots = child-slot expansions.\n\
+         For a cross-compiler ratio use time per source byte."
     );
 
     // One counter read twice. Any difference is a read-order bug in this

@@ -482,6 +482,15 @@ thread_local! {
     static AN_SCOPE_NODES: Cell<u64> = const { Cell::new(0) };
     static AN_TEMPLATE_NODES: Cell<u64> = const { Cell::new(0) };
 
+    // Per-bucket visit attribution. `AN_CURRENT` is `None` outside the analyze
+    // phase, which is what stops parse's and transform's arena reads from being
+    // charged to a bucket.
+    static AN_CURRENT: Cell<Option<AnalyzeBucket>> = const { Cell::new(None) };
+    static AN_VISIT_TEMPLATE: Cell<[u64; ANALYZE_BUCKETS]> =
+        const { Cell::new([0; ANALYZE_BUCKETS]) };
+    static AN_VISIT_JS: Cell<[u64; ANALYZE_BUCKETS]> = const { Cell::new([0; ANALYZE_BUCKETS]) };
+    static AN_SOURCE_BYTES: Cell<u64> = const { Cell::new(0) };
+
     static REPARSE: Cell<(Duration, Duration, u64, u64)> =
         const { Cell::new((Duration::ZERO, Duration::ZERO, 0, 0)) };
     static REPARSE_DIRECT: Cell<(Duration, u64, u64)> =
@@ -995,6 +1004,125 @@ pub fn count_analyze_scope_node() {
         return;
     }
     AN_SCOPE_NODES.with(|c| c.set(c.get() + 1));
+}
+
+// ---------------------------------------------------------------------------
+// Per-bucket visit attribution
+// ---------------------------------------------------------------------------
+
+/// Which analyze bucket is currently running, for attributing visits.
+///
+/// `Residual` is the phase's inline work -- everything between the six named
+/// calls. Outside the analyze phase there is no current bucket at all, and that
+/// is what keeps parse's and transform's arena reads from being charged here:
+/// `get_js_children` is shared by every phase.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnalyzeBucket {
+    ExtractScripts = 0,
+    CreateScopes = 1,
+    StoreSubs = 2,
+    Template = 3,
+    CssAnalyze = 4,
+    CssScope = 5,
+    Residual = 6,
+}
+
+/// Slots in the per-bucket visit arrays: the six buckets plus the residual.
+pub const ANALYZE_BUCKETS: usize = 7;
+
+/// Restores the enclosing bucket on drop, so an early return through `?` cannot
+/// leave a bucket latched and charge the rest of the phase to it.
+pub struct AnalyzeBucketGuard(Option<AnalyzeBucket>);
+
+impl Drop for AnalyzeBucketGuard {
+    fn drop(&mut self) {
+        AN_CURRENT.with(|c| c.set(self.0));
+    }
+}
+
+/// Enter a bucket, returning a guard that restores the previous one.
+#[inline]
+#[must_use]
+pub fn enter_analyze_bucket(bucket: AnalyzeBucket) -> AnalyzeBucketGuard {
+    let previous = AN_CURRENT.with(|c| c.replace(Some(bucket)));
+    AnalyzeBucketGuard(previous)
+}
+
+/// Enter the analyze phase with no bucket selected, so the phase's inline work
+/// is charged to `Residual` and everything outside the phase is charged
+/// nowhere.
+#[inline]
+#[must_use]
+pub fn enter_analyze_phase() -> AnalyzeBucketGuard {
+    enter_analyze_bucket(AnalyzeBucket::Residual)
+}
+
+/// One template node dispatched, charged to the running bucket.
+#[inline]
+pub fn count_analyze_visit_template() {
+    #[cfg(feature = "measure-analyze-nodes")]
+    if let Some(bucket) = AN_CURRENT.with(Cell::get) {
+        AN_VISIT_TEMPLATE.with(|c| {
+            let mut v = c.get();
+            v[bucket as usize] += 1;
+            c.set(v);
+        });
+    }
+}
+
+/// `n` JS child slots expanded, charged to the running bucket.
+///
+/// **This counts slot expansions, not distinct nodes.** A walk that reads one
+/// node's children twice charges them twice, and the accessor is shared by
+/// every phase, so the figure means anything only while a bucket is current.
+/// Treat it as walk volume inside rsvelte; it is not the quantity another
+/// compiler calls a "visit".
+#[inline]
+pub fn count_analyze_visit_js(n: u64) {
+    #[cfg(feature = "measure-analyze-nodes")]
+    if let Some(bucket) = AN_CURRENT.with(Cell::get) {
+        AN_VISIT_JS.with(|c| {
+            let mut v = c.get();
+            v[bucket as usize] += n;
+            c.set(v);
+        });
+    }
+    #[cfg(not(feature = "measure-analyze-nodes"))]
+    let _ = n;
+}
+
+/// Source bytes the analyze phase was handed, summed over compiles.
+///
+/// The implementation-independent denominator: two compilers reading the same
+/// files agree on it exactly, while their node counts do not.
+#[inline]
+pub fn count_analyze_source_bytes(n: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    AN_SOURCE_BYTES.with(|c| c.set(c.get() + n));
+}
+
+/// Per-bucket visits and the shared byte denominator, cleared by the read.
+///
+/// Indexed by [`AnalyzeBucket`]; slot 6 is the residual. The template counts
+/// are live whenever `measure-analyze-nodes` is on; the JS counts come from the
+/// same feature, so a consumer must check `js_counted` rather than reading
+/// zeros as "no JS work happened".
+pub struct AnalyzeVisits {
+    pub template: [u64; ANALYZE_BUCKETS],
+    pub js: [u64; ANALYZE_BUCKETS],
+    pub source_bytes: u64,
+    pub js_counted: bool,
+}
+
+pub fn take_analyze_visits() -> AnalyzeVisits {
+    AnalyzeVisits {
+        template: AN_VISIT_TEMPLATE.with(|c| c.replace([0; ANALYZE_BUCKETS])),
+        js: AN_VISIT_JS.with(|c| c.replace([0; ANALYZE_BUCKETS])),
+        source_bytes: AN_SOURCE_BYTES.with(|c| c.replace(0)),
+        js_counted: cfg!(feature = "measure-analyze-nodes"),
+    }
 }
 
 /// One template node dispatched by `visitors::visit_node`.

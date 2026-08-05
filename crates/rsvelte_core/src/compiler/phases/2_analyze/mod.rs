@@ -135,6 +135,23 @@ pub(crate) fn analyze_prepared_component_with_retained(
     options: &CompileOptions,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
 ) -> Result<ComponentAnalysis, AnalysisError> {
+    // This function, not `analyze_component`, is what the pipeline calls and
+    // what `record_pipeline_analyze` times -- `analyze_component` is the entry
+    // that first resolves lazy expressions and deferred scripts, and the
+    // pipeline bills those to its own `resolve_lazy` / `ensure_script` buckets.
+    // Putting the guard here is what makes this split's parent the same span as
+    // the pipeline's `analyze`.
+    //
+    // Everything below that is not inside one of the six bucket guards is the
+    // phase's inline work, and charging it to `Residual` makes the residual a
+    // measured quantity rather than a subtraction. The guard also bounds the
+    // attribution: outside this call there is no current bucket, so parse's and
+    // transform's reads of the shared arena accessor are charged nowhere.
+    let _phase = profile::enter_analyze_phase();
+    // The implementation-independent denominator. Two compilers handed the same
+    // files agree on it exactly; their node counts do not.
+    profile::count_analyze_source_bytes(source.len() as u64);
+
     let mut analysis = ComponentAnalysis::new(source, options);
     analysis.css.has_css = ast.css.is_some();
 
@@ -252,12 +269,18 @@ pub(crate) fn analyze_prepared_component_with_retained(
 
     // Extract script content for Phase 3 (avoids re-parsing)
     let _t = profile::timer_start();
-    analysis.extract_scripts(ast, source, retained_scripts);
+    {
+        let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::ExtractScripts);
+        analysis.extract_scripts(ast, source, retained_scripts);
+    }
     profile::record_analyze_extract_scripts(profile::timer_elapsed(_t));
 
     // Create scopes for the component
     let _t = profile::timer_start();
-    let create_scopes_result = analysis.create_scopes(ast, &ast.arena);
+    let create_scopes_result = {
+        let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::CreateScopes);
+        analysis.create_scopes(ast, &ast.arena)
+    };
     profile::record_analyze_create_scopes(profile::timer_elapsed(_t));
     create_scopes_result?;
 
@@ -273,12 +296,15 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // would skip the record, so an erroring compile would silently drop the
     // time it spent here and the bucket's call count would under-report.
     let _t = profile::timer_start();
-    let store_subs_result = store_subscriptions::detect_store_subscriptions(
-        ast,
-        &mut analysis,
-        options.runes,
-        is_module_file,
-    );
+    let store_subs_result = {
+        let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::StoreSubs);
+        store_subscriptions::detect_store_subscriptions(
+            ast,
+            &mut analysis,
+            options.runes,
+            is_module_file,
+        )
+    };
     profile::record_analyze_store_subs(profile::timer_elapsed(_t));
     store_subs_result?;
 
@@ -548,7 +574,10 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // is never mutated through `&mut ast`, so there is no aliasing conflict.
     let arena_ref = unsafe { &*arena_ptr };
     let _t = profile::timer_start();
-    let template_result = visitors::analyze_template(ast, &mut analysis, arena_ref);
+    let template_result = {
+        let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::Template);
+        visitors::analyze_template(ast, &mut analysis, arena_ref)
+    };
     profile::record_analyze_template(profile::timer_elapsed(_t));
     template_result?;
 
@@ -790,13 +819,17 @@ pub(crate) fn analyze_prepared_component_with_retained(
         // calls for the same reason as above: an early return must not skip a
         // record.
         let _t = profile::timer_start();
-        let css_analyze_result = analysis.analyze_css(stylesheet, options).and_then(|()| {
-            css::analyze::analyze_css_with_source(stylesheet, &mut analysis, Some(source))
-        });
+        let css_analyze_result = {
+            let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::CssAnalyze);
+            analysis.analyze_css(stylesheet, options).and_then(|()| {
+                css::analyze::analyze_css_with_source(stylesheet, &mut analysis, Some(source))
+            })
+        };
         profile::record_analyze_css_analyze(profile::timer_elapsed(_t));
         css_analyze_result?;
 
         let _t = profile::timer_start();
+        let _b = profile::enter_analyze_bucket(profile::AnalyzeBucket::CssScope);
 
         // Extract CSS selector information for per-element scoping
         css::extract_css_selector_info(stylesheet, &mut analysis);

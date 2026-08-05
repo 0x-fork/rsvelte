@@ -35,6 +35,13 @@ measure-ast-state = []
 # phase timers cost per compile. The unit is `timer_start`, which is identical
 # at every site, unlike the recorders. Off by default.
 measure-timer-calls = []
+# Repository-local instrumentation: attribute template-node dispatches and JS
+# child-slot expansions to whichever analyze bucket is running. The JS counter
+# sits in `ParseArena::get_js_children`, which every phase calls and which is
+# one of the hottest accessors in the compiler, so this is a feature rather
+# than a runtime switch: an always-on branch there would move the thing being
+# measured. Off by default.
+measure-analyze-nodes = []
 # Repository-local instrumentation: replay the pre-refactor `await` scanner so
 # the `String` allocations it performed can be counted. Off by default.
 measure-await = []

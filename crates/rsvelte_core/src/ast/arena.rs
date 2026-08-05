@@ -392,6 +392,12 @@ impl ParseArena {
         if range.is_empty() {
             return &[];
         }
+        // Walk volume for the analyze sub-split. Compiles to nothing without
+        // `measure-analyze-nodes`, and charges nothing outside the analyze
+        // phase: this accessor is shared by every phase.
+        crate::compiler::phases::phase3_transform::profile::count_analyze_visit_js(u64::from(
+            range.len,
+        ));
         // SAFETY: Single-threaded read. Children live in chunk allocations that
         // are never moved, so later safe allocation cannot invalidate a slice
         // returned here.

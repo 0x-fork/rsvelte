@@ -312,6 +312,7 @@ pub fn napi_take_pipeline_split() -> Value {
 #[napi(js_name = "takeAnalyzeSplit", catch_unwind)]
 pub fn napi_take_analyze_split() -> Value {
     let b = rsvelte_core::compiler::phases::phase3_transform::profile::take_analyze_breakdown();
+    let v = rsvelte_core::compiler::phases::phase3_transform::profile::take_analyze_visits();
     let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
     serde_json::json!({
         "extractScripts": ns(b.extract_scripts),
@@ -333,6 +334,25 @@ pub fn napi_take_analyze_split() -> Value {
         // call the result us/node.
         "createScopesNodes": b.create_scopes_nodes,
         "templateNodes": b.template_nodes,
+        // Per-bucket walk volume. Index order is
+        // [extractScripts, createScopes, storeSubs, template, cssAnalyze,
+        //  cssScope, residual].
+        //
+        // `jsCounted` is false unless the crate was built with
+        // `measure-analyze-nodes`; then every `visitsJs` entry is zero because
+        // nothing counted, not because nothing walked. Check the flag before
+        // dividing.
+        //
+        // `visitsJs` counts CHILD-SLOT EXPANSIONS, not distinct nodes: a walk
+        // that reads one node's children twice charges them twice. It is walk
+        // volume inside rsvelte, and it is not the quantity another compiler
+        // calls a "visit" -- a cross-compiler `us/visit` would divide by two
+        // different definitions. `sourceBytes` is the denominator without that
+        // problem: two compilers handed the same files agree on it exactly.
+        "visitsTemplate": v.template.to_vec(),
+        "visitsJs": v.js.to_vec(),
+        "jsCounted": v.js_counted,
+        "sourceBytes": v.source_bytes,
         "totalNs": ns(b.total),
         "compiles": b.compiles,
     })

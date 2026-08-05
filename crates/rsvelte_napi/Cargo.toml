@@ -29,6 +29,10 @@ default = ["mimalloc-alloc"]
 # when Node dlopen's this addon after program start.
 jemalloc = ["dep:tikv-jemallocator", "tikv-jemallocator?/disable_initial_exec_tls"]
 mimalloc-alloc = ["dep:mimalloc"]
+# Repository-local instrumentation for the analyze sub-split's JS walk volume.
+# The counter sits in the compiler's hottest arena accessor, so it is opt-in:
+# build the addon with this for a node-count run, never for a timing run.
+measure-analyze-nodes = ["rsvelte_core/measure-analyze-nodes"]
 
 [dependencies]
 rsvelte_core = { path = "../rsvelte_core", default-features = false, features = ["parallel"] }
