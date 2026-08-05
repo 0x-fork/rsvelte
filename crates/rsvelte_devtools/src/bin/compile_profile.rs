@@ -107,7 +107,9 @@ fn main() {
         let arena = oxc_allocator::Allocator::default();
         let ast = parse(content, &arena, parse_opts).ok();
         let (script_bytes, runes) = script_shape(ast.as_ref(), content);
+        let r = profile::take_reparse_breakdown();
         scaling.push(ScalingRow {
+            file_bytes: content.len(),
             script_bytes,
             ensure_script: p.ensure_script,
             runes,
@@ -116,12 +118,12 @@ fn main() {
             template: b.template_fragment,
             codegen: b.codegen,
             transform: p.transform,
+            // Re-parse volume against the script text is the one figure here
+            // that no clock enters, so it can be read on a loaded machine.
+            reparse_bytes: r.bytes + r.direct_bytes,
+            reparse_calls: r.calls + r.direct_calls,
         });
-        rows.push((
-            content.len(),
-            p.transform,
-            profile::take_reparse_breakdown(),
-        ));
+        rows.push((content.len(), p.transform, r));
     }
 
     let parse_time = pipeline.parse;
@@ -346,12 +348,13 @@ fn main() {
 fn dump_rows(rows: &[ScalingRow], path: &str) {
     let ns = |d: std::time::Duration| d.as_nanos();
     let mut out = String::from(
-        "script_bytes,runes,ensure_script,analyze,script_text,template,codegen,transform\n",
+        "file_bytes,script_bytes,runes,ensure_script,analyze,script_text,template,codegen,transform,reparse_bytes,reparse_calls\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
+            r.file_bytes,
             r.script_bytes,
             r.runes,
             ns(r.ensure_script),
@@ -359,7 +362,9 @@ fn dump_rows(rows: &[ScalingRow], path: &str) {
             ns(r.script_text),
             ns(r.template),
             ns(r.codegen),
-            ns(r.transform)
+            ns(r.transform),
+            r.reparse_bytes,
+            r.reparse_calls
         );
     }
     match std::fs::write(path, out) {
@@ -369,6 +374,7 @@ fn dump_rows(rows: &[ScalingRow], path: &str) {
 }
 
 struct ScalingRow {
+    file_bytes: usize,
     script_bytes: usize,
     ensure_script: std::time::Duration,
     runes: usize,
@@ -377,6 +383,8 @@ struct ScalingRow {
     template: std::time::Duration,
     codegen: std::time::Duration,
     transform: std::time::Duration,
+    reparse_bytes: u64,
+    reparse_calls: u64,
 }
 
 /// Script size and rune count for one file.
