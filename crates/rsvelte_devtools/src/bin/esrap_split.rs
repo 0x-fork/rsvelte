@@ -64,9 +64,23 @@ fn ms(d: Duration) -> f64 {
 
 fn main() {
     profile::set_timers_enabled(true);
-    let roots: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // `--plain` sends every print through the non-map driver. That arm is not
+    // about source maps: it is the only way to price a *first* traversal of the
+    // command tree without the per-character loop on top. `recycle` also walks
+    // the whole tree cheaply, but it runs after `flatten` has already pulled the
+    // tree through cache, so it cannot answer whether this layout is expensive
+    // to walk cold. `flatten_plain` can.
+    let mut plain = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "--plain" {
+            plain = true;
+        } else {
+            roots.push(PathBuf::from(arg));
+        }
+    }
     if roots.is_empty() {
-        eprintln!("usage: esrap_split <dir>...");
+        eprintln!("usage: esrap_split [--plain] <dir>...");
         std::process::exit(1);
     }
 
@@ -97,6 +111,7 @@ fn main() {
             CompileOptions {
                 generate: GenerateMode::Client,
                 dev: false,
+                enable_sourcemap: !plain,
                 ..Default::default()
             },
         );
@@ -129,6 +144,14 @@ fn main() {
         + outer.server_print_calls
         + outer.server_pipe_calls
         + outer.normalize_calls;
+    println!(
+        "arm: {}",
+        if plain {
+            "--plain (non-map driver, no per-character loop)"
+        } else {
+            "default (source maps on, as the compiler ships)"
+        }
+    );
     println!(
         "{} files, {} print calls ({:.1}% of files reached esrap)",
         sources.len(),
@@ -312,6 +335,11 @@ fn main() {
         ),
         ("print_program / node dispatched", inner.print_program, nodes),
         ("flatten_map / command read", inner.flatten_map, commands),
+        (
+            "flatten_plain / command read",
+            inner.flatten_plain,
+            commands,
+        ),
         (
             "flatten_map / output byte",
             inner.flatten_map,
