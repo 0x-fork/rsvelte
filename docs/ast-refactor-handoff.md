@@ -48,10 +48,24 @@ esrap 印字は corpus 25.1µs/file、svelte-rs の `oxc_codegen` は 8.1µs/fil
 | M | 内容 | 期待削減 | 撤退条件 |
 |---|---|---|---|
 | M0 | oracle ハーネス + `client/ast/` スケルトン + 本ドキュメント復活 | 0（インフラ） | なし |
-| M1 | client script 変換の単一 AST パス化（`server/ast/script.rs` + `read_wrap.rs` 写経） | −30〜35µs | oracle 差分が 3 連続作業セッションで減少しない、または差分原因が §4 の構造問題（単一パス不能）と特定された場合はブランチ破棄 |
-| M2 | テンプレート式変換の単一 AST パス化（`has_reactive_state_json` 550 行の typed 化を吸収） | −20〜25µs | 220 件回帰の再演を検知したら即 revert |
-| M3 | `js_ast` IR 廃止（`to_oxc.rs` / `codegen.rs` 削除） | −14µs | テキストプリンタ経路（scriptless）の差分が 3 連続作業セッションで解決しなければ、テキストプリンタだけ残す縮退案へ |
-| M4 | esrap 最適化 + `*_ast.rs` 36 ファイル削除 + CI ガード | −10〜13µs | バイト差が出たら即 revert |
+| M1 | client script 変換の単一 AST パス化（`server/ast/script.rs` + `read_wrap.rs` 写経） | ~~−30〜35µs~~ → **実測 6.4µs/file。★ かつ既に完了**（下記） | — |
+| M2 | テンプレート式変換の単一 AST パス化（`has_reactive_state_json` 550 行の typed 化を吸収） | −20〜25µs **（未検証）** | 220 件回帰の再演を検知したら即 revert |
+| M3 | `js_ast` IR 廃止（`to_oxc.rs` / `codegen.rs` 削除） | −14µs **（未検証）** | テキストプリンタ経路（scriptless）の差分が 3 連続作業セッションで解決しなければ、テキストプリンタだけ残す縮退案へ |
+| M4 | esrap 最適化 + `*_ast.rs` 36 ファイル削除 + CI ガード | −10〜13µs **（未検証）** | バイト差が出たら即 revert |
+
+**★ M2〜M4 の µs を「未検証」と書いているのは形式ではありません。**
+M1 の見積りは実測で **5 倍**外れており、**M2〜M4 は同じ人が同じ方法で出した数字**です。
+**「M1 だけ特別に外れていた」と読まないこと。** 金額は全部検算されていないものとして扱い、
+各 M に入る前に M1 と同型の決定論カウンタで検算する。
+
+**一方、標的の方向は独立の実測で裏づけられています**（金額と方向を混ぜないこと）:
+
+```
+C（構築）= visitProgram + scriptText + templateFragment + assembly
+         = 302.5us vs svelte-rs(transform+codegen) 48.1us = 6.28x
+         = Phase 3 gap の 59.8%、全 gap の 48.8%（n=12、分解能 5.3%）
+M2/M3 はまさにこの C を作っている工程。★ 方向は確定、金額は未検証
+```
 
 **M0 を飛ばして M1 に入ることは禁止**（§5 の「220 件回帰 ×2」を再演するため）。
 
@@ -220,6 +234,11 @@ M1 を「`server/ast/script.rs` を写経して意味論を移植し直す」と
 - 現状: 1 パスごとに「script をパース → 編集を収集 → テキストに戻す」。適用パス数だけ
   **パースとシリアライズを往復**する（`ast_rewrite.rs` のドキュメント自身が
   「Every `transform_*_ast` pass in this directory follows the same shape」と明記）
+
+  **★ 訂正（2026-08-06 実測）: 「適用パス数だけ往復する」は実プロジェクトでは偽。**
+  実測は **1 コンパイルあたり 0.32〜0.62 回**（flowbite / shadcn / layerchart / bits-ui / skeleton）。
+  **37 本が毎回走るわけではなく、ほとんどのパスはほとんどの入力で何もしない。**
+  10.13 回に達するのは svelte-ux だけで、そこはレガシー `$:` が濃い。上表を参照。
 - M1 後: script を **1 回だけ**パースし、37 本の collector を `VisitMut` で **同じ `Program` に対して
   in-place 適用**、最後に esrap で 1 回印字
 
