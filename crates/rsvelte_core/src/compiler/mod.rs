@@ -652,7 +652,11 @@ pub(crate) fn prepare_and_analyze<'source>(
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileResult, CompileError> {
     let generate = options.generate;
     let _total_start = phases::phase3_transform::profile::timer_start();
-    let result = crate::toolchain::PreparedComponent::new(source, options)?.compile_mode(generate);
+    // No `?` before the total is recorded. A source that fails to prepare still
+    // spends time in the phases that ran, and skipping the total would leave
+    // those buckets summing to more than a denominator they never joined.
+    let result = crate::toolchain::PreparedComponent::new(source, options)
+        .and_then(|mut prepared| prepared.compile_mode(generate));
     phases::phase3_transform::profile::record_pipeline_total(
         phases::phase3_transform::profile::timer_elapsed(_total_start),
     );
@@ -666,8 +670,9 @@ pub fn compile_with_external_sourcemap_content(
 ) -> Result<CompileResult, CompileError> {
     let generate = options.generate;
     let _total_start = phases::phase3_transform::profile::timer_start();
-    let result = crate::toolchain::PreparedComponent::new(source, options)?
-        .compile_mode_with_sourcemap_content(generate, false);
+    // See `compile` for why the failure path has to reach the recorder too.
+    let result = crate::toolchain::PreparedComponent::new(source, options)
+        .and_then(|mut prepared| prepared.compile_mode_with_sourcemap_content(generate, false));
     phases::phase3_transform::profile::record_pipeline_total(
         phases::phase3_transform::profile::timer_elapsed(_total_start),
     );
@@ -697,7 +702,9 @@ pub fn compile_both(
     // though it produces two outputs, which is what sharing the parse and the
     // analysis makes it.
     let _total_start = phases::phase3_transform::profile::timer_start();
-    let result = crate::toolchain::PreparedComponent::new(source, options)?.compile_both();
+    // See `compile` for why the failure path has to reach the recorder too.
+    let result = crate::toolchain::PreparedComponent::new(source, options)
+        .and_then(|mut prepared| prepared.compile_both());
     phases::phase3_transform::profile::record_pipeline_total(
         phases::phase3_transform::profile::timer_elapsed(_total_start),
     );

@@ -33,24 +33,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rsvelte_core::compiler::phases::phase1_parse::{
-    ParseOptions, compute_line_offsets, ensure_script_parsed, parse, resolve_lazy_expressions,
-};
-use rsvelte_core::compiler::phases::phase2_analyze::analyze_component;
-use rsvelte_core::compiler::phases::phase3_transform::{profile, transform_component};
+use rsvelte_core::compiler::phases::phase3_transform::profile;
 use rsvelte_core::{CompileOptions, GenerateMode};
-
-/// Parse options used by the production `compile()` front half.
-const PARSE_OPTS: ParseOptions = ParseOptions {
-    modern: true,
-    loose: false,
-    skip_expression_loc: true,
-    defer_script_parse: true,
-    force_typescript: false,
-    lenient_script: false,
-    skip_non_css_lang_style: false,
-    capture_comments: false,
-};
 
 #[derive(Clone, Copy)]
 struct Mode {
@@ -90,11 +74,7 @@ impl Mode {
 
 #[derive(Default)]
 struct Split {
-    parse: Duration,
-    lazy: Duration,
-    script: Duration,
-    analyze: Duration,
-    transform: Duration,
+    pipeline: profile::PipelineBreakdown,
     p3: profile::Phase3Breakdown,
 }
 
@@ -210,68 +190,39 @@ fn compile_pass(files: &[(String, String)], live: &[usize], opts: CompileOptions
     start.elapsed()
 }
 
-/// Per-phase split. Uses the public phase entry points rather than the private
-/// `compile()` internals, so `transform_component` runs **without** the retained
-/// scripts the production path reuses — the transform figure is an upper bound.
+/// Per-phase split, taken from inside the production pipeline.
+///
+/// An earlier version drove the public phase entry points in sequence, which
+/// meant `transform_component` ran without the retained scripts production
+/// reuses, TypeScript was never removed, `<svelte:options>` was never merged,
+/// and line offsets were built with the wrong flag. Two of those inflate a
+/// bucket and one shrinks the denominator, so the shares could not be read as a
+/// split in either direction. Driving `compile` leaves nothing to orchestrate.
 fn report_split(mode: Mode, files: &[(String, String)], live: &[usize], reps: usize) {
     let opts = mode.options(true);
     let mut best: Option<Split> = None;
     for _ in 0..reps.min(3) {
         let _ = profile::take_breakdown();
-        let mut s = Split::default();
+        let _ = profile::take_pipeline_breakdown();
         for &i in live {
-            let src = &files[i].1;
-            let alloc = oxc_allocator::Allocator::default();
-
-            let t = Instant::now();
-            let Ok(mut ast) = parse(src, &alloc, PARSE_OPTS) else {
-                continue;
-            };
-            s.parse += t.elapsed();
-
-            // SAFETY: `ast` lives for the rest of this iteration and the arena
-            // pointer is cleared before it is dropped.
-            unsafe { rsvelte_core::ast::arena::set_serialize_arena(&ast.arena as *const _) };
-
-            let t = Instant::now();
-            let _ = resolve_lazy_expressions(&mut ast, src);
-            s.lazy += t.elapsed();
-
-            let t = Instant::now();
-            let line_offsets = compute_line_offsets(src, false);
-            if let Some(ref mut instance) = ast.instance {
-                let _ = ensure_script_parsed(&ast.arena, instance, src, &line_offsets);
-            }
-            if let Some(ref mut module) = ast.module {
-                let _ = ensure_script_parsed(&ast.arena, module, src, &line_offsets);
-            }
-            s.script += t.elapsed();
-
-            let t = Instant::now();
-            let analysis = analyze_component(&mut ast, src, &opts);
-            s.analyze += t.elapsed();
-
-            if let Ok(analysis) = analysis {
-                let t = Instant::now();
-                std::hint::black_box(transform_component(&analysis, &ast, src, &opts).is_ok());
-                s.transform += t.elapsed();
-            }
-
-            rsvelte_core::ast::arena::clear_serialize_arena();
+            std::hint::black_box(rsvelte_core::compile(&files[i].1, opts.clone()).is_ok());
         }
-        s.p3 = profile::take_breakdown();
-        let sum = s.parse + s.lazy + s.script + s.analyze + s.transform;
-        if best
-            .as_ref()
-            .is_none_or(|b| sum < b.parse + b.lazy + b.script + b.analyze + b.transform)
-        {
+        let s = Split {
+            pipeline: profile::take_pipeline_breakdown(),
+            p3: profile::take_breakdown(),
+        };
+        // The whole compile is measured independently of the buckets, so the
+        // fastest repetition is the one with the smallest total rather than the
+        // smallest sum of the parts.
+        if best.as_ref().is_none_or(|b| s.pipeline.total < b.pipeline.total) {
             best = Some(s);
         }
     }
-    let s = best.unwrap();
-    let total = s.parse + s.lazy + s.script + s.analyze + s.transform;
+    let s = best.expect("at least one repetition");
+    let total = s.pipeline.total;
     let pct = |d: Duration| d.as_secs_f64() / total.as_secs_f64() * 100.0;
     let p3_other = s
+        .pipeline
         .transform
         .saturating_sub(s.p3.visit_program)
         .saturating_sub(s.p3.script_text_transform)
@@ -281,17 +232,21 @@ fn report_split(mode: Mode, files: &[(String, String)], live: &[usize], reps: us
         .saturating_sub(s.p3.codegen);
 
     println!(
-        "\n## phase split — {} (sum {:.2} ms)",
+        "\n## phase split — {} (total {:.2} ms over {} compiles)",
         mode.label,
-        msf(total)
+        msf(total),
+        s.pipeline.compiles
     );
     let row =
         |name: &str, d: Duration| println!("  {:<22} {:>9.2} ms  {:>5.1}%", name, msf(d), pct(d));
-    row("P1 parse (template)", s.parse);
-    row("P1 resolve-lazy expr", s.lazy);
-    row("P1 script parse (oxc)", s.script);
-    row("P2 analyze", s.analyze);
-    row("P3 transform", s.transform);
+    row("P1 parse (template)", s.pipeline.parse);
+    row("P1 line offsets", s.pipeline.line_offsets);
+    row("P1 resolve-lazy expr", s.pipeline.resolve_lazy);
+    row("P1 script parse (oxc)", s.pipeline.ensure_script);
+    row("P1 ts removal", s.pipeline.ts_removal);
+    row("P1 options merge", s.pipeline.options_merge);
+    row("P2 analyze", s.pipeline.analyze);
+    row("P3 transform", s.pipeline.transform);
     row("  . visit_program", s.p3.visit_program);
     row("  . script-text xform", s.p3.script_text_transform);
     row("  . template fragment", s.p3.template_fragment);
@@ -299,6 +254,8 @@ fn report_split(mode: Mode, files: &[(String, String)], live: &[usize], reps: us
     row("  . css render", s.p3.css_render);
     row("  . js codegen", s.p3.codegen);
     row("  . p3 uninstrumented", p3_other);
+    row("finalize result", s.pipeline.finalize);
+    row("unattributed", s.pipeline.unattributed());
 }
 
 fn report_slowest(mode: Mode, files: &[(String, String)], live: &[usize], n: usize) {
