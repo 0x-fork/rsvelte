@@ -47,11 +47,21 @@
 //!
 //! # Entry point
 //!
-//! Drives `compile_with_external_sourcemap_content`, which is what the napi
-//! binding calls (`rsvelte_napi/src/lib.rs`), i.e. the entry whose timings the
-//! gap benchmark reports. `rsvelte_core::compile` differs from it only in
-//! passing `include_sourcemap_content = true`; if the benchmark's entry ever
-//! changes, change the call below.
+//! Drives `compile_with_external_sourcemap_content`, which is **not** the entry
+//! the gap benchmark measures. The harness calls `addon.compile`, which reaches
+//! `rsvelte_core::compile` -- the same pipeline with `include_sourcemap_content
+//! = true`.
+//!
+//! An earlier version of this note said this binary drove "what the napi
+//! binding calls". The binding has several entries, and naming one of them as
+//! the entry made a difference of one boolean look like agreement with the
+//! benchmark. Both entries record `total`, so a split taken here is internally
+//! consistent; it is simply not the benchmark's population.
+//!
+//! For a comparison against another compiler, read the split through
+//! `takePipelineSplit` in the napi binding instead, so that one harness drives
+//! both compilers in the same minute. That matters because bucket shares move
+//! several points between runs at the loads this machine sees.
 //!
 //! ```text
 //! cargo run --release -p rsvelte_devtools --bin pipeline_split -- <dir>...
