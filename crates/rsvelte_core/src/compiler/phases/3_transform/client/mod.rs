@@ -3691,13 +3691,26 @@ pub(super) fn is_variable_reassigned_in_text(script: &str, var_name: &str) -> bo
 }
 
 pub(super) fn extract_local_reactive_vars(script: &str) -> Vec<(String, bool, bool)> {
-    if memmem::find(script.as_bytes(), b"$state").is_none()
-        && memmem::find(script.as_bytes(), b"$derived").is_none()
-    {
-        return Vec::new();
+    let state_at = memmem::find(script.as_bytes(), b"$state");
+    super::profile::count_scan_site(
+        super::profile::SCAN_SITE_CV_TEXT,
+        state_at.map_or(script.len(), |pos| pos + 6),
+    );
+    if state_at.is_none() {
+        let derived_at = memmem::find(script.as_bytes(), b"$derived");
+        super::profile::count_scan_site(
+            super::profile::SCAN_SITE_CV_TEXT,
+            derived_at.map_or(script.len(), |pos| pos + 8),
+        );
+        if derived_at.is_none() {
+            return Vec::new();
+        }
     }
 
     let mut vars = Vec::new();
+    // The regex walks the whole input once regardless of how many captures it
+    // yields, so the whole length is the exact charge here, not an upper bound.
+    super::profile::count_scan_site(super::profile::SCAN_SITE_CV_TEXT, script.len());
 
     // Pattern: (let|const|var) varname = $state(...) or (let|const|var) varname = $derived(...)
     // Uses cached regex for performance
@@ -3807,11 +3820,17 @@ fn is_inside_function_with_param(script: &str, pos: usize, param_name: &str) -> 
 fn extract_proxy_vars(script: &str) -> Vec<String> {
     let mut proxy_vars = Vec::new();
 
+    super::profile::count_scan_site(super::profile::SCAN_SITE_CV_PROXY, script.len());
     for line in script.lines() {
         let trimmed = line.trim();
 
         // Look for patterns like: let/const/var varname = $state({ ... }) or $state([ ... ])
-        if let Some(state_pos) = memmem::find(trimmed.as_bytes(), b"$state(") {
+        let hit = memmem::find(trimmed.as_bytes(), b"$state(");
+        super::profile::count_scan_site(
+            super::profile::SCAN_SITE_CV_PROXY,
+            hit.map_or(trimmed.len(), |pos| pos + 7),
+        );
+        if let Some(state_pos) = hit {
             // Check if this is a declaration
             if trimmed.starts_with("let ")
                 || trimmed.starts_with("const ")
@@ -4775,6 +4794,8 @@ fn transform_instance_script_for_visitors(
     super::profile::record_cv_text_index(super::profile::timer_elapsed(_cv));
     let _cv = super::profile::timer_start();
     let proxy_vars = extract_proxy_vars(&script_rest);
+    super::profile::record_cv_proxy_vars(super::profile::timer_elapsed(_cv));
+    let _cv = super::profile::timer_start();
 
     // Collect rest_prop variable names (from `let props = $props()`)
     let rest_prop_vars: Vec<String> = analysis

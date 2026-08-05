@@ -446,8 +446,9 @@ thread_local! {
     static CV_TEXT_INDEX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_BINDING_VECS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_SET_MAPS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_PROXY_VARS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_LINE_SPLIT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
-    static CV_CALLS: Cell<[u64; 5]> = const { Cell::new([0; 5]) };
+    static CV_CALLS: Cell<[u64; 6]> = const { Cell::new([0; 6]) };
     static REWRITE_CALLS: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
     static REWRITE_FILES: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
     static REWRITE_SEEN: Cell<[bool; REWRITE_SITE_COUNT]> = const { Cell::new([false; REWRITE_SITE_COUNT]) };
@@ -848,9 +849,23 @@ pub const SCAN_SITE_STAGED: usize = 0;
 pub const SCAN_SITE_SHADOW_INDEX: usize = 1;
 pub const SCAN_SITE_SHADOW_ENCLOSING: usize = 2;
 pub const SCAN_SITE_SHADOW_BODY: usize = 3;
-pub const SCAN_SITE_COUNT: usize = 4;
-pub const SCAN_SITE_NAMES: [&str; SCAN_SITE_COUNT] =
-    ["staged", "shadow_index", "shadow_enclosing", "shadow_body"];
+/// The `collect_vars` extractors. Separate from `staged` because the same two
+/// functions also run on the module script, outside the staged pipeline, so
+/// folding them in would put out-of-scope work in a bucket the size bands read.
+pub const SCAN_SITE_CV_TEXT: usize = 4;
+/// `extract_proxy_vars` sits in a different sub-timer than the other extractor,
+/// so it gets its own site: a single figure spanning two timers cannot be
+/// divided into either of them.
+pub const SCAN_SITE_CV_PROXY: usize = 5;
+pub const SCAN_SITE_COUNT: usize = 6;
+pub const SCAN_SITE_NAMES: [&str; SCAN_SITE_COUNT] = [
+    "staged",
+    "shadow_index",
+    "shadow_enclosing",
+    "shadow_body",
+    "cv_text (local_reactive)",
+    "cv_proxy (proxy_vars)",
+];
 
 /// Where the staged script pipeline first stops being a reader.
 ///
@@ -1037,6 +1052,10 @@ pub struct CollectVarsBreakdown {
     /// `extract_local_reactive_vars` + the two one-pass text indexes and the
     /// classification loop over them -- the only text-driven part.
     pub text_index: Duration,
+    /// `extract_proxy_vars`: one line walk plus a find per line. Timed apart
+    /// from the binding builds it sits between, because a scan and a `Vec`
+    /// build answer different questions about what to do with the bucket.
+    pub proxy_vars: Duration,
     /// The long run of `bindings.iter().filter().map(clone).collect()` builds.
     pub binding_vecs: Duration,
     /// Hash set/map builds (`name_occurrences`, `names_all_non_proxy`, ...).
@@ -1045,17 +1064,18 @@ pub struct CollectVarsBreakdown {
     pub line_split: Duration,
     /// One per sub-timer, so a mismatch localises to a boundary instead of
     /// only showing up as a stage-level discrepancy.
-    pub calls: [u64; 5],
+    pub calls: [u64; 6],
 }
 
 pub fn take_collect_vars_breakdown() -> CollectVarsBreakdown {
     CollectVarsBreakdown {
         analysis_vecs: CV_ANALYSIS_VECS.with(|c| c.replace(Duration::ZERO)),
         text_index: CV_TEXT_INDEX.with(|c| c.replace(Duration::ZERO)),
+        proxy_vars: CV_PROXY_VARS.with(|c| c.replace(Duration::ZERO)),
         binding_vecs: CV_BINDING_VECS.with(|c| c.replace(Duration::ZERO)),
         set_maps: CV_SET_MAPS.with(|c| c.replace(Duration::ZERO)),
         line_split: CV_LINE_SPLIT.with(|c| c.replace(Duration::ZERO)),
-        calls: CV_CALLS.with(|c| c.replace([0; 5])),
+        calls: CV_CALLS.with(|c| c.replace([0; 6])),
     }
 }
 
@@ -1078,9 +1098,10 @@ macro_rules! cv_recorder {
 
 cv_recorder!(record_cv_analysis_vecs, CV_ANALYSIS_VECS, 0);
 cv_recorder!(record_cv_text_index, CV_TEXT_INDEX, 1);
-cv_recorder!(record_cv_binding_vecs, CV_BINDING_VECS, 2);
-cv_recorder!(record_cv_set_maps, CV_SET_MAPS, 3);
-cv_recorder!(record_cv_line_split, CV_LINE_SPLIT, 4);
+cv_recorder!(record_cv_proxy_vars, CV_PROXY_VARS, 2);
+cv_recorder!(record_cv_binding_vecs, CV_BINDING_VECS, 3);
+cv_recorder!(record_cv_set_maps, CV_SET_MAPS, 4);
+cv_recorder!(record_cv_line_split, CV_LINE_SPLIT, 5);
 
 /// One level below [`Phase3Breakdown::assembly_after_fragment`].
 ///

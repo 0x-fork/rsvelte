@@ -323,6 +323,7 @@ fn main() {
     for (label, val) in [
         ("cv_analysis_vecs", ms(cv.analysis_vecs)),
         ("cv_text_index", ms(cv.text_index)),
+        ("cv_proxy_vars", ms(cv.proxy_vars)),
         ("cv_binding_vecs", ms(cv.binding_vecs)),
         ("cv_set_maps", ms(cv.set_maps)),
         ("cv_line_split", ms(cv.line_split)),
@@ -336,12 +337,14 @@ fn main() {
         "      cv IDENTITY sum {:.2}ms vs parent {:.2}ms ({:+.3}ms) | calls {:?} vs staged {}",
         ms(cv.analysis_vecs)
             + ms(cv.text_index)
+            + ms(cv.proxy_vars)
             + ms(cv.binding_vecs)
             + ms(cv.set_maps)
             + ms(cv.line_split),
         ms(st.collect_vars),
         ms(cv.analysis_vecs)
             + ms(cv.text_index)
+            + ms(cv.proxy_vars)
             + ms(cv.binding_vecs)
             + ms(cv.set_maps)
             + ms(cv.line_split)
