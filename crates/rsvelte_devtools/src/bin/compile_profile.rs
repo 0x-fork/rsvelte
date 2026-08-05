@@ -333,7 +333,7 @@ fn main() {
         );
     }
     println!(
-        "      cv IDENTITY sum {:.2}ms vs parent {:.2}ms ({:+.3}ms) | calls {} vs staged {}",
+        "      cv IDENTITY sum {:.2}ms vs parent {:.2}ms ({:+.3}ms) | calls {:?} vs staged {}",
         ms(cv.analysis_vecs)
             + ms(cv.text_index)
             + ms(cv.binding_vecs)
@@ -346,7 +346,7 @@ fn main() {
             + ms(cv.set_maps)
             + ms(cv.line_split)
             - ms(st.collect_vars),
-        format!("{:?}", cv.calls),
+        cv.calls,
         st.calls
     );
     for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::REWRITE_SITE_NAMES
