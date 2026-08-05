@@ -251,6 +251,58 @@ svelte-rs に対応工程が無い分（script_text 148.21ms の内訳）:
 **⚠ `transform_shadowed_local_state_vars` の「12×full-script find」は 2026-07-31 に索引化済み。**
 残っているのは内側の per-(var, shape) `find_enclosing_function_body` で、上記の通り ≤3.1%。
 
+### ★ script パイプラインは どこで テキストを壊すか（2026-08-06、commit `c55656df`）★
+
+**部分移行が成立するかは、コード順ではなく発火率で決まる。**
+
+```
+prenormalize    書き換える（4 本、★全部が条件付き★）   ← コード順の最初
+collect_vars    ★ 読むだけ ★（script_rest への再代入なし）
+line_loop       書き換える（★無条件★）                  ← ★ 実質的な最初の書き換え ★
+ast_transforms  書き換える（＋再パース）
+post_passes     書き換える
+```
+
+prenormalize の 4 本が 1 本でも発火したファイルの割合（分母 = staged）:
+
+| 母集団 | staged | pn_ANY | 支配項 |
+|---|---:|---:|---|
+| 実出荷 5,681 | 4,063 | **10.5%** | arrow_parens 10.0% |
+| flowbite 1296 | 743 | 19.9% | arrow_parens 18.6% |
+| shadcn 1682 | 1,050 | 2.4% | arrow_parens 1.1% |
+| svelte-ux 198（legacy） | 180 | 75.6% | strip_comments 72.8% |
+
+**→ 実出荷の 89.5% は `line_loop` の直前まで Phase 2 の AST の span が有効。**
+支配項の `strip_unnecessary_arrow_body_parens` は「esrap なら自動で落ちる括弧を手で剥がしている」
+パスなので **AST + esrap 印字にすれば消える**（fallback 率は 10.5% → 0.9% になる）。
+
+### ★ `collect_vars` の分割（2026-08-06、commit `f15dcb51`、ゲート 1.012）★
+
+```
+collect_vars 45.72ms = script_text の 30.0% ≈ ★ ギャップの 8.5% ★
+  cv_text_index     40.0%  テキスト走査（extract_local_reactive_vars + 索引 2 本 + 分類ループ）
+  cv_set_maps       17.1%  FxHashMap/Set 構築
+  cv_analysis_vecs  14.2%  declarations → Vec<String>
+  cv_binding_vecs   11.4%  bindings → Vec<String>（clone）
+  cv_proxy_vars     10.1%  テキスト走査（extract_proxy_vars）
+  cv_line_split      5.4%  lines().collect()
+★ テキスト由来 55.5%（= ギャップの 4.7%、大工事側）
+★ アロケーション/ハッシュ 42.7%（= ギャップの 3.6%、★ 大工事を待たずに動かせる唯一の塊 ★）
+```
+
+### ★ rsvelte の 1 パスの単価 — 3 通りで一致（同一 run）★
+
+```
+cv_line_split   2.49ms ÷ 1.90MB ÷ 1 パス（仕事が既知）    = 1.31 ns/B
+cv_proxy_vars   4.62ms ÷ 1.90MB ÷ 1.92 パス（計数）        = 1.27 ns/B
+cv_text_index  18.37ms ÷ 1.90MB ÷ 3.82 パス（計数）        = 2.53 ns/B（regex 込みなので高い）
+svelte-rs の traverse+rewrite                              = 2.7〜5.2 ns/B
+```
+
+**→ rsvelte の個々のパスは相手の AST 1 周よりバイトあたり安い。★ 超過は完全に回数 ★。**
+帯別表の 3.0〜6.2 ns/B より低いのは、あちらが script_text 全体の時間（alloc / `format!` 込み）を
+パス数で割っているため。**純走査の単価はこちら。**
+
 ### ★ Phase 3 残差の分割（2026-08-06、汚染ゲート合格 median/min 1.018）★
 
 residual 72.1ms = Phase 3 の 9.6% = 12.69 µs/file。
