@@ -402,6 +402,7 @@ fn main() {
     );
     println!();
     report_resolved(script_text, files.len());
+    report_phase3_map(&scaling);
     println!(
         "Per-file average:    {:.2}µs",
         total.as_secs_f64() * 1_000_000.0 / files.len() as f64
@@ -409,6 +410,82 @@ fn main() {
     println!(
         "Throughput:          {:.1} MB/s",
         total_bytes as f64 / total.as_secs_f64() / 1_000_000.0
+    );
+}
+
+/// Phase 3 shares on the shipped-source corpus, the three ways that answer
+/// different questions.
+///
+/// The sum ratio is the one to pick targets with: it is the share of the
+/// corpus's Phase 3 time a bucket owns, so a bucket that is large only because
+/// one file is pathological still shows up. That is also why the other two
+/// columns are printed beside it -- the per-file median says what a typical
+/// file pays, and top1 says how much of the sum a single file contributed. When
+/// the median is far below the sum ratio and top1 is large, the bucket is one
+/// file wearing a mechanism's name.
+fn report_phase3_map(rows: &[ScalingRow]) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let buckets: [(&str, fn(&ScalingRow) -> std::time::Duration); 6] = [
+        ("visitProgram", |r| r.visit_program),
+        ("scriptText", |r| r.script_text),
+        ("templateFragment", |r| r.template),
+        ("assemblyAfterFrag", |r| r.assembly),
+        ("cssRender", |r| r.css_render),
+        ("codegen", |r| r.codegen),
+    ];
+    let parent: f64 = rows.iter().map(|r| ms(r.transform)).sum();
+    // Files with no Phase 3 time have no share to take a median of, and the
+    // same filter applies to every bucket so it cannot reorder them.
+    let scored: Vec<&ScalingRow> = rows.iter().filter(|r| r.transform.as_nanos() > 0).collect();
+    println!();
+    println!("=== Phase 3 map (shipped corpus, sum ratio) ===");
+    println!(
+        "  {:<18} {:>10} {:>8} {:>10} {:>8}  n={}",
+        "bucket",
+        "sum ms",
+        "sum%",
+        "median%",
+        "top1%",
+        scored.len()
+    );
+    let mut sum_of_buckets = 0.0;
+    for (label, get) in buckets {
+        let vals: Vec<f64> = rows.iter().map(|r| ms(get(r))).collect();
+        let sum: f64 = vals.iter().sum();
+        sum_of_buckets += sum;
+        let top1 = vals.iter().copied().fold(0.0f64, f64::max);
+        let mut shares: Vec<f64> = scored
+            .iter()
+            .map(|r| ms(get(r)) / ms(r.transform) * 100.0)
+            .collect();
+        shares.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = if shares.is_empty() {
+            0.0
+        } else {
+            shares[shares.len() / 2]
+        };
+        println!(
+            "  {label:<18} {sum:>10.2} {:>7.1}% {median:>9.1}% {:>7.1}%",
+            sum / parent * 100.0,
+            if sum > 0.0 { top1 / sum * 100.0 } else { 0.0 }
+        );
+    }
+    let residual = parent - sum_of_buckets;
+    println!(
+        "  {:<18} {residual:>10.2} {:>7.1}%",
+        "unattributed",
+        residual / parent * 100.0
+    );
+    // Printed as a line of its own because the buckets are drained from the same
+    // per-file breakdown as the parent: a non-zero difference here is an
+    // instrument fault, not a phase nobody named.
+    println!(
+        "  IDENTITY  Sum(buckets) {:.2} + residual {:.2} = {:.2} vs parent {:.2} (diff {:+.4}ms)",
+        sum_of_buckets,
+        residual,
+        sum_of_buckets + residual,
+        parent,
+        sum_of_buckets + residual - parent
     );
 }
 
