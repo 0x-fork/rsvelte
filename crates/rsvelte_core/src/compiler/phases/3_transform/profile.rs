@@ -950,6 +950,15 @@ pub fn peek_pipeline_transform() -> Duration {
     PL_TRANSFORM.with(Cell::get)
 }
 
+/// The compile count, read without clearing it.
+///
+/// Same reason as [`peek_pipeline_transform`]: a consumer of the sub-split
+/// needs the count that tells it whether it skipped a read, and the pipeline
+/// split needs the same count afterwards.
+pub fn peek_pipeline_compiles() -> u64 {
+    PL_COMPILES.with(Cell::get)
+}
+
 pub fn take_breakdown() -> Phase3Breakdown {
     Phase3Breakdown {
         visit_program: VISIT_PROGRAM.with(|c| c.replace(Duration::ZERO)),
