@@ -50,7 +50,7 @@ esrap 印字は corpus 25.1µs/file、svelte-rs の `oxc_codegen` は 8.1µs/fil
 | M0 | oracle ハーネス + `client/ast/` スケルトン + 本ドキュメント復活 | 0（インフラ） | なし |
 | M1 | client script 変換の単一 AST パス化（`server/ast/script.rs` + `read_wrap.rs` 写経） | ~~−30〜35µs~~ → **実測 6.4µs/file。★ かつ既に完了**（下記） | — |
 | M2 | テンプレート式変換の単一 AST パス化（`has_reactive_state_json` 550 行の typed 化を吸収） | ~~−20〜25µs~~ → **実測上限 6.4µs/file**（下記） | 220 件回帰の再演を検知したら即 revert |
-| M3 | `js_ast` IR 廃止（`to_oxc.rs` / `codegen.rs` 削除） | −14µs **（未検証）** | テキストプリンタ経路（scriptless）の差分が 3 連続作業セッションで解決しなければ、テキストプリンタだけ残す縮退案へ |
+| M3 | `js_ast` IR 廃止（`to_oxc.rs` / `codegen.rs` 削除） | ~~−14µs~~ / ~~天井 322.0µs~~ / ~~天井 181.3µs~~ → **実測できているのは 6.5µs/file だけ。かつそれは M2 と同一物**（下記） | **★ 着手禁止（2026-08-06）**。天井が実測されていない |
 | M4 | esrap 最適化 + `*_ast.rs` 36 ファイル削除 + CI ガード | −10〜13µs **（未検証）** | バイト差が出たら即 revert |
 
 **★ M3〜M4 の µs を「未検証」と書いているのは形式ではありません。**
@@ -112,10 +112,46 @@ per-call 切片 (ns)   -846      ~130   1382       ★ 符号が反転。同定�
    傍証    9.8 µs/file x 82%（client 固有の entry シェア）= 8.0 µs/file
           （総和由来。★ 合計の median/min = 1.30 でゲート不合格。傍証としてのみ）
 → 6.4 µs/file = flowbite の 1 ファイル平均 491.81µs の 1.3%
-→ ★ M3 の天井 322.0 µs/file に対して 1/50。数字を単独で引用しないこと
+→ ~~★ M3 の天井 322.0 µs/file に対して 1/50~~ **この比較は無効。322.0 も、その訂正版
+   181.3 も撤回されている**（下記「M3 の天井は実測されていない」）。数字を単独で引用しないこと
 ```
 
 **これは上限**（typed reader の等価コストを 0 と仮定）。実際の削減はこれより小さい。
+
+**★ 独立の計器で裏が取れた（2026-08-06）**: `templateFragment` の内訳で
+`tf_as_json` が **38.33ms / 5,681 files = 6.75µs/file**（計器 0.25 を引いて 6.5）。
+上の 6.4µs/file と **2〜4% 以内で一致する**。**単位は entries と calls で違うので
+同一性の証明ではないが、一致の強さから同じものを指していると読む。**
+**M2 の取り分と `templateFragment` から返る分を ★ 足さないこと ★。**
+
+#### ★ M3 の天井は実測されていない（2026-08-06）★
+
+**配られてきた 3 つの数字はすべて撤回済み:**
+
+```
+✗ −14µs        出典の手順書。M1 が 5 倍・M2 が 3〜4 倍過大だった同じ出所
+✗ 天井 322.0µs record_script_text が囲うのは transform_instance_script_for_visitors
+                (&str → String)。js_ast IR を 1 度も通らないので M3 では消えない
+✗ 天井 181.3µs ★ 上を引いた訂正版。しかしこれも
+                「IR の仕事がゼロになる」を暗黙に仮定していた
+```
+
+**`templateFragment` の実測（実プロジェクト 5,681、5 run、幅 0.4pt）:**
+
+```
+tf_clean            1.8%   clean_nodes
+tf_template_str     5.9%   $.from_html("…") の HTML 文字列 ← ★ 出力そのもの。IR を替えても消えない
+★ tf_as_json       17.1%   js_ast → serde_json::Value    ← ★ M3 で確実に消える。ただし = M2
+tf_parse            0.0%   （calls 0。同 run で at_parse が同じ recorder を 2,767 回通る陰性対照つき）
+★ tf_rest (IR walk) 75.5%  js_ast IR の構築と走査
+```
+
+**`tf_rest` は「消える仕事」ではなく「別の IR で同じ仕事をする」部分。**
+**天井を出すには `oxc IR で同じ walk をした場合の単価比` が要る。未測定。**
+測り方はマイクロベンチではなく **svelte-rs の対応工程**（出力 AST を IR を挟まず直接組む）
+の実測値を引く形（`storeSubs` で決着させたのと同じ方法）。
+
+**それが出るまで M3 には着手しない。**
 
 **★ さらに、同じ手段には否定的な前例がある。** `serde_json` 除去は analyze で **~3% 遅化**した。
 潰されたのは領域ではなく**手段**なので、「今度は効く」理由を着手前に言語化すること。
@@ -241,6 +277,27 @@ RSVELTE_AST_DUAL_RUN=1 RSVELTE_AST_DUAL_RUN_DUMP=4 dual_run_tally \
 どの known-failures にも入っておらず、**現行 production（= in-place）の出力は公式と一致している。**
 mismatch が阻害するのは**テキスト経路の削除**（2 経路が交換可能でないと言っている）であって、
 フリップでも現在のパリティでもない。
+
+**★ そしてテキスト経路の削除自体が候補から外れた（2026-08-06 実測）★**
+
+`resolve()` の 2 つの半分を別々に計時した（`ast_rewrite_resolve_time()`）。
+**テキスト半分は in-place が降りた時にしか走らない**ので、その合計＝削除して返る分:
+
+```
+母集団                  script_text   in-place 半分   ★ テキスト半分（削除して返る分）
+実プロジェクト 5,681     151.15ms      0.37〜0.56%     ★ 0.12〜0.17%
+svelte-ux 198            749.99ms      ~0.55%          ★ 0.79%
+公式 fixture 3,874        76.07ms      7.7〜12.0%      ★ 3.0〜4.5%（実コードの 21 倍）
+```
+
+**2 方向に上限**: 時計読み 2 回が測定区間の内側（実 175ns/call）、
+`state_pipeline_ast` を `transform_module_script_runes` から呼ぶ経路が親タイマーの外。
+
+実プロジェクトで 12 本が実際に書き換えたのは **1,820 判定中 19 回**。rescued は 3 群とも 0。
+
+**帰結: 上の mismatch 2 件 / terminators 48 件は、行き止まりを守っている。**
+`dual_run_tally` を CI に配線しないのはこのため（**そもそも現状 CI から呼ばれていない** —
+`grep -rn "dual_run_tally" .github/` は 0 件）。削除が復活したら配線する。
 
 着手順は**公式フィクスチャの踏み方**に合わせる。`prop_source_reads` は splice 0 の parse-only なので
 load-bearing 12 本に入らない（flowbite 基準の module_state_runes 先行案も公式で 0 回なので棄却済み）。
