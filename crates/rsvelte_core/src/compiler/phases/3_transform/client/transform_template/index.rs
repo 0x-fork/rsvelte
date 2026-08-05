@@ -100,6 +100,24 @@ pub fn transform_template<'a>(
     flags: Option<u32>,
     locator: Option<&Locator>,
 ) -> JsExpr {
+    // Wrapped rather than timed at the five call sites, so the bucket cannot go
+    // short when a sixth appears.
+    let _t = crate::compiler::phases::phase3_transform::profile::timer_start();
+    let out = transform_template_inner(arena, state, base_name, namespace, flags, locator);
+    crate::compiler::phases::phase3_transform::profile::record_tf_template_str(
+        crate::compiler::phases::phase3_transform::profile::timer_elapsed(_t),
+    );
+    out
+}
+
+fn transform_template_inner<'a>(
+    arena: &JsArena,
+    state: &mut ComponentClientTransformState<'a>,
+    base_name: &str,
+    namespace: Namespace,
+    flags: Option<u32>,
+    locator: Option<&Locator>,
+) -> JsExpr {
     let tree = state.options.fragments == FragmentsMode::Tree;
     let mut current_flags = flags.unwrap_or(0);
 

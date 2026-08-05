@@ -76,6 +76,7 @@ fn main() {
     let _ = profile::take_pipeline_breakdown();
     let _ = profile::take_script_text_breakdown();
     let _ = profile::take_ast_transforms_breakdown();
+    let _ = profile::take_template_fragment_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -149,6 +150,7 @@ fn main() {
     let transform_breakdown = totals;
     let script_text_breakdown = profile::take_script_text_breakdown();
     let at = profile::take_ast_transforms_breakdown();
+    let tf = profile::take_template_fragment_breakdown();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -334,6 +336,38 @@ fn main() {
         "  Template fragment:   {:7.2}ms ({:5.1}%)",
         ms(template_fragment),
         pct(template_fragment)
+    );
+    let tf_rest = ms(template_fragment)
+        - [tf.clean, tf.template_str, tf.as_json, tf.parse]
+            .iter()
+            .copied()
+            .map(ms)
+            .sum::<f64>();
+    for (label, val, calls) in [
+        ("tf_clean", ms(tf.clean), tf.clean_calls),
+        (
+            "tf_template_str",
+            ms(tf.template_str),
+            tf.template_str_calls,
+        ),
+        ("tf_as_json", ms(tf.as_json), tf.as_json_calls),
+        ("tf_parse", ms(tf.parse), tf.parse_calls),
+        ("tf_rest (IR walk)", tf_rest, 0),
+    ] {
+        println!(
+            "    {label:<18} {val:7.2}ms ({:5.1}% of tf) calls {calls}",
+            val / ms(template_fragment) * 100.0
+        );
+    }
+    // The pre-registered quantity: reparse + text splice + string assembly.
+    // Splice has no term because there is no splice site under this visitor --
+    // every `replace_range` in `3_transform/` is in the script pipeline.
+    let tf_removable = ms(tf.parse) + ms(tf.template_str) + ms(tf.as_json);
+    println!(
+        "    REMOVABLE-IF-AST parse+templateStr+asJson {:.3}ms = {:.2}% of tf | without templateStr {:.2}%",
+        tf_removable,
+        tf_removable / ms(template_fragment) * 100.0,
+        (ms(tf.parse) + ms(tf.as_json)) / ms(template_fragment) * 100.0
     );
     println!(
         "  Assembly (post-frag):{:7.2}ms ({:5.1}%)",

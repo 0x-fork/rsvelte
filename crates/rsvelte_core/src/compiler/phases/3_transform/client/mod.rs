@@ -655,7 +655,9 @@ fn transform_client_with_visitors(
     // Call the fragment visitor to transform the template
     // This is the root fragment of the component, so is_root_fragment=true
     let _fragment_start = super::profile::timer_start();
+    super::profile::tf_scope_enter();
     let template_body = fragment(&ast.fragment, &mut context, true);
+    super::profile::tf_scope_exit();
     super::profile::record_template_fragment(super::profile::timer_elapsed(_fragment_start));
 
     // Propagate any error that was recorded during template traversal (e.g. "Not implemented:

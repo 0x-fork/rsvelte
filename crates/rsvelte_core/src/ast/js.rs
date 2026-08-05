@@ -50,7 +50,15 @@ impl<'a> TypedExpr<'a> {
             // the allocator is in whatever state the compile left it.
             #[cfg(feature = "measure-json")]
             let started = std::time::Instant::now();
+            // Second, unconditional timer: the feature-gated one above answers
+            // "what does the JSON path cost in total", this one answers "how
+            // much of it lands inside the fragment visitor", and the phase
+            // timers are what the fragment scope is keyed on.
+            let _t = crate::compiler::phases::phase3_transform::profile::timer_start();
             let value = Box::new(self.node.to_value());
+            crate::compiler::phases::phase3_transform::profile::record_tf_as_json(
+                crate::compiler::phases::phase3_transform::profile::timer_elapsed(_t),
+            );
             #[cfg(feature = "measure-json")]
             measure_json::record(&value, started.elapsed());
             value

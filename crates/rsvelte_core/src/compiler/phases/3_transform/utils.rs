@@ -628,7 +628,10 @@ pub fn clean_nodes<'a>(
     preserve_whitespace: bool,
     preserve_comments: bool,
 ) -> CleanedNodes<'a> {
-    clean_node_list(
+    // Timed here rather than at the call sites so a new caller cannot leave the
+    // bucket silently short.
+    let _t = crate::compiler::phases::phase3_transform::profile::timer_start();
+    let out = clean_node_list(
         parent,
         nodes,
         path,
@@ -638,7 +641,11 @@ pub fn clean_nodes<'a>(
         analysis,
         preserve_whitespace,
         preserve_comments,
-    )
+    );
+    crate::compiler::phases::phase3_transform::profile::record_tf_clean(
+        crate::compiler::phases::phase3_transform::profile::timer_elapsed(_t),
+    );
+    out
 }
 
 /// [`clean_nodes`] over a slice of node *references* — the shape the slot-content

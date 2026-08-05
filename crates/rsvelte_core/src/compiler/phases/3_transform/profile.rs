@@ -411,6 +411,15 @@ thread_local! {
     static AT_STORE_UNSUB: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static AT_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
     static AT_WALK_CALLS: Cell<u64> = const { Cell::new(0) };
+    static TF_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static TF_CLEAN: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static TF_TEMPLATE_STR: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static TF_AS_JSON: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static TF_PARSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static TF_CLEAN_CALLS: Cell<u64> = const { Cell::new(0) };
+    static TF_TEMPLATE_STR_CALLS: Cell<u64> = const { Cell::new(0) };
+    static TF_AS_JSON_CALLS: Cell<u64> = const { Cell::new(0) };
+    static TF_PARSE_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -445,6 +454,7 @@ pub fn record_reparse(parse: Duration, visit: Duration, bytes: usize) {
         let (p, v, n, b) = c.get();
         c.set((p + parse, v + visit, n + 1, b + bytes as u64));
     });
+    record_tf_parse(parse);
 }
 
 #[inline]
@@ -456,6 +466,20 @@ pub fn record_direct_parse(parse: Duration, bytes: usize) {
         let (p, n, b) = c.get();
         c.set((p + parse, n + 1, b + bytes as u64));
     });
+    record_tf_parse(parse);
+}
+
+/// Attributes a parse to the fragment visitor when one is open around it.
+///
+/// Hooked onto the existing recorders rather than added at the parse sites, so
+/// the bucket cannot miss a site the sites themselves already cover.
+#[inline]
+fn record_tf_parse(d: Duration) {
+    if !in_tf_scope() {
+        return;
+    }
+    TF_PARSE.with(|c| c.set(c.get() + d));
+    TF_PARSE_CALLS.with(|c| c.set(c.get() + 1));
 }
 
 pub fn take_reparse_breakdown() -> ReparseBreakdown {
@@ -762,6 +786,99 @@ pub fn record_st_post_passes(d: Duration) {
         return;
     }
     ST_POST_PASSES.with(|c| c.set(c.get() + d));
+}
+
+/// One level below [`Phase3Breakdown::template_fragment`].
+///
+/// The buckets are the three mechanisms that produce or consume text or a
+/// serialised form -- a parse, the HTML template string, and the `as_json`
+/// materialisation -- plus `clean_nodes`, which scans the template's own text.
+/// Everything else is the visitor building the js_ast IR and is left in the
+/// residual, because that is the work no change of representation removes.
+///
+/// `text splice` has no bucket on purpose: a directory-wide grep for
+/// `replace_range` across `3_transform/` finds every site in the *script*
+/// pipeline and none under the template visitor, so the bucket would be a
+/// structural zero rather than a measurement.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct TemplateFragmentBreakdown {
+    /// `clean_nodes`: whitespace trimming and node organisation.
+    pub clean: Duration,
+    /// `transform_template`: assembling the `$.from_html("…")` string.
+    pub template_str: Duration,
+    /// `as_json` materialisation reached from inside the fragment visitor.
+    pub as_json: Duration,
+    /// oxc parses reached from inside the fragment visitor.
+    pub parse: Duration,
+    pub clean_calls: u64,
+    pub template_str_calls: u64,
+    pub as_json_calls: u64,
+    pub parse_calls: u64,
+}
+
+pub fn take_template_fragment_breakdown() -> TemplateFragmentBreakdown {
+    TemplateFragmentBreakdown {
+        clean: TF_CLEAN.with(|c| c.replace(Duration::ZERO)),
+        template_str: TF_TEMPLATE_STR.with(|c| c.replace(Duration::ZERO)),
+        as_json: TF_AS_JSON.with(|c| c.replace(Duration::ZERO)),
+        parse: TF_PARSE.with(|c| c.replace(Duration::ZERO)),
+        clean_calls: TF_CLEAN_CALLS.with(|c| c.replace(0)),
+        template_str_calls: TF_TEMPLATE_STR_CALLS.with(|c| c.replace(0)),
+        as_json_calls: TF_AS_JSON_CALLS.with(|c| c.replace(0)),
+        parse_calls: TF_PARSE_CALLS.with(|c| c.replace(0)),
+    }
+}
+
+/// Opens the scope the buckets above are attributed to.
+///
+/// Depth rather than a flag because the fragment visitor recurses; the buckets
+/// accumulate leaf mechanisms, so only "are we anywhere inside" matters.
+#[inline]
+pub fn tf_scope_enter() {
+    if !timers_enabled() {
+        return;
+    }
+    TF_DEPTH.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn tf_scope_exit() {
+    if !timers_enabled() {
+        return;
+    }
+    TF_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+#[inline]
+fn in_tf_scope() -> bool {
+    TF_DEPTH.with(|c| c.get()) > 0
+}
+
+#[inline]
+pub fn record_tf_clean(d: Duration) {
+    if !timers_enabled() || !in_tf_scope() {
+        return;
+    }
+    TF_CLEAN.with(|c| c.set(c.get() + d));
+    TF_CLEAN_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_tf_template_str(d: Duration) {
+    if !timers_enabled() || !in_tf_scope() {
+        return;
+    }
+    TF_TEMPLATE_STR.with(|c| c.set(c.get() + d));
+    TF_TEMPLATE_STR_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_tf_as_json(d: Duration) {
+    if !timers_enabled() || !in_tf_scope() {
+        return;
+    }
+    TF_AS_JSON.with(|c| c.set(c.get() + d));
+    TF_AS_JSON_CALLS.with(|c| c.set(c.get() + 1));
 }
 
 /// One level below [`ScriptTextBreakdown::ast_transforms`].

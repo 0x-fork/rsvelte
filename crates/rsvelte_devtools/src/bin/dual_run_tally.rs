@@ -5,6 +5,12 @@
 //! any run could not be compared at all — a pass that is never scored proves
 //! nothing.
 //!
+//! **No CI job runs this as of 2026-08-06 — invocation is manual.** The exit
+//! codes below read as a gate, so say plainly that nothing is watching them:
+//! the check the ratchet protects is whether the text-splicing path can be
+//! deleted, and deletion is not currently a candidate (its measured share is a
+//! tenth of a percent). Wire this up if deletion comes back.
+//!
 //! Raw diffs are reported but do not by themselves fail the run: normalisation
 //! cancels differences that are genuinely inert as well as ones that are not,
 //! so the count is a triage obligation rather than a verdict. Every raw diff
