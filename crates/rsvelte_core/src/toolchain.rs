@@ -398,10 +398,11 @@ impl<'source> PreparedComponent<'source> {
             include_sourcemap_content,
             Some(&self.retained_scripts),
         )
-        .map_err(CompileError::from)?;
+        .map_err(CompileError::from);
         crate::compiler::phases::phase3_transform::profile::record_pipeline_transform(
             crate::compiler::phases::phase3_transform::profile::timer_elapsed(_transform_start),
         );
+        let transform_result = transform_result?;
         let _finalize_start = crate::compiler::phases::phase3_transform::profile::timer_start();
         let finalized = crate::compiler::finalize_compile_result(
             transform_result,

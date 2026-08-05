@@ -520,11 +520,15 @@ pub(crate) fn parse_component(source: &str) -> Result<crate::ast::Root<'_>, Comp
     // M5-A: caller-owned arena, unused for now (Root borrows only `source`).
     let alloc = oxc_allocator::Allocator::default();
     let _parse_start = phases::phase3_transform::profile::timer_start();
-    let parsed = phases::phase1_parse::parse(source, &alloc, parse_options)?;
+    // Recorded before the `?`, for the same reason the total is: a source that
+    // fails to parse still spent time parsing, and letting the early return
+    // skip the recorder moves that time into the residual of a compile the
+    // denominator already counts.
+    let parsed = phases::phase1_parse::parse(source, &alloc, parse_options);
     phases::phase3_transform::profile::record_pipeline_parse(
         phases::phase3_transform::profile::timer_elapsed(_parse_start),
     );
-    Ok(parsed)
+    Ok(parsed?)
 }
 
 /// Front-half shared by [`compile`] and [`compile_both`], run under the caller's
@@ -579,6 +583,10 @@ pub(crate) fn prepare_and_analyze<'source>(
                     &line_offsets,
                 );
             if let Some(parse_error) = parse_error {
+                // Record before returning: the failed parse still spent time here, and
+                // letting the early return skip the recorder moves that time into the
+                // residual of a compile the denominator already counts.
+                profile::record_pipeline_ensure_script(profile::timer_elapsed(_scripts_start));
                 return Err(parse_error.into());
             }
             retained_scripts.instance = retained;
@@ -591,6 +599,7 @@ pub(crate) fn prepare_and_analyze<'source>(
                     &line_offsets,
                 );
             if let Some(parse_error) = parse_error {
+                profile::record_pipeline_ensure_script(profile::timer_elapsed(_scripts_start));
                 return Err(parse_error.into());
             }
             retained_scripts.module = retained;
@@ -600,8 +609,9 @@ pub(crate) fn prepare_and_analyze<'source>(
 
     // Remove TypeScript nodes from script content if TypeScript is detected.
     let _ts_start = profile::timer_start();
-    remove_typescript_from_ast(ast)?;
+    let ts_removal = remove_typescript_from_ast(ast);
     profile::record_pipeline_ts_removal(profile::timer_elapsed(_ts_start));
+    ts_removal?;
 
     // Merge parsed <svelte:options> into compile options.
     // Reference: svelte/packages/svelte/src/compiler/index.js
@@ -625,8 +635,9 @@ pub(crate) fn prepare_and_analyze<'source>(
         source,
         &options,
         Some(&retained_scripts),
-    )?;
+    );
     profile::record_pipeline_analyze(profile::timer_elapsed(_analyze_start));
+    let analysis = analysis?;
     // Determine if runes mode was used
     let runes_mode = options.runes.unwrap_or(analysis.runes);
     Ok((options, analysis, runes_mode, retained_scripts))

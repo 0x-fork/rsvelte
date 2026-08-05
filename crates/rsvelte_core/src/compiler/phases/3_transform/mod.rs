@@ -224,14 +224,15 @@ pub(crate) fn transform_component_with_scripts(
 
     let css = if analysis.css.has_css && !analysis.inject_styles {
         let _css_start = profile::timer_start();
-        let mut css_output = css::render_stylesheet_with_sourcemap_content(
+        let css_result = css::render_stylesheet_with_sourcemap_content(
             analysis,
             ast.css.as_deref(),
             source,
             options,
             include_sourcemap_content,
-        )?;
+        );
         profile::record_css_render(profile::timer_elapsed(_css_start));
+        let mut css_output = css_result?;
         // Apply preprocessor source map composition to CSS map if needed
         if let Some(ref pp_map_json) = options.sourcemap
             && let Some(ref css_map_json) = css_output.map
