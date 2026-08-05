@@ -322,6 +322,54 @@ pub fn napi_take_phase3_split() -> Value {
     })
 }
 
+/// Read the printer's own timers, and clear them.
+///
+/// These sit one level inside `takePhase3Split`'s `codegen`: the codegen timer
+/// opens right after the assembly bucket closes and shuts after the print, so
+/// it covers the `js_ast -> oxc` conversion as well as the print. Subtracting
+/// the client print from `codegen` is what isolates the conversion, and the two
+/// have to come from the same compile for the subtraction to mean anything --
+/// absolute microseconds move several percent between runs of one binary.
+///
+/// No ordering constraint against `takePhase3Split`: the accumulators here are
+/// separate cells, so neither reader disturbs the other. `compiles` is peeked
+/// from the pipeline, which `takePipelineSplit` does clear, so this reader
+/// belongs with `takePhase3Split` **before** `takePipelineSplit`.
+///
+/// The call counts are not decoration. Exactly one client branch fires per
+/// client compile that reaches the oxc printer, so:
+///
+/// - all three zero means nothing was measured, not that printing was free;
+/// - their sum below `compiles` means the rest of the compiles took the
+///   handwritten printer, which scriptless components use instead of esrap. For
+///   those, `codegen - print` is not the conversion, because neither ran.
+///
+/// The server and normalize keys come along because a client-only run should
+/// show them at zero, and a reader that cannot see them cannot check that.
+#[napi(js_name = "takeEsrapSplit", catch_unwind)]
+pub fn napi_take_esrap_split() -> Value {
+    use rsvelte_core::compiler::phases::phase3_transform::profile;
+    let compiles = profile::peek_pipeline_compiles();
+    let b = profile::take_esrap_breakdown();
+    let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
+    serde_json::json!({
+        "clientSplitNs": ns(b.client_split),
+        "clientSplitCalls": b.client_split_calls,
+        "clientMapNs": ns(b.client_map),
+        "clientMapCalls": b.client_map_calls,
+        "clientPlainNs": ns(b.client_plain),
+        "clientPlainCalls": b.client_plain_calls,
+        "serverPrintNs": ns(b.server_print),
+        "serverPrintCalls": b.server_print_calls,
+        "serverPipePrintNs": ns(b.server_pipe_print),
+        "serverPipeReparseNs": ns(b.server_pipe_reparse),
+        "serverPipeCalls": b.server_pipe_calls,
+        "normalizePrintNs": ns(b.normalize_print),
+        "normalizeCalls": b.normalize_calls,
+        "compiles": compiles,
+    })
+}
+
 #[napi(js_name = "compile", catch_unwind)]
 pub fn napi_compile(source: String, options: Option<NapiCompileOptions>) -> napi::Result<Value> {
     let opts = options_to_compile(options)?;
