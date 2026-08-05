@@ -152,6 +152,10 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // files agree on it exactly; their node counts do not.
     profile::count_analyze_source_bytes(source.len() as u64);
 
+    // Span R1. `analysis` outlives this region, so the span cannot be a block
+    // and is closed with an explicit `drop` at `extract_scripts` instead.
+    let setup_span = profile::enter_analyze_span(profile::AnalyzeBucket::Setup);
+
     let mut analysis = ComponentAnalysis::new(source, options);
     analysis.css.has_css = ast.css.is_some();
 
@@ -267,6 +271,8 @@ pub(crate) fn analyze_prepared_component_with_retained(
             .push(warnings::options_missing_custom_element());
     }
 
+    drop(setup_span);
+
     // Extract script content for Phase 3 (avoids re-parsing)
     let _t = profile::timer_start();
     {
@@ -318,6 +324,9 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // not rune references. Use `runes_explicitly_set` (which now also captures
     // `<svelte:options runes={false} />`) rather than `options.runes` so an
     // explicit `runes={false}` isn't undone by auto-detection (H-114).
+    // Span R2. Closed with an explicit `drop` for the same reason as R1: the
+    // locals declared here are read further down.
+    let feature_span = profile::enter_analyze_span(profile::AnalyzeBucket::FeatureDetect);
     let needs_rune_detection = analysis.runes_explicitly_set.is_none() && !analysis.runes;
 
     // We collect store subscription names to exclude them from rune detection.
@@ -430,9 +439,18 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // This MUST happen BEFORE the script visitor walk so that is_safe_identifier
     // correctly identifies bindable_prop bindings and sets needs_context = true
     // Reference: svelte/packages/svelte/src/compiler/phases/2-analyze/index.js L562-616
+    drop(feature_span);
+
     let has_export = memchr::memmem::find(source.as_bytes(), b"export").is_some();
-    if !analysis.runes && has_export {
-        process_legacy_exports(ast, &mut analysis);
+    {
+        // Part of span R4: a binding fixup that happens to run before the script
+        // walks rather than after them. The bucket is an accumulator, so its two
+        // disjoint regions add up; splitting them apart would name the position
+        // in the function rather than the work.
+        let _b = profile::enter_analyze_span(profile::AnalyzeBucket::BindingFixups);
+        if !analysis.runes && has_export {
+            process_legacy_exports(ast, &mut analysis);
+        }
     }
 
     // Validate and analyze scripts (JavaScript AST)
@@ -444,6 +462,10 @@ pub(crate) fn analyze_prepared_component_with_retained(
     //
     // Order matches official Svelte: module first, then instance, then template.
     // Reference: svelte/packages/svelte/src/compiler/phases/2-analyze/index.js L706-726
+    // Span R3. Contains three `?`s; the span records from `Drop`, so a compile
+    // that errors out of one of them still charges the time it spent here.
+    let visit_scripts_span = profile::enter_analyze_span(profile::AnalyzeBucket::VisitScripts);
+
     if let Some(ref module) = ast.module {
         // Validate script attributes - warn for unknown attributes
         validate_script_attributes(&module.attributes, &mut analysis);
@@ -565,6 +587,8 @@ pub(crate) fn analyze_prepared_component_with_retained(
         }
     }
 
+    drop(visit_scripts_span);
+
     // Analyze the template using visitors.
     // Take a pointer to the arena to avoid borrow conflict with &mut ast.
     let arena_ptr = &ast.arena as *const crate::ast::arena::ParseArena;
@@ -580,6 +604,11 @@ pub(crate) fn analyze_prepared_component_with_retained(
     };
     profile::record_analyze_template(profile::timer_elapsed(_t));
     template_result?;
+
+    // Span R4 (second region). Ends at the CSS block. It holds a bare
+    // `return Err(slot_snippet_conflict)`, which is the other reason this bucket
+    // records from `Drop`.
+    let binding_fixups_span = profile::enter_analyze_span(profile::AnalyzeBucket::BindingFixups);
 
     // Post-analysis check: validate module script export specifiers.
     // This mirrors the official Svelte compiler's index.js post-walk checks.
@@ -812,6 +841,8 @@ pub(crate) fn analyze_prepared_component_with_retained(
         return Err(errors::slot_snippet_conflict());
     }
 
+    drop(binding_fixups_span);
+
     // Analyze CSS if present
     if let Some(ref stylesheet) = ast.css {
         // `css_analyze` and `css_scope` between them cover this whole block, so
@@ -866,6 +897,9 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // applied directly in the transform phase (e.g., via class="svelte-hash" in the template).
     // Synthesizing for all scoped elements causes regressions because RegularElement already
     // handles CSS hash injection in its transform visitor.
+    // Span R5: everything after the CSS block, through the end of the phase.
+    let finalize_span = profile::enter_analyze_span(profile::AnalyzeBucket::Finalize);
+
     synthesize_class_style_attributes(&mut ast.fragment, &analysis);
 
     // Deconflict component name with existing declarations and references.
@@ -936,6 +970,8 @@ pub(crate) fn analyze_prepared_component_with_retained(
         }
         analysis.name = name;
     }
+
+    drop(finalize_span);
 
     Ok(analysis)
 }

@@ -10,7 +10,7 @@
 //! # Read the ordering constraint before trusting a number
 //!
 //! `take_analyze_breakdown` **peeks** its parent (the pipeline's `analyze`
-//! bucket) and **takes** its own six buckets, so it must run before
+//! bucket) and **takes** its own eleven buckets, so it must run before
 //! `take_pipeline_breakdown`, which clears that parent. This binary reads them
 //! in that order and then prints the agreement between the two as a check: the
 //! parent is one counter read twice, so a non-zero difference means a read went
@@ -18,10 +18,16 @@
 //!
 //! # The residual is the point
 //!
-//! The buckets name six calls. `analyze_component` also does a large amount of
-//! inline work between them, and that lands in `unattributed`. A residual that
-//! dominates is a finding, not a defect in the split: it says the phase's cost
-//! is not in the calls anyone would think to name.
+//! The first six buckets name six calls. `analyze_component` also does a large
+//! amount of inline work between them, and in the first split that landed in
+//! `unattributed` and turned out to be the largest bucket on both time and walk
+//! volume -- a finding, not a defect: it said the phase's cost is not in the
+//! calls anyone would think to name.
+//!
+//! `R1`-`R5` now cover that inline code in source order, so `unattributed` here
+//! is a residual-of-residual. It is still printed, and still printed as a share
+//! of the parent, because the way that finding would be lost is by folding the
+//! unnamed part into whichever neighbour it sits next to.
 //!
 //! ```text
 //! cargo run --release -p rsvelte_devtools --bin analyze_split -- <dir>...
@@ -51,6 +57,24 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
+
+/// Index order of the per-bucket visit and parse arrays, matching
+/// `profile::AnalyzeBucket`. Declared once because the two tables below index
+/// the same arrays, and two copies of an order is one copy that can drift.
+const BUCKET_NAMES: [&str; profile::ANALYZE_BUCKETS] = [
+    "extract_scripts",
+    "create_scopes",
+    "store_subs",
+    "template",
+    "css_analyze",
+    "css_scope",
+    "R1 setup",
+    "R2 feature_detect",
+    "R3 visit_scripts",
+    "R4 binding_fixups",
+    "R5 finalize",
+    "residual",
+];
 
 fn main() {
     // The timers are off in the shipped compiler, so a profiler has to ask.
@@ -131,9 +155,18 @@ fn main() {
         ("template", a.template, a.template_calls),
         ("css_analyze", a.css_analyze, a.css_analyze_calls),
         ("css_scope", a.css_scope, a.css_scope_calls),
+        ("R1 setup", a.setup, a.setup_calls),
+        ("R2 feature_detect", a.feature_detect, a.feature_detect_calls),
+        ("R3 visit_scripts", a.visit_scripts, a.visit_scripts_calls),
+        ("R4 binding_fixups", a.binding_fixups, a.binding_fixups_calls),
+        ("R5 finalize", a.finalize, a.finalize_calls),
     ] {
         println!("{name:<18}{:>12.1}{:>9.1}%{calls:>10}", ms(d), pct(d));
     }
+    // Residual of residual now: R1-R5 cover the phase's inline code, so what is
+    // left is the glue between them. Still printed, and still printed as a
+    // share: the first split's finding was that the unnamed part was the
+    // largest part, which is only visible while it keeps being reported.
     println!(
         "{:<18}{:>12.1}{:>9.1}%{:>10}",
         "unattributed",
@@ -170,18 +203,7 @@ fn main() {
         "{:<18}{:>14}{:>14}{:>13}{:>12}",
         "bucket", "tplVisits", "jsSlots", "visits/file", "visits/KB"
     );
-    for (i, name) in [
-        "extract_scripts",
-        "create_scopes",
-        "store_subs",
-        "template",
-        "css_analyze",
-        "css_scope",
-        "residual",
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (i, name) in BUCKET_NAMES.iter().enumerate() {
         let visits = (v.template[i] + v.js[i]) as f64;
         println!(
             "{name:<18}{:>14}{:>14}{:>13.1}{:>12.2}",
@@ -271,18 +293,7 @@ fn main() {
             parsed_bytes as f64 / bytes * 100.0
         }
     );
-    for (i, name) in [
-        "extract_scripts",
-        "create_scopes",
-        "store_subs",
-        "template",
-        "css_analyze",
-        "css_scope",
-        "residual",
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (i, name) in BUCKET_NAMES.iter().enumerate() {
         if v.parse_calls[i] != 0 {
             println!(
                 "  {name:<18}parses {:>6}   parsedBytes {:>10}",

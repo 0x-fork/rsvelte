@@ -431,6 +431,39 @@ pub struct AnalyzeBreakdown {
     /// the whole block: no CSS call falls into the residual.
     pub css_scope: Duration,
     pub css_scope_calls: u64,
+
+    // --- the five spans carved out of the residual -------------------------
+    //
+    // The first split showed the residual was the largest bucket on both time
+    // and walk volume, which says the phase's cost is not in the calls that
+    // have names. These five cover the phase's inline code in source order; the
+    // glue between them stays in `unattributed`, which is now a
+    // residual-of-residual.
+    /// Entry through `extract_scripts`: `ComponentAnalysis::new`, forwarding the
+    /// parser's warnings, and merging `<svelte:options>`. Expected to be small,
+    /// and kept as a bucket for exactly that reason: a span that cannot move is
+    /// the control for the ones that can.
+    pub setup: Duration,
+    pub setup_calls: u64,
+    /// Runes/await detection: the `expression_check_features` walks over the
+    /// instance and module scripts, plus the `$`/`await` byte gates in front of
+    /// them.
+    pub feature_detect: Duration,
+    pub feature_detect_calls: u64,
+    /// The two `visitors::visit_script_expr` walks (module then instance) and
+    /// the module-declaration map built between them.
+    pub visit_scripts: Duration,
+    pub visit_scripts_calls: u64,
+    /// Post-scope binding fixups: the export-specifier check, the legacy
+    /// `promote_*` passes, each-block promotion, and the two binding loops that
+    /// re-scan `analysis.root.bindings`.
+    pub binding_fixups: Duration,
+    pub binding_fixups_calls: u64,
+    /// After the CSS block: `synthesize_class_style_attributes`, the unused-name
+    /// collection, and component-name uniquifying.
+    pub finalize: Duration,
+    pub finalize_calls: u64,
+
     /// [`PipelineBreakdown::analyze`], read without clearing it.
     pub total: Duration,
     /// Compiles that reached the pipeline, for per-file figures.
@@ -438,9 +471,11 @@ pub struct AnalyzeBreakdown {
 }
 
 impl AnalyzeBreakdown {
-    /// Time inside `total` that no bucket claims -- here, the inline work
-    /// between the named calls. Expected to be large; report it rather than
-    /// folding it into a neighbour.
+    /// Time inside `total` that no bucket claims. With the five residual spans
+    /// in place this is a residual-of-residual: the glue between them. Report
+    /// it rather than folding it into a neighbour -- the first split's finding
+    /// was that the unnamed part was the biggest part, and that is only visible
+    /// if it keeps being reported.
     pub fn unattributed(&self) -> Duration {
         self.total.saturating_sub(
             self.extract_scripts
@@ -448,7 +483,12 @@ impl AnalyzeBreakdown {
                 + self.store_subs
                 + self.template
                 + self.css_analyze
-                + self.css_scope,
+                + self.css_scope
+                + self.setup
+                + self.feature_detect
+                + self.visit_scripts
+                + self.binding_fixups
+                + self.finalize,
         )
     }
 }
@@ -476,6 +516,11 @@ thread_local! {
     static AN_TEMPLATE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_CSS_ANALYZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_CSS_SCOPE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_SETUP: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_FEATURE_DETECT: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_VISIT_SCRIPTS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_BINDING_FIXUPS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_FINALIZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
 
     // Deterministic node counts, load-independent: one run is enough. Gated by
     // the same switch as the timers so the shipped compiler pays nothing.
@@ -1041,11 +1086,21 @@ pub enum AnalyzeBucket {
     Template = 3,
     CssAnalyze = 4,
     CssScope = 5,
-    Residual = 6,
+    // The five spans carved out of what used to be the whole residual. Unlike
+    // the six above, these are regions of inline code rather than single calls,
+    // so they are timed by a drop guard (`enter_analyze_span`) rather than by
+    // `let x = { ... }; record(elapsed)`: several of them contain a `?`, and an
+    // early return through it must still charge the time already spent.
+    Setup = 6,
+    FeatureDetect = 7,
+    VisitScripts = 8,
+    BindingFixups = 9,
+    Finalize = 10,
+    Residual = 11,
 }
 
-/// Slots in the per-bucket visit arrays: the six buckets plus the residual.
-pub const ANALYZE_BUCKETS: usize = 7;
+/// Slots in the per-bucket visit arrays: the eleven buckets plus the residual.
+pub const ANALYZE_BUCKETS: usize = 12;
 
 /// Inside `detect_store_subscriptions`, which spends its time without walking
 /// the AST at all -- the analyze split measured zero JS child-slot expansions
@@ -1099,6 +1154,51 @@ impl Drop for AnalyzeBucketGuard {
 pub fn enter_analyze_bucket(bucket: AnalyzeBucket) -> AnalyzeBucketGuard {
     let previous = AN_CURRENT.with(|c| c.replace(Some(bucket)));
     AnalyzeBucketGuard(previous)
+}
+
+/// Times a region of inline code and restores the enclosing bucket on drop.
+///
+/// The six named buckets wrap a single call, so they can put the `?` after the
+/// `record_*`. The five residual spans wrap regions that contain their own `?`,
+/// and there is no expression to hang the record off. Recording from `Drop` is
+/// what makes an early return charge the time it spent instead of dropping it
+/// into `unattributed`, which would move time out of a bucket precisely on the
+/// files that erred -- the same failure mode the fixture corpus already inflates
+/// sixteen-fold.
+pub struct AnalyzeSpanGuard {
+    previous: Option<AnalyzeBucket>,
+    bucket: AnalyzeBucket,
+    start: TimerStart,
+}
+
+impl Drop for AnalyzeSpanGuard {
+    fn drop(&mut self) {
+        AN_CURRENT.with(|c| c.set(self.previous));
+        let d = timer_elapsed(self.start);
+        match self.bucket {
+            AnalyzeBucket::Setup => record_analyze_bucket(&AN_SETUP, d),
+            AnalyzeBucket::FeatureDetect => record_analyze_bucket(&AN_FEATURE_DETECT, d),
+            AnalyzeBucket::VisitScripts => record_analyze_bucket(&AN_VISIT_SCRIPTS, d),
+            AnalyzeBucket::BindingFixups => record_analyze_bucket(&AN_BINDING_FIXUPS, d),
+            AnalyzeBucket::Finalize => record_analyze_bucket(&AN_FINALIZE, d),
+            // The six call-shaped buckets record at their call site; entering
+            // them through a span would double-count.
+            _ => {}
+        }
+    }
+}
+
+/// Enter one of the five residual spans: latch the bucket for visit
+/// attribution and start its timer.
+#[inline]
+#[must_use]
+pub fn enter_analyze_span(bucket: AnalyzeBucket) -> AnalyzeSpanGuard {
+    let previous = AN_CURRENT.with(|c| c.replace(Some(bucket)));
+    AnalyzeSpanGuard {
+        previous,
+        bucket,
+        start: timer_start(),
+    }
 }
 
 /// Enter the analyze phase with no bucket selected, so the phase's inline work
@@ -1363,7 +1463,7 @@ pub fn peek_pipeline_compiles() -> u64 {
     PL_COMPILES.with(Cell::get)
 }
 
-/// The analyze sub-split: **takes** the six buckets, **peeks** the parent.
+/// The analyze sub-split: **takes** the eleven buckets, **peeks** the parent.
 ///
 /// The parent (`total`) is the pipeline's `analyze` counter itself, so the two
 /// are the same number by construction rather than by two timers agreeing.
@@ -1388,7 +1488,22 @@ pub fn take_analyze_breakdown() -> AnalyzeBreakdown {
     let (template, template_calls) = take(&AN_TEMPLATE);
     let (css_analyze, css_analyze_calls) = take(&AN_CSS_ANALYZE);
     let (css_scope, css_scope_calls) = take(&AN_CSS_SCOPE);
+    let (setup, setup_calls) = take(&AN_SETUP);
+    let (feature_detect, feature_detect_calls) = take(&AN_FEATURE_DETECT);
+    let (visit_scripts, visit_scripts_calls) = take(&AN_VISIT_SCRIPTS);
+    let (binding_fixups, binding_fixups_calls) = take(&AN_BINDING_FIXUPS);
+    let (finalize, finalize_calls) = take(&AN_FINALIZE);
     AnalyzeBreakdown {
+        setup,
+        setup_calls,
+        feature_detect,
+        feature_detect_calls,
+        visit_scripts,
+        visit_scripts_calls,
+        binding_fixups,
+        binding_fixups_calls,
+        finalize,
+        finalize_calls,
         extract_scripts,
         extract_scripts_calls,
         create_scopes,

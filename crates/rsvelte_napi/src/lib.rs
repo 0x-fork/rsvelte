@@ -327,6 +327,22 @@ pub fn napi_take_analyze_split() -> Value {
         "cssAnalyzeCalls": b.css_analyze_calls,
         "cssScope": ns(b.css_scope),
         "cssScopeCalls": b.css_scope_calls,
+        // The five spans carved out of the residual, in source order. Their
+        // counts are per-compile, not per-call-site: each names a region every
+        // compile passes through, so a count below `compiles` means compiles
+        // returned early before reaching it, not that the region was skipped.
+        "setup": ns(b.setup),
+        "setupCalls": b.setup_calls,
+        "featureDetect": ns(b.feature_detect),
+        "featureDetectCalls": b.feature_detect_calls,
+        "visitScripts": ns(b.visit_scripts),
+        "visitScriptsCalls": b.visit_scripts_calls,
+        // Two disjoint regions of the function (before the script walks and
+        // after the template walk), one accumulator.
+        "bindingFixups": ns(b.binding_fixups),
+        "bindingFixupsCalls": b.binding_fixups_calls,
+        "finalize": ns(b.finalize),
+        "finalizeCalls": b.finalize_calls,
         // Deterministic, so one run settles them. TEMPLATE NODES ONLY: both
         // walks also descend into the scripts, and there is no central hook for
         // JS nodes in analyze, so `createScopes / createScopesNodes` is a walk
@@ -336,7 +352,12 @@ pub fn napi_take_analyze_split() -> Value {
         "templateNodes": b.template_nodes,
         // Per-bucket walk volume. Index order is
         // [extractScripts, createScopes, storeSubs, template, cssAnalyze,
-        //  cssScope, residual].
+        //  cssScope, setup, featureDetect, visitScripts, bindingFixups,
+        //  finalize, residual].
+        //
+        // THE LENGTH CHANGED FROM 7 TO 12 when the residual was split. A
+        // consumer that hardcoded index 6 as the residual now reads `setup`.
+        // Index by name, or read the last element.
         //
         // `jsCounted` is false unless the crate was built with
         // `measure-analyze-nodes`; then every `visitsJs` entry is zero because
