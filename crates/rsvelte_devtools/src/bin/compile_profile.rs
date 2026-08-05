@@ -350,6 +350,13 @@ fn main() {
 /// all buckets on one common file set -- is a question about which rows enter
 /// which fit, and none of them can be asked of the printed table. Dumping the
 /// rows once makes those refits cost nothing.
+///
+/// A share taken from these rows needs the per-file median and the largest
+/// row's share of its group printed beside it. One file here spends 492ms in
+/// `script_text` -- a quarter of the whole corpus's transform -- so a bucket
+/// share summed over a group is a statement about that file until the
+/// concentration is shown to be low. The median said 15% where the sum said
+/// 58%, from the same rows.
 fn dump_rows(rows: &[ScalingRow], path: &str) {
     let ns = |d: std::time::Duration| d.as_nanos();
     let mut out = String::from(
