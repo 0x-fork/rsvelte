@@ -4576,6 +4576,7 @@ fn transform_instance_script_for_visitors(
 
     super::profile::record_st_prenormalize(super::profile::timer_elapsed(_stage));
     let _stage = super::profile::timer_start();
+    let _cv = super::profile::timer_start();
 
     // Collect state variables from analysis for $.get() wrapping
     // LegacyReactive bindings (from `$: x = expr`) also need $.get()/$.set() transforms
@@ -4670,6 +4671,8 @@ fn transform_instance_script_for_visitors(
     // top-level bindings take precedence for scope-level transforms. For example,
     // if there's a top-level `const multiplier = () => { let multiplier = $state(2); ... }`,
     // the inner `multiplier` should NOT cause the outer `multiplier` to be wrapped with $.get().
+    super::profile::record_cv_analysis_vecs(super::profile::timer_elapsed(_cv));
+    let _cv = super::profile::timer_start();
     let local_reactive_vars = extract_local_reactive_vars(&script_rest);
     let top_level_binding_names: rustc_hash::FxHashSet<&str> = analysis
         .root
@@ -4769,6 +4772,8 @@ fn transform_instance_script_for_visitors(
 
     // Collect proxy vars - variables initialized with $state({ ... }) or $state([ ... ])
     // These are converted to $.proxy() and don't need $.get() wrapping for property access
+    super::profile::record_cv_text_index(super::profile::timer_elapsed(_cv));
+    let _cv = super::profile::timer_start();
     let proxy_vars = extract_proxy_vars(&script_rest);
 
     // Collect rest_prop variable names (from `let props = $props()`)
@@ -5095,6 +5100,8 @@ fn transform_instance_script_for_visitors(
         Vec::new()
     };
 
+    super::profile::record_cv_binding_vecs(super::profile::timer_elapsed(_cv));
+    let _cv = super::profile::timer_start();
     let mut result = String::new();
 
     // Pre-compute non-proxyable variables once (invariant across all statements).
@@ -5340,6 +5347,8 @@ fn transform_instance_script_for_visitors(
     // which appends all $: reactive statements AFTER the rest of instance body code).
     // Each entry is (assigned_vars, dependency_vars, transformed_code).
     // After collection, these are topologically sorted by dependencies before emission.
+    super::profile::record_cv_set_maps(super::profile::timer_elapsed(_cv));
+    let _cv = super::profile::timer_start();
     let mut pending_reactive_statements: Vec<(Vec<String>, Vec<String>, String)> = Vec::new();
     // Source-ordinal counter for top-level `$:` statements, aligning each with its
     // Phase-2 `reactive_statement_dependencies` entry.
@@ -5925,6 +5934,7 @@ fn transform_instance_script_for_visitors(
     // Pre-compute runes fast-path eligibility flags
     let runes_fastpath_eligible = analysis.runes && !dev && prop_mutation_vars.is_empty();
 
+    super::profile::record_cv_line_split(super::profile::timer_elapsed(_cv));
     super::profile::record_st_collect_vars(super::profile::timer_elapsed(_stage));
     let _stage = super::profile::timer_start();
 

@@ -87,6 +87,8 @@ fn main() {
     let _ = profile::take_assembly_breakdown();
     let _ = profile::take_residual_breakdown();
     let _ = profile::take_scan_counts();
+    let _ = profile::take_rewrite_counts();
+    let _ = profile::take_collect_vars_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -177,6 +179,7 @@ fn main() {
     let rs = profile::take_residual_breakdown();
     let scan = scan_total;
     let rw = profile::take_rewrite_counts();
+    let cv = profile::take_collect_vars_breakdown();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -316,6 +319,35 @@ fn main() {
             0.0
         },
         scan.calls as f64 / files.len() as f64
+    );
+    for (label, val) in [
+        ("cv_analysis_vecs", ms(cv.analysis_vecs)),
+        ("cv_text_index", ms(cv.text_index)),
+        ("cv_binding_vecs", ms(cv.binding_vecs)),
+        ("cv_set_maps", ms(cv.set_maps)),
+        ("cv_line_split", ms(cv.line_split)),
+    ] {
+        println!(
+            "      {label:<18} {val:7.2}ms ({:5.1}% of collect_vars)",
+            val / ms(st.collect_vars).max(f64::MIN_POSITIVE) * 100.0
+        );
+    }
+    println!(
+        "      cv IDENTITY sum {:.2}ms vs parent {:.2}ms ({:+.3}ms) | calls {} vs staged {}",
+        ms(cv.analysis_vecs)
+            + ms(cv.text_index)
+            + ms(cv.binding_vecs)
+            + ms(cv.set_maps)
+            + ms(cv.line_split),
+        ms(st.collect_vars),
+        ms(cv.analysis_vecs)
+            + ms(cv.text_index)
+            + ms(cv.binding_vecs)
+            + ms(cv.set_maps)
+            + ms(cv.line_split)
+            - ms(st.collect_vars),
+        format!("{:?}", cv.calls),
+        st.calls
     );
     for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::REWRITE_SITE_NAMES
         .iter()

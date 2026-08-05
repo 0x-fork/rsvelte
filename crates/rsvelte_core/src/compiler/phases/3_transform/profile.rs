@@ -442,6 +442,12 @@ thread_local! {
     static SCAN_BYTES: Cell<u64> = const { Cell::new(0) };
     static SCAN_CALLS: Cell<u64> = const { Cell::new(0) };
     static SCAN_SCRIPT_BYTES: Cell<u64> = const { Cell::new(0) };
+    static CV_ANALYSIS_VECS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_TEXT_INDEX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_BINDING_VECS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_SET_MAPS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_LINE_SPLIT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CV_CALLS: Cell<[u64; 5]> = const { Cell::new([0; 5]) };
     static REWRITE_CALLS: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
     static REWRITE_FILES: Cell<[u64; REWRITE_SITE_COUNT]> = const { Cell::new([0; REWRITE_SITE_COUNT]) };
     static REWRITE_SEEN: Cell<[bool; REWRITE_SITE_COUNT]> = const { Cell::new([false; REWRITE_SITE_COUNT]) };
@@ -1017,6 +1023,64 @@ residual_recorder!(record_rs_shadow_fix, RS_SHADOW_FIX, RS_SHADOW_FIX_CALLS);
 residual_recorder!(record_rs_async_pre, RS_ASYNC_PRE, RS_ASYNC_PRE_CALLS);
 residual_recorder!(record_rs_warnings, RS_WARNINGS, RS_WARNINGS_CALLS);
 residual_recorder!(record_rs_sourcemap, RS_SOURCEMAP, RS_SOURCEMAP_CALLS);
+
+/// One level below `ScriptTextBreakdown::collect_vars`.
+///
+/// This stage turned out not to be text scanning at all, so the split is by
+/// *what the work is made of* rather than by what an AST would remove: three
+/// shapes of `Vec<String>` / set / map construction over Phase 2 bindings, the
+/// one genuinely text-driven index, and the line split that feeds the loop.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct CollectVarsBreakdown {
+    /// `state_vars` / `var_state_vars` off the root scope's declarations.
+    pub analysis_vecs: Duration,
+    /// `extract_local_reactive_vars` + the two one-pass text indexes and the
+    /// classification loop over them -- the only text-driven part.
+    pub text_index: Duration,
+    /// The long run of `bindings.iter().filter().map(clone).collect()` builds.
+    pub binding_vecs: Duration,
+    /// Hash set/map builds (`name_occurrences`, `names_all_non_proxy`, ...).
+    pub set_maps: Duration,
+    /// `script_rest.lines().collect()` and the depth-tracking state init.
+    pub line_split: Duration,
+    /// One per sub-timer, so a mismatch localises to a boundary instead of
+    /// only showing up as a stage-level discrepancy.
+    pub calls: [u64; 5],
+}
+
+pub fn take_collect_vars_breakdown() -> CollectVarsBreakdown {
+    CollectVarsBreakdown {
+        analysis_vecs: CV_ANALYSIS_VECS.with(|c| c.replace(Duration::ZERO)),
+        text_index: CV_TEXT_INDEX.with(|c| c.replace(Duration::ZERO)),
+        binding_vecs: CV_BINDING_VECS.with(|c| c.replace(Duration::ZERO)),
+        set_maps: CV_SET_MAPS.with(|c| c.replace(Duration::ZERO)),
+        line_split: CV_LINE_SPLIT.with(|c| c.replace(Duration::ZERO)),
+        calls: CV_CALLS.with(|c| c.replace([0; 5])),
+    }
+}
+
+macro_rules! cv_recorder {
+    ($name:ident, $cell:ident, $idx:expr) => {
+        #[inline]
+        pub fn $name(d: Duration) {
+            if !timers_enabled() {
+                return;
+            }
+            $cell.with(|c| c.set(c.get() + d));
+            CV_CALLS.with(|c| {
+                let mut v = c.get();
+                v[$idx] += 1;
+                c.set(v);
+            });
+        }
+    };
+}
+
+cv_recorder!(record_cv_analysis_vecs, CV_ANALYSIS_VECS, 0);
+cv_recorder!(record_cv_text_index, CV_TEXT_INDEX, 1);
+cv_recorder!(record_cv_binding_vecs, CV_BINDING_VECS, 2);
+cv_recorder!(record_cv_set_maps, CV_SET_MAPS, 3);
+cv_recorder!(record_cv_line_split, CV_LINE_SPLIT, 4);
 
 /// One level below [`Phase3Breakdown::assembly_after_fragment`].
 ///
