@@ -249,13 +249,18 @@ pub fn napi_set_phase_timers_enabled(enabled: bool) {
 
 /// Read the per-phase split accumulated since the last call, and clear it.
 ///
-/// The shape is a contract, not a convenience: `totalNs` is the whole compile,
-/// and every other key is a nanosecond duration that is a disjoint part of it.
-/// A consumer can therefore treat "every key but `totalNs`" as the buckets
-/// without knowing their names, which is what lets a bucket be added here
-/// without changing the consumer. A key that is not a duration, or one that
-/// overlaps another, silently becomes a bucket on the other side -- so a call
-/// count does not belong in this object however useful it is elsewhere.
+/// The shape is a contract: `totalNs` is the whole compile, the phase keys are
+/// nanosecond durations that are disjoint parts of it, and `compiles` is a
+/// count. A consumer takes the phase keys as the buckets, so a bucket added
+/// here needs no change on the far side.
+///
+/// `compiles` is not a bucket and is kept anyway. A reader that skips a call
+/// produces a row holding two files' work, and that row passes every other
+/// check: the residual is fine, the ratios are fine, `totalNs` is merely
+/// larger. `compiles != 1` is the only thing that catches it. It was briefly
+/// dropped from here for looking like a bucket -- a field that looks redundant
+/// from this side can be load-bearing on the other, so ask its consumer before
+/// removing it.
 ///
 /// `unattributed` is deliberately absent: the caller subtracts, so a bucket
 /// added here that the caller does not know about shrinks its residual instead
@@ -279,6 +284,7 @@ pub fn napi_take_pipeline_split() -> Value {
         "transform": ns(b.transform),
         "finalize": ns(b.finalize),
         "totalNs": ns(b.total),
+        "compiles": b.compiles,
     })
 }
 
