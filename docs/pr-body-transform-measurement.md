@@ -64,13 +64,34 @@ made on:
 `ccb07fa0` (the esrap call-site split) is included here: it is instrumentation
 of the same kind and is not on `main`.
 
+### What these numbers are, and are not
+
+Every share here was taken **before the in-place flip** (`b49fcc3e`, which is
+not in this branch). The flip makes passes parse and print through
+`with_program_mut`, work these measurements do not contain -- so the re-parse
+figure is a floor for the shipping compiler, not its value. Re-measuring after
+the flip is separate work.
+
+The shipped-source shares were taken **with** the shadowed-rune indexing fix
+(`e3d98dc8`, PR #2092) already in the branch. Anything superlinear reported here
+is what remains after that fix, not what it addressed.
+
+Populations are named wherever a number appears, because they disagree with each
+other: the svelte test corpus carries `$:` at roughly three times the density of
+shipped code (130/3,874 against 71/5,879, five of six shipped projects at zero).
+Conclusions drawn on rune-only shipped code are stated as such and do not extend
+to legacy input.
+
 ### Two things the instrumentation says about itself
 
 Signed residuals are load-bearing. Saturating them to zero hid an instrument
 failure: on one project a child timer reads 2.2x its own parent, which is
-impossible for sequential non-nested timers and means something is
-double-counted. The mechanism is **unconfirmed**. Any share taken from the
-legacy `$:` branch is suspect until it is explained.
+impossible for sequential non-nested timers. Three explanations were tested and
+falsified by counters -- re-entry, unpaired call sites, and entries outside any
+parent interval were all zero -- and a fourth counter timing the function from
+inside showed the stage timers agree with it while the parent under-reports. So
+the direction is settled and the mechanism is **unconfirmed**. Shares taken from
+the legacy `$:` branch are understated by the parent, not inflated.
 
 The stage sum does not equal its parent. The residual is neither reproducible in
 magnitude nor stable in sign -- between -0.05% and +2.5% of the parent on an
