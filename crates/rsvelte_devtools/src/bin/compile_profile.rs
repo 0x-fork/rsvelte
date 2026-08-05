@@ -22,13 +22,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
 
-use rsvelte_core::compiler::phases::phase1_parse::{
-    ParseOptions, compute_line_offsets, ensure_script_parsed, parse, resolve_lazy_expressions,
-};
-use rsvelte_core::compiler::phases::phase2_analyze::analyze_component;
-use rsvelte_core::compiler::phases::phase3_transform::{profile, transform_component};
+use rsvelte_core::compiler::phases::phase1_parse::{ParseOptions, parse};
+use rsvelte_core::compiler::phases::phase3_transform::profile;
 use rsvelte_core::{CompileOptions, GenerateMode};
 
 fn main() {
@@ -45,156 +41,101 @@ fn main() {
         ..Default::default()
     };
 
-    // Warmup
-    for (_, content) in files.iter().take(100) {
-        let _ = rsvelte_core::compile(
-            content,
-            CompileOptions {
-                generate: GenerateMode::Client,
-                ..Default::default()
-            },
-        );
-    }
-
-    // Measure Phase 1 (Parse)
-    let start = Instant::now();
-    let mut asts: Vec<_> = files
-        .iter()
-        .map(|(_, content)| parse(content, &oxc_allocator::Allocator::default(), parse_opts).ok())
-        .collect();
-    let parse_time = start.elapsed();
-
     let compile_opts = CompileOptions {
         generate: GenerateMode::Client,
         ..Default::default()
     };
 
-    // === Phase 2 breakdown ===
-    //
-    // `resolve_lazy_expressions` and `ensure_script_parsed` are idempotent
-    // (both early-return when there is nothing left to do), so we pre-run
-    // them with timing here. The subsequent `analyze_component` call skips
-    // these steps internally, leaving us with a clean three-way split:
-    //
-    //   2a. resolve_lazy  — finish deferred template-expression + CSS parse
-    //   2b. ensure_script — invoke OXC on the instance + module scripts
-    //   2c. visitors      — everything else analyze_component does
-    //                       (scope build, store subs, fragment walks, …)
-
-    // Phase 2a: resolve_lazy_expressions
-    let start = Instant::now();
-    for (i, (_, content)) in files.iter().enumerate() {
-        if let Some(ref mut ast) = asts[i] {
-            // SAFETY: `ast` is in `asts[i]` for the whole iteration; the
-            // serialize arena pointer is cleared before this borrow ends.
-            unsafe { rsvelte_core::ast::arena::set_serialize_arena(&ast.arena as *const _) };
-            let _ = resolve_lazy_expressions(ast, content);
-            rsvelte_core::ast::arena::clear_serialize_arena();
-        }
+    // Warmup
+    for (_, content) in files.iter().take(100) {
+        let _ = rsvelte_core::compile(content, compile_opts.clone());
     }
-    let resolve_lazy_time = start.elapsed();
 
-    // Phase 2b: ensure_script_parsed for instance + module scripts (OXC)
+    // One production compile per file, with the phase split read back from the
+    // pipeline's own timers.
     //
-    // Timed per file as well as in total: it is the one bucket driven directly
-    // by script bytes, so it is the reference the other buckets' scaling is
-    // read against.
-    let start = Instant::now();
-    let mut ensure_per_file: Vec<std::time::Duration> = Vec::with_capacity(files.len());
-    for (i, (_, content)) in files.iter().enumerate() {
-        let file_start = Instant::now();
-        if let Some(ref mut ast) = asts[i] {
-            let line_offsets = compute_line_offsets(content, false);
-            // SAFETY: same lifetime invariant as 2a.
-            unsafe { rsvelte_core::ast::arena::set_serialize_arena(&ast.arena as *const _) };
-            if let Some(ref mut instance) = ast.instance {
-                let _ = ensure_script_parsed(&ast.arena, instance, content, &line_offsets);
-            }
-            if let Some(ref mut module) = ast.module {
-                let _ = ensure_script_parsed(&ast.arena, module, content, &line_offsets);
-            }
-            rsvelte_core::ast::arena::clear_serialize_arena();
-        }
-        ensure_per_file.push(file_start.elapsed());
-    }
-    let ensure_script_time = start.elapsed();
-
-    // Phase 2c: analyze_component (visitors / scope build / store subs / …)
-    let start = Instant::now();
-    let mut analyses = Vec::with_capacity(files.len());
-    let mut analyze_per_file: Vec<std::time::Duration> = Vec::with_capacity(files.len());
-    for (i, (_, content)) in files.iter().enumerate() {
-        let file_start = Instant::now();
-        if let Some(ref mut ast) = asts[i] {
-            // SAFETY: same lifetime invariant as 2a.
-            unsafe { rsvelte_core::ast::arena::set_serialize_arena(&ast.arena as *const _) };
-            let analysis = analyze_component(ast, content, &compile_opts).ok();
-            rsvelte_core::ast::arena::clear_serialize_arena();
-            analyses.push(analysis);
-        } else {
-            analyses.push(None);
-        }
-        analyze_per_file.push(file_start.elapsed());
-    }
-    let analyze_visitor_time = start.elapsed();
-    let analyze_time = resolve_lazy_time + ensure_script_time + analyze_visitor_time;
-
-    // Reset Phase 3 sub-phase counters in case warmup left non-zero state.
-    let _ = profile::take_breakdown();
-
-    let _ = profile::take_reparse_breakdown();
+    // This profiler used to stage the phases by hand -- parse, then
+    // resolve_lazy, then ensure_script, then analyze, then transform -- to time
+    // each one. That diverged from production four ways at once: no retained
+    // scripts, no TypeScript removal, no `<svelte:options>` merge, and
+    // `compute_line_offsets(_, false)` where production passes the AST's flag.
+    // Two of those inflate a bucket and one shrinks the denominator, so the
+    // shares were not bounded in a single direction. Driving `compile` removes
+    // the orchestration and with it the possibility of getting it wrong.
+    let mut totals = profile::Phase3Breakdown::default();
+    let mut pipeline = profile::PipelineBreakdown::default();
     // Per-file rows, so re-parse cost can be read against file size instead of
     // only as one corpus-wide average.
     let mut rows: Vec<(usize, std::time::Duration, profile::ReparseBreakdown)> =
         Vec::with_capacity(files.len());
     let mut scaling: Vec<ScalingRow> = Vec::with_capacity(files.len());
-    let mut totals = profile::Phase3Breakdown::default();
 
-    // Measure Phase 3 (Transform)
-    let start = Instant::now();
-    for (i, (_, content)) in files.iter().enumerate() {
-        let file_start = Instant::now();
-        if let (Some(ast), Some(Some(analysis))) = (&asts[i], analyses.get(i)) {
-            // SAFETY: `ast` is held in `asts[i]` for the duration of this
-            // loop iteration; the serialize arena pointer is cleared before
-            // we move to the next iteration so the pointer never outlives
-            // its referent.
-            unsafe { rsvelte_core::ast::arena::set_serialize_arena(&ast.arena as *const _) };
-            let _ = transform_component(analysis, ast, content, &compile_opts);
-            rsvelte_core::ast::arena::clear_serialize_arena();
-        }
-        let file_transform = file_start.elapsed();
+    // Drain whatever the warmup left, so the first file does not inherit it.
+    let _ = profile::take_breakdown();
+    let _ = profile::take_reparse_breakdown();
+    let _ = profile::take_pipeline_breakdown();
+    let _ = profile::take_script_text_breakdown();
+
+    for (_, content) in &files {
+        let _ = rsvelte_core::compile(content, compile_opts.clone());
+
         // Drained per file for the scaling rows, so the corpus totals have to be
         // accumulated here rather than read back after the loop.
         let b = profile::take_breakdown();
+        let p = profile::take_pipeline_breakdown();
         totals.visit_program += b.visit_program;
         totals.script_text_transform += b.script_text_transform;
         totals.template_fragment += b.template_fragment;
         totals.assembly_after_fragment += b.assembly_after_fragment;
         totals.css_render += b.css_render;
         totals.codegen += b.codegen;
-        let (script_bytes, runes) = script_shape(asts[i].as_ref(), content);
+        pipeline.parse += p.parse;
+        pipeline.line_offsets += p.line_offsets;
+        pipeline.resolve_lazy += p.resolve_lazy;
+        pipeline.ensure_script += p.ensure_script;
+        pipeline.ts_removal += p.ts_removal;
+        pipeline.options_merge += p.options_merge;
+        pipeline.analyze += p.analyze;
+        pipeline.transform += p.transform;
+        pipeline.finalize += p.finalize;
+        pipeline.total += p.total;
+        pipeline.compiles += p.compiles;
+
+        // Labels only. Parsing again here costs a second parse per file, but it
+        // is outside every timer, and the alternative -- keeping the staged AST
+        // alive to read it -- is the staging this rewrite removed.
+        let arena = oxc_allocator::Allocator::default();
+        let ast = parse(content, &arena, parse_opts).ok();
+        let (script_bytes, runes) = script_shape(ast.as_ref(), content);
         scaling.push(ScalingRow {
             script_bytes,
-            ensure_script: ensure_per_file.get(i).copied().unwrap_or_default(),
+            ensure_script: p.ensure_script,
             runes,
-            analyze: analyze_per_file.get(i).copied().unwrap_or_default(),
+            analyze: p.analyze,
             script_text: b.script_text_transform,
             template: b.template_fragment,
             codegen: b.codegen,
-            transform: file_transform,
+            transform: p.transform,
         });
         rows.push((
             content.len(),
-            file_transform,
+            p.transform,
             profile::take_reparse_breakdown(),
         ));
     }
-    let transform_time = start.elapsed();
+
+    let parse_time = pipeline.parse;
+    let resolve_lazy_time = pipeline.resolve_lazy;
+    let ensure_script_time = pipeline.ensure_script;
+    let analyze_visitor_time = pipeline.analyze;
+    let analyze_time = resolve_lazy_time + ensure_script_time + analyze_visitor_time;
+    let transform_time = pipeline.transform;
     let transform_breakdown = totals;
     let script_text_breakdown = profile::take_script_text_breakdown();
 
-    let total = parse_time + analyze_time + transform_time;
+    // The whole compile, measured independently of the buckets, so a phase
+    // nobody instrumented lands in the residual instead of inflating a share.
+    let total = pipeline.total;
     let pct = |d: std::time::Duration| d.as_secs_f64() / total.as_secs_f64() * 100.0;
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
 
@@ -224,6 +165,16 @@ fn main() {
         ms(analyze_visitor_time),
         pct(analyze_visitor_time)
     );
+    // Rows the hand-staged version had no way to print, because it never ran
+    // the steps they measure.
+    for (label, d) in [
+        ("Line offsets:", pipeline.line_offsets),
+        ("TS removal:", pipeline.ts_removal),
+        ("Options merge:", pipeline.options_merge),
+        ("Finalize result:", pipeline.finalize),
+    ] {
+        println!("{label:<22} {:7.2}ms ({:5.1}%)", ms(d), pct(d));
+    }
     println!(
         "Phase 3 (Transform):   {:7.2}ms ({:5.1}%)",
         ms(transform_time),
@@ -364,7 +315,17 @@ fn main() {
         ms(other),
         pct(other)
     );
-    println!("TOTAL:                 {:7.2}ms", ms(total));
+    let unattributed = pipeline.unattributed();
+    println!(
+        "Unattributed:          {:7.2}ms ({:5.1}%)",
+        ms(unattributed),
+        pct(unattributed)
+    );
+    println!(
+        "TOTAL:                 {:7.2}ms  ({} compiles)",
+        ms(total),
+        pipeline.compiles
+    );
     println!();
     println!(
         "Per-file average:    {:.2}µs",
