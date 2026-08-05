@@ -8,12 +8,15 @@
 //! runs because production runs it, and every argument has the value production
 //! passes.
 //!
-//! The older splits could not say that. `corpus_profile` and `compile_profile`
-//! call the phase functions themselves and diverge from production four ways at
-//! once — no retained scripts, no TypeScript removal, no `<svelte:options>`
-//! merge, and `compute_line_offsets(_, false)`. Two of those make a bucket too
-//! large and one makes the denominator too small, so their ratios are not
-//! bounded in a single direction and cannot be read as a split.
+//! The older splits could not say that. They called the phase functions
+//! themselves and diverged from production four ways at once — no retained
+//! scripts, no TypeScript removal, no `<svelte:options>` merge, and
+//! `compute_line_offsets(_, false)`. Two of those make a bucket too large and
+//! one makes the denominator too small, so their ratios are not bounded in a
+//! single direction and cannot be read as a split. Both have since been
+//! settled: `compile_profile` was moved onto `compile()`, and `corpus_profile`
+//! was deleted rather than fixed because it had no remaining caller. The table
+//! below is kept because numbers taken from those runs are still quoted.
 //!
 //! `unattributed` is printed on every run. It is `total` minus the sum of the
 //! buckets, measured independently, so a phase nobody instrumented lands there
