@@ -288,6 +288,49 @@ pub fn napi_take_pipeline_split() -> Value {
     })
 }
 
+/// Read the sub-split of the analyze phase, and clear it.
+///
+/// Same contract as `takePipelineSplit`: `totalNs` is the whole that the
+/// buckets divide, and the bucket keys are disjoint nanosecond parts of it.
+/// Here `totalNs` is the pipeline's `analyze` bucket -- the same counter, not a
+/// second timer around the same code -- so `totalNs` and `takePipelineSplit`'s
+/// `analyze` agree by construction.
+///
+/// **Call this before `takePipelineSplit` for the same compiles.** That one
+/// clears the analyze bucket, so the other order reports `totalNs: 0` with
+/// non-zero buckets, which a consumer checking the total catches rather than
+/// dividing by a zero whole.
+///
+/// Each bucket carries a `*Calls` count so a zero can be read: `0ns` with `0`
+/// calls is a branch that never ran (no `<style>`, say), `0ns` with `n` calls
+/// is work below the clock. Only the first means "not measured".
+///
+/// `unattributed` is deliberately absent, as in `takePipelineSplit`: the caller
+/// subtracts. Expect it to be large here -- `analyze_component` does a lot of
+/// inline work between the calls these buckets name, and none of it is
+/// bucketed.
+#[napi(js_name = "takeAnalyzeSplit", catch_unwind)]
+pub fn napi_take_analyze_split() -> Value {
+    let b = rsvelte_core::compiler::phases::phase3_transform::profile::take_analyze_breakdown();
+    let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
+    serde_json::json!({
+        "extractScripts": ns(b.extract_scripts),
+        "extractScriptsCalls": b.extract_scripts_calls,
+        "createScopes": ns(b.create_scopes),
+        "createScopesCalls": b.create_scopes_calls,
+        "storeSubs": ns(b.store_subs),
+        "storeSubsCalls": b.store_subs_calls,
+        "template": ns(b.template),
+        "templateCalls": b.template_calls,
+        "cssAnalyze": ns(b.css_analyze),
+        "cssAnalyzeCalls": b.css_analyze_calls,
+        "cssScope": ns(b.css_scope),
+        "cssScopeCalls": b.css_scope_calls,
+        "totalNs": ns(b.total),
+        "compiles": b.compiles,
+    })
+}
+
 /// Read the sub-split of the transform phase, and clear it.
 ///
 /// Same contract as `takePipelineSplit`: `totalNs` is the whole that the

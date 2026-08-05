@@ -374,6 +374,71 @@ impl PipelineBreakdown {
     }
 }
 
+/// The analyze phase, split at the call boundaries `analyze_component` has.
+///
+/// The parent is [`PipelineBreakdown::analyze`] -- the same counter, not a
+/// second timer around the same code, so the two cannot disagree by drift.
+/// That is also why [`take_analyze_breakdown`] **peeks** the parent while it
+/// **takes** the buckets; see that function for the ordering it forces.
+///
+/// The buckets are the named calls only. `analyze_component` also does a large
+/// amount of inline work between them -- rune and await detection, the module
+/// and instance walks, the `{#each}` scan -- and none of it is bucketed. That
+/// work lands in [`AnalyzeBreakdown::unattributed`], which is the point: a
+/// phase whose residual is most of its total is a phase whose cost is not in
+/// the calls anyone would think to name.
+///
+/// `extract_scripts` is instrumented even though it runs before the phase's
+/// first analysis step, because leaving it out would make the residual mean
+/// two things at once -- work nobody bucketed, and one specific call we chose
+/// not to.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AnalyzeBreakdown {
+    /// `Analysis::extract_scripts` -- carves out the script text Phase 3 reuses.
+    pub extract_scripts: Duration,
+    pub extract_scripts_calls: u64,
+    /// `Analysis::create_scopes`.
+    pub create_scopes: Duration,
+    pub create_scopes_calls: u64,
+    /// `store_subscriptions::detect_store_subscriptions`.
+    pub store_subs: Duration,
+    pub store_subs_calls: u64,
+    /// `visitors::analyze_template`.
+    pub template: Duration,
+    pub template_calls: u64,
+    /// `Analysis::analyze_css` and `css::analyze::analyze_css_with_source`:
+    /// the CSS analysis and validation pass.
+    pub css_analyze: Duration,
+    pub css_analyze_calls: u64,
+    /// The rest of the `ast.css` block -- selector-info extraction, pruning,
+    /// and the element scoping walk. Split from `css_analyze` because the two
+    /// answer different questions (is this CSS valid, versus which elements
+    /// does it touch), and kept adjacent to it so that between them they cover
+    /// the whole block: no CSS call falls into the residual.
+    pub css_scope: Duration,
+    pub css_scope_calls: u64,
+    /// [`PipelineBreakdown::analyze`], read without clearing it.
+    pub total: Duration,
+    /// Compiles that reached the pipeline, for per-file figures.
+    pub compiles: u64,
+}
+
+impl AnalyzeBreakdown {
+    /// Time inside `total` that no bucket claims -- here, the inline work
+    /// between the named calls. Expected to be large; report it rather than
+    /// folding it into a neighbour.
+    pub fn unattributed(&self) -> Duration {
+        self.total.saturating_sub(
+            self.extract_scripts
+                + self.create_scopes
+                + self.store_subs
+                + self.template
+                + self.css_analyze
+                + self.css_scope,
+        )
+    }
+}
+
 thread_local! {
     static PL_PARSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static PL_LINE_OFFSETS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -386,6 +451,17 @@ thread_local! {
     static PL_FINALIZE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static PL_TOTAL: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static PL_COMPILES: Cell<u64> = const { Cell::new(0) };
+
+    // Analyze sub-split. Each carries its own call count so that a zero can be
+    // read: `0ns / 0 calls` is a branch that never ran, `0ns / n calls` is work
+    // below the clock, and only the first is "not measured".
+    static AN_EXTRACT_SCRIPTS: Cell<(Duration, u64)> =
+        const { Cell::new((Duration::ZERO, 0)) };
+    static AN_CREATE_SCOPES: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_STORE_SUBS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_TEMPLATE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_CSS_ANALYZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_CSS_SCOPE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
 
     static REPARSE: Cell<(Duration, Duration, u64, u64)> =
         const { Cell::new((Duration::ZERO, Duration::ZERO, 0, 0)) };
@@ -844,6 +920,52 @@ pub fn record_pipeline_transform(d: Duration) {
     PL_TRANSFORM.with(|c| c.set(c.get() + d));
 }
 
+/// Accumulate one analyze sub-bucket, incrementing its call count.
+///
+/// Written once and reused by the six recorders below so that a bucket cannot
+/// be given a time without also being given a call -- the pairing is what makes
+/// a zero readable, and six hand-written copies is six chances to break it.
+#[inline]
+fn record_analyze_bucket(cell: &'static std::thread::LocalKey<Cell<(Duration, u64)>>, d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    cell.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+#[inline]
+pub fn record_analyze_extract_scripts(d: Duration) {
+    record_analyze_bucket(&AN_EXTRACT_SCRIPTS, d);
+}
+
+#[inline]
+pub fn record_analyze_create_scopes(d: Duration) {
+    record_analyze_bucket(&AN_CREATE_SCOPES, d);
+}
+
+#[inline]
+pub fn record_analyze_store_subs(d: Duration) {
+    record_analyze_bucket(&AN_STORE_SUBS, d);
+}
+
+#[inline]
+pub fn record_analyze_template(d: Duration) {
+    record_analyze_bucket(&AN_TEMPLATE, d);
+}
+
+#[inline]
+pub fn record_analyze_css_analyze(d: Duration) {
+    record_analyze_bucket(&AN_CSS_ANALYZE, d);
+}
+
+#[inline]
+pub fn record_analyze_css_scope(d: Duration) {
+    record_analyze_bucket(&AN_CSS_SCOPE, d);
+}
+
 /// One compile, timed end to end. Separate from the buckets on purpose: the
 /// two are compared, not derived from each other.
 #[inline]
@@ -895,6 +1017,49 @@ pub fn peek_pipeline_transform() -> Duration {
 /// split needs the same count afterwards.
 pub fn peek_pipeline_compiles() -> u64 {
     PL_COMPILES.with(Cell::get)
+}
+
+/// The analyze sub-split: **takes** the six buckets, **peeks** the parent.
+///
+/// The parent (`total`) is the pipeline's `analyze` counter itself, so the two
+/// are the same number by construction rather than by two timers agreeing.
+/// The cost of that is an ordering constraint, the same one
+/// `takePhase3Split` carries:
+///
+/// **Call this before [`take_pipeline_breakdown`] for the same compiles.**
+/// That function clears `PL_ANALYZE`, so the other order reports `total: 0`
+/// with non-zero buckets -- which a consumer checking the total catches,
+/// rather than silently dividing by a zero whole.
+///
+/// The buckets are cleared, so calling this twice for one batch reports the
+/// second read as all zeros; the call counts make that visible instead of
+/// looking like work that vanished.
+pub fn take_analyze_breakdown() -> AnalyzeBreakdown {
+    let take = |cell: &'static std::thread::LocalKey<Cell<(Duration, u64)>>| {
+        cell.with(|c| c.replace((Duration::ZERO, 0)))
+    };
+    let (extract_scripts, extract_scripts_calls) = take(&AN_EXTRACT_SCRIPTS);
+    let (create_scopes, create_scopes_calls) = take(&AN_CREATE_SCOPES);
+    let (store_subs, store_subs_calls) = take(&AN_STORE_SUBS);
+    let (template, template_calls) = take(&AN_TEMPLATE);
+    let (css_analyze, css_analyze_calls) = take(&AN_CSS_ANALYZE);
+    let (css_scope, css_scope_calls) = take(&AN_CSS_SCOPE);
+    AnalyzeBreakdown {
+        extract_scripts,
+        extract_scripts_calls,
+        create_scopes,
+        create_scopes_calls,
+        store_subs,
+        store_subs_calls,
+        template,
+        template_calls,
+        css_analyze,
+        css_analyze_calls,
+        css_scope,
+        css_scope_calls,
+        total: PL_ANALYZE.with(Cell::get),
+        compiles: PL_COMPILES.with(Cell::get),
+    }
 }
 
 pub fn take_breakdown() -> Phase3Breakdown {

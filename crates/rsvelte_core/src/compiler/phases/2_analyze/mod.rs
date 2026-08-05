@@ -44,6 +44,12 @@ pub use types::{
 };
 pub use visitors::AstType;
 
+// The pipeline's timers live in Phase 3's `profile` module because that is
+// where the pipeline split was first assembled; the analyze sub-split is
+// recorded into the same accumulators so that its parent is literally the
+// pipeline's `analyze` bucket rather than a second timer around the same call.
+use crate::compiler::phases::phase3_transform::profile;
+
 use crate::ast::arena::ParseArena;
 use crate::ast::template::Root;
 use crate::ast::typed_expr::JsNode;
@@ -245,10 +251,15 @@ pub(crate) fn analyze_prepared_component_with_retained(
     }
 
     // Extract script content for Phase 3 (avoids re-parsing)
+    let _t = profile::timer_start();
     analysis.extract_scripts(ast, source, retained_scripts);
+    profile::record_analyze_extract_scripts(profile::timer_elapsed(_t));
 
     // Create scopes for the component
-    analysis.create_scopes(ast, &ast.arena)?;
+    let _t = profile::timer_start();
+    let create_scopes_result = analysis.create_scopes(ast, &ast.arena);
+    profile::record_analyze_create_scopes(profile::timer_elapsed(_t));
+    create_scopes_result?;
 
     // Detect store subscriptions and create synthetic bindings
     // This must happen after scopes are created but before template analysis
@@ -258,12 +269,18 @@ pub(crate) fn analyze_prepared_component_with_retained(
         .as_ref()
         .map(|f| f.ends_with(".svelte.js") || f.ends_with(".svelte.ts"))
         .unwrap_or(false);
-    store_subscriptions::detect_store_subscriptions(
+    // The `?` is deliberately moved off the call: an early return through it
+    // would skip the record, so an erroring compile would silently drop the
+    // time it spent here and the bucket's call count would under-report.
+    let _t = profile::timer_start();
+    let store_subs_result = store_subscriptions::detect_store_subscriptions(
         ast,
         &mut analysis,
         options.runes,
         is_module_file,
-    )?;
+    );
+    profile::record_analyze_store_subs(profile::timer_elapsed(_t));
+    store_subs_result?;
 
     // Detect await expressions and rune references in template and scripts.
     // This is needed for:
@@ -530,7 +547,10 @@ pub(crate) fn analyze_prepared_component_with_retained(
     // borrow checker so `&ast` can be passed mutably alongside; the arena field
     // is never mutated through `&mut ast`, so there is no aliasing conflict.
     let arena_ref = unsafe { &*arena_ptr };
-    visitors::analyze_template(ast, &mut analysis, arena_ref)?;
+    let _t = profile::timer_start();
+    let template_result = visitors::analyze_template(ast, &mut analysis, arena_ref);
+    profile::record_analyze_template(profile::timer_elapsed(_t));
+    template_result?;
 
     // Post-analysis check: validate module script export specifiers.
     // This mirrors the official Svelte compiler's index.js post-walk checks.
@@ -765,10 +785,18 @@ pub(crate) fn analyze_prepared_component_with_retained(
 
     // Analyze CSS if present
     if let Some(ref stylesheet) = ast.css {
-        analysis.analyze_css(stylesheet, options)?;
+        // `css_analyze` and `css_scope` between them cover this whole block, so
+        // no CSS call lands in the phase residual. Both `?`s are moved off the
+        // calls for the same reason as above: an early return must not skip a
+        // record.
+        let _t = profile::timer_start();
+        let css_analyze_result = analysis.analyze_css(stylesheet, options).and_then(|()| {
+            css::analyze::analyze_css_with_source(stylesheet, &mut analysis, Some(source))
+        });
+        profile::record_analyze_css_analyze(profile::timer_elapsed(_t));
+        css_analyze_result?;
 
-        // Run CSS analysis and validation
-        css::analyze::analyze_css_with_source(stylesheet, &mut analysis, Some(source))?;
+        let _t = profile::timer_start();
 
         // Extract CSS selector information for per-element scoping
         css::extract_css_selector_info(stylesheet, &mut analysis);
@@ -793,6 +821,7 @@ pub(crate) fn analyze_prepared_component_with_retained(
                 css_scoping::mark_all_elements_scoped(&mut ast.fragment);
             }
         }
+        profile::record_analyze_css_scope(profile::timer_elapsed(_t));
     }
 
     // Post-analysis: synthesize empty class/style attributes for elements that have
