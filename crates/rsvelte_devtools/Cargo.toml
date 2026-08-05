@@ -24,6 +24,7 @@ measure-await = ["rsvelte_core/measure-await"]
 measure-slot-key = ["rsvelte_core/measure-slot-key"]
 measure-module-source = ["rsvelte_core/measure-module-source"]
 measure-hoisted = ["rsvelte_core/measure-hoisted"]
+measure-prop-reads = ["rsvelte_core/measure-prop-reads"]
 
 [dependencies]
 rsvelte_ast_equiv = { path = "../rsvelte_ast_equiv" }
