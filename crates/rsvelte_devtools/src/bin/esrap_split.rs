@@ -248,9 +248,47 @@ fn main() {
         ("layout: multiline reads", c.multiline_reads),
         ("layout: empty reads", c.empty_reads),
         ("layout: decision inputs", decisions),
+        ("appends out of order", c.reorder_appends),
+        ("  their bytes", c.reorder_bytes),
+        ("  of those, text moved", c.reorder_text_appends),
+        ("  its bytes", c.reorder_text_bytes),
+        ("appends w/o birth", c.rootless_appends),
+        ("appends cross-context", c.cross_context_appends),
     ] {
         println!("{name:<24}{n:>14}{:>14.1}", per(n));
     }
+
+    // The question the tree exists to answer: could the printer have written
+    // straight into one buffer? Only if every child is spliced in build order.
+    // `cross_context` must be zero for the comparison to be between two lengths
+    // of the same buffer, so it is checked rather than assumed.
+    let ordered = c
+        .cmd_nested
+        .saturating_sub(c.reorder_appends)
+        .saturating_sub(c.rootless_appends);
+    println!(
+        "\nappends in build order {} / {} ({:.1}%); out of order {} carrying {} bytes",
+        ordered,
+        c.cmd_nested,
+        ordered as f64 / c.cmd_nested.max(1) as f64 * 100.0,
+        c.reorder_appends,
+        c.reorder_bytes
+    );
+    println!(
+        "of those, the gap held text {} ({:.1}% of all appends) carrying {} bytes",
+        c.reorder_text_appends,
+        c.reorder_text_appends as f64 / c.cmd_nested.max(1) as f64 * 100.0,
+        c.reorder_text_bytes
+    );
+    println!(
+        "cross-context check: {} -> {}",
+        c.cross_context_appends,
+        if c.cross_context_appends == 0 {
+            "ok (both lengths come from the same buffer)"
+        } else {
+            "MISMATCH (reorder_appends is not meaningful)"
+        }
+    );
 
     // Counts are not time. Dividing the step that produced or consumed a
     // quantity by that quantity gives the unit price the numbers imply, and a

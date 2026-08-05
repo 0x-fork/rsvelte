@@ -106,6 +106,12 @@ enum Slot {
     MeasureReads,
     MultilineReads,
     EmptyReads,
+    ReorderAppends,
+    ReorderBytes,
+    CrossContextAppends,
+    RootlessAppends,
+    ReorderTextAppends,
+    ReorderTextBytes,
     StrHeap,
     StrBytes,
     AppendCalls,
@@ -170,6 +176,35 @@ pub struct PrintCounts {
     pub multiline_reads: u64,
     /// Reads of `Context::empty`; see `measure_reads`.
     pub empty_reads: u64,
+    /// `Context::append`s where the parent pushed commands between building the
+    /// child and splicing it — so the parent holds text belonging *before* text
+    /// the child already produced.
+    ///
+    /// This is the count that says whether the command tree is still load
+    /// bearing. Writing straight into one buffer reaches the same output only
+    /// when every append is in build order; each of these is a place where a
+    /// single buffer would have to move bytes it had already written.
+    pub reorder_appends: u64,
+    /// Literal bytes inside the children of `reorder_appends` — how much text a
+    /// single buffer would have had to move, rather than how often.
+    pub reorder_bytes: u64,
+    /// Appends where the parent held *fewer* commands than when the child was
+    /// born. Impossible while a child is spliced into the context that made it,
+    /// since a command buffer only grows, so this is the witness that
+    /// `reorder_appends` compares two lengths from the same buffer. A non-zero
+    /// value invalidates it.
+    pub cross_context_appends: u64,
+    /// The subset of `reorder_appends` where the text pushed into the gap was
+    /// itself text, rather than only sentinels or a `Location`. This is the
+    /// count a single buffer would actually have to move bytes for; the wider
+    /// count charges it for whitespace it could have resolved for free.
+    pub reorder_text_appends: u64,
+    /// Literal bytes inside the children of `reorder_text_appends`.
+    pub reorder_text_bytes: u64,
+    /// Appends of a context built by `Context::new` rather than `Context::child`,
+    /// which carry no birth length and so are outside `reorder_appends`'
+    /// denominator. Reported rather than assumed zero.
+    pub rootless_appends: u64,
     /// `Command::Str` payloads that did not fit `CompactString`'s inline
     /// storage. Read from `is_heap_allocated()` rather than comparing against
     /// the 24-byte limit named in a doc comment.
@@ -367,6 +402,35 @@ pub fn count_append(bytes: usize) {
     bump(Slot::AppendBytes, bytes as u64);
 }
 
+/// One `Context::append`, told whether the child could still have been written
+/// straight into its parent's buffer.
+///
+/// `spans` is `None` for a child with no recorded birth, and otherwise the
+/// parent's command count when the child was born and again at the splice.
+#[inline]
+pub fn count_append_order(
+    spans: Option<(usize, usize)>,
+    text_spans: Option<(usize, usize)>,
+    child_bytes: usize,
+) {
+    let Some((born, now)) = spans else {
+        bump(Slot::RootlessAppends, 1);
+        return;
+    };
+    if now > born {
+        bump(Slot::ReorderAppends, 1);
+        bump(Slot::ReorderBytes, child_bytes as u64);
+    } else if now < born {
+        bump(Slot::CrossContextAppends, 1);
+    }
+    if let Some((text_born, text_now)) = text_spans
+        && text_now > text_born
+    {
+        bump(Slot::ReorderTextAppends, 1);
+        bump(Slot::ReorderTextBytes, child_bytes as u64);
+    }
+}
+
 /// One `Mapping` pushed.
 #[inline]
 pub fn count_mapping() {
@@ -416,6 +480,12 @@ pub fn take() -> PrintBreakdown {
                 measure_reads: get(Slot::MeasureReads),
                 multiline_reads: get(Slot::MultilineReads),
                 empty_reads: get(Slot::EmptyReads),
+                reorder_appends: get(Slot::ReorderAppends),
+                reorder_bytes: get(Slot::ReorderBytes),
+                cross_context_appends: get(Slot::CrossContextAppends),
+                rootless_appends: get(Slot::RootlessAppends),
+                reorder_text_appends: get(Slot::ReorderTextAppends),
+                reorder_text_bytes: get(Slot::ReorderTextBytes),
                 str_heap: get(Slot::StrHeap),
                 str_bytes: get(Slot::StrBytes),
                 append_calls: get(Slot::AppendCalls),

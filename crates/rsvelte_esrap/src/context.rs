@@ -29,6 +29,27 @@ pub struct Context {
     /// make" has one place to be counted; as a field there was no way to know
     /// the answer short of enumerating the read sites, which goes quietly stale.
     multiline: bool,
+    /// How many commands the creating context already held when this one was
+    /// made by [`Context::child`], or `None` for a root.
+    ///
+    /// Measurement only, and it answers one question: would the same output be
+    /// reachable by writing straight into a single buffer? It would not, if a
+    /// parent pushes anything between building a child and splicing it -- that
+    /// text belongs *before* the child's, which a buffer that already holds the
+    /// child's bytes can only achieve by moving them. Comparing this against the
+    /// parent's length at `append` counts exactly those cases.
+    birth_parent_len: Option<usize>,
+    /// The creating context's [`Context::text_commands`] at the same moment.
+    ///
+    /// The gap that matters is narrower than `birth_parent_len` suggests. A
+    /// parent that pushed only sentinels or a `Location` in the gap costs a
+    /// single buffer nothing: neither emits bytes, so both can be recorded
+    /// against a byte offset that is already known and resolved at the end. Only
+    /// a parent that wrote *text* into the gap forces bytes to move. Tracking
+    /// both makes the difference visible instead of charging sentinels for it.
+    birth_parent_text: Option<usize>,
+    /// Commands pushed so far that carry output text: `Str` and `Nested`.
+    text_commands: usize,
 }
 
 impl Context {
@@ -45,7 +66,11 @@ impl Context {
     /// A fresh child context. Named `child` rather than mirroring esrap's `new`
     /// because in this port it carries no shared visitor table.
     pub fn child(&self) -> Context {
-        Context::new()
+        Context {
+            birth_parent_len: Some(self.commands.len()),
+            birth_parent_text: Some(self.text_commands),
+            ..Context::new()
+        }
     }
 
     /// Grow the newline indentation by one level for subsequent newlines.
@@ -90,6 +115,7 @@ impl Context {
         // inline limit named in `command.rs`'s doc: the limit is the library's
         // to change, and the question is which payloads actually allocated.
         crate::profile::count_cmd_str(content.len(), content.is_heap_allocated());
+        self.text_commands += 1;
         self.commands.push(Command::Str(content));
         if self.has_newline {
             self.multiline = true;
@@ -120,6 +146,14 @@ impl Context {
         self.measure += child.measure;
         self.has_content |= child.has_content;
         crate::profile::count_cmd_nested();
+        crate::profile::count_append_order(
+            child.birth_parent_len.map(|born| (born, self.commands.len())),
+            child
+                .birth_parent_text
+                .map(|born| (born, self.text_commands)),
+            child.measure,
+        );
+        self.text_commands += 1;
         self.commands.push(Command::Nested(child.commands));
         if self.has_newline || child_multiline {
             self.multiline = true;
