@@ -76,8 +76,16 @@ fn main() {
     let _ = profile::take_pipeline_breakdown();
     let _ = profile::take_script_text_breakdown();
 
+    // A failing compile leaves several phase timers unrecorded: the `?` on the
+    // phase call returns before the recorder runs, so that compile's parse,
+    // ensure-script, TS-removal, analyze, transform and CSS time is lost while
+    // its total is not. The count is the denominator that says whether that
+    // matters here.
+    let mut failed = 0usize;
     for (_, content) in &files {
-        let _ = rsvelte_core::compile(content, compile_opts.clone());
+        if rsvelte_core::compile(content, compile_opts.clone()).is_err() {
+            failed += 1;
+        }
 
         // Drained per file for the scaling rows, so the corpus totals have to be
         // accumulated here rather than read back after the loop.
@@ -329,7 +337,7 @@ fn main() {
         pct(unattributed)
     );
     println!(
-        "TOTAL:                 {:7.2}ms  ({} compiles)",
+        "TOTAL:                 {:7.2}ms  ({} compiles, {failed} failed)",
         ms(total),
         pipeline.compiles
     );
