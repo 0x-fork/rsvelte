@@ -437,6 +437,15 @@ pub fn count_mapping() {
     bump(Slot::Mappings, 1);
 }
 
+/// `size_of::<Command>()`, exposed because the split quotes a per-print tree
+/// size derived from it (command count x this) and a layout change to the enum
+/// would otherwise move that number silently. Not `Command` itself: the type is
+/// internal, and only its size is a measurement input.
+#[must_use]
+pub fn command_size() -> usize {
+    std::mem::size_of::<crate::command::Command>()
+}
+
 /// Read the breakdown and clear it. Calling twice for one batch reports the
 /// second read as zeros; the `*_calls` make that visible rather than looking
 /// like work that vanished.
