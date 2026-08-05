@@ -4419,7 +4419,6 @@ fn convert_assignment_expression(
     // Wrap with ownership validation if needed
     if let Some((prop_alias, path, source_loc)) = ownership_info {
         use crate::compiler::phases::phase3_transform::js_ast::builders as b;
-        context.state.needs_mutation_validation.set(true);
         let mut args = vec![b::string(&prop_alias), b::array(path), result];
         if let Some((line, col)) = source_loc {
             args.push(b::literal_number(line as f64));
@@ -4437,7 +4436,7 @@ fn convert_assignment_expression(
 
 /// Check if a JSON AST node has a `svelte-ignore` leading comment with the given code.
 /// This checks the `leadingComments` array for comments containing `svelte-ignore <code>`.
-fn is_svelte_ignored(obj: &serde_json::Map<String, Value>, code: &str) -> bool {
+pub(crate) fn is_svelte_ignored(obj: &serde_json::Map<String, Value>, code: &str) -> bool {
     if let Some(Value::Array(comments)) = obj.get("leadingComments") {
         for comment in comments {
             if let Some(value) = comment
@@ -4455,7 +4454,7 @@ fn is_svelte_ignored(obj: &serde_json::Map<String, Value>, code: &str) -> bool {
 
 /// Check if a JSON AST node has a `svelte-ignore` leading comment with the given code,
 /// also checking the source code directly for comments not attached in the JSON AST.
-fn is_svelte_ignored_with_source(
+pub(crate) fn is_svelte_ignored_with_source(
     obj: &serde_json::Map<String, Value>,
     code: &str,
     source: &str,
@@ -4545,7 +4544,7 @@ fn comment_has_svelte_ignore(text: &str, code: &str) -> bool {
 /// Check if an assignment expression's LHS is a member expression targeting a prop,
 /// and if so, return the ownership validation info (prop_alias, path array, optional source location).
 /// This works on the original JSON AST before transforms are applied.
-fn check_ownership_validation(
+pub(crate) fn check_ownership_validation(
     left_json: Option<&Value>,
     context: &ComponentContext,
 ) -> Option<(String, Vec<JsExpr>, Option<(usize, usize)>)> {
@@ -4570,8 +4569,12 @@ fn check_ownership_validation(
         return None;
     }
 
+    // Official sets this before building the path, so an unbuildable path still
+    // emits the `$$ownership_validator` preamble.
+    context.state.needs_mutation_validation.set(true);
+
     // Build the property path
-    let path = build_member_path_from_json(left_val, context);
+    let path = build_member_path_from_json(left_val, context)?;
 
     let prop_alias = binding.prop_alias.as_ref().unwrap_or(&binding.name).clone();
 
@@ -4611,7 +4614,9 @@ fn get_root_identifier_from_member_json(val: &Value) -> Option<String> {
 
 /// Build the property path array from a JSON member expression.
 /// Returns [root_name, prop1, prop2, ...] for obj.prop1.prop2.
-fn build_member_path_from_json(val: &Value, context: &ComponentContext) -> Vec<JsExpr> {
+/// A property that is neither an `Identifier` nor a `Literal` (e.g. `obj[a.b]`) aborts the
+/// whole validation, matching `validate_mutation`'s `else { return expression; }` branch.
+fn build_member_path_from_json(val: &Value, context: &ComponentContext) -> Option<Vec<JsExpr>> {
     use crate::compiler::phases::phase3_transform::js_ast::builders as b;
 
     let mut path = Vec::new();
@@ -4656,6 +4661,8 @@ fn build_member_path_from_json(val: &Value, context: &ComponentContext) -> Vec<J
                                 path.push(b::string(s));
                             }
                         }
+                    } else {
+                        return None;
                     }
                 }
 
@@ -4674,7 +4681,7 @@ fn build_member_path_from_json(val: &Value, context: &ComponentContext) -> Vec<J
     }
 
     path.reverse();
-    path
+    Some(path)
 }
 
 /// Try to apply reactive transformations to an assignment expression.
@@ -6152,7 +6159,6 @@ fn convert_update_expression(
     // Wrap with ownership validation if needed
     if let Some((prop_alias, path, source_loc)) = ownership_info {
         use crate::compiler::phases::phase3_transform::js_ast::builders as b;
-        context.state.needs_mutation_validation.set(true);
         let mut args = vec![b::string(&prop_alias), b::array(path), result];
         if let Some((line, col)) = source_loc {
             args.push(b::literal_number(line as f64));
