@@ -110,6 +110,7 @@ fn main() {
     // exactly the hundred warm-up files. The napi reader takes both in one
     // call, so this asymmetry is local to this binary.
     let _ = profile::take_store_subs_breakdown();
+    let _ = profile::take_feature_detect_breakdown();
     let _ = profile::take_analyze_breakdown();
     let _ = profile::take_analyze_visits();
     let _ = profile::take_pipeline_breakdown();
@@ -129,6 +130,7 @@ fn main() {
     // clears. Reversing these two lines reports a zero total, which the check
     // below turns into a visible failure rather than a plausible share table.
     let s = profile::take_store_subs_breakdown();
+    let fd = profile::take_feature_detect_breakdown();
     let a = profile::take_analyze_breakdown();
     let v = profile::take_analyze_visits();
     let p = profile::take_pipeline_breakdown();
@@ -237,6 +239,51 @@ fn main() {
             ms(d) / ss_total * 100.0
         }
     };
+    // The `FeatureDetect` walks, and the subset of them whose answer was fixed
+    // before they started. `wasted` is the number a lever would act on; the two
+    // above it are there so the share has a denominator and the step from
+    // "ran" to "could not have found anything" is visible rather than asserted.
+    let fd_pct = |n: u64, d: u64| {
+        if d == 0 {
+            f64::NAN
+        } else {
+            n as f64 / d as f64 * 100.0
+        }
+    };
+    println!(
+        "\nfeature_detect: {} compiles, gate passed {} ({:.2}%), needs_rune {} ({:.2}%), await in source {} ({:.2}%)",
+        fd.calls,
+        fd.gate_passed,
+        fd_pct(fd.gate_passed, fd.calls),
+        fd.needs_rune,
+        fd_pct(fd.needs_rune, fd.calls),
+        fd.await_in_source,
+        fd_pct(fd.await_in_source, fd.calls),
+    );
+    println!(
+        "{:<20}{:>10}{:>14}{:>12}{:>10}",
+        "walk", "ran", "await-only", "wasted", "wasted%"
+    );
+    for (name, ran, await_only, wasted) in [
+        (
+            "instance script",
+            fd.instance_walks,
+            fd.instance_walks_await_only,
+            fd.instance_walks_wasted,
+        ),
+        (
+            "template fragment",
+            fd.fragment_walks,
+            fd.fragment_walks_await_only,
+            fd.fragment_walks_wasted,
+        ),
+    ] {
+        println!(
+            "{name:<20}{ran:>10}{await_only:>14}{wasted:>12}{:>9.2}%",
+            fd_pct(wasted, ran)
+        );
+    }
+
     println!(
         "\nstore_subs: {} calls, gate skipped {} ({:.2}% of calls)",
         s.calls,

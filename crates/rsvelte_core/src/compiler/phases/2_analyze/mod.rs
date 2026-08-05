@@ -390,6 +390,19 @@ pub(crate) fn analyze_prepared_component_with_retained(
         false
     };
 
+    // Deterministic, one call per compile. `await_in_source` reuses the gate's
+    // own substring search rather than a second definition of "has await": the
+    // claim being counted is about this gate, so it has to be this gate's
+    // answer. It over-counts (`await` inside a string or comment passes), which
+    // is the safe direction -- it can only shrink the wasted subset.
+    profile::record_feature_detect(profile::FeatureDetectFacts {
+        needs_rune_detection,
+        gate_passed: can_have_features,
+        await_in_source: memchr::memmem::find(source.as_bytes(), b"await").is_some(),
+        walked_instance: can_have_features && ast.instance.is_some(),
+        walked_fragment: can_have_features,
+    });
+
     let fragment_has_await = fragment_results.has_await;
 
     // Track whether the component has await (needed for async function wrapper)

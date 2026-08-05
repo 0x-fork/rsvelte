@@ -521,6 +521,19 @@ thread_local! {
     static AN_VISIT_SCRIPTS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_BINDING_FIXUPS: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
     static AN_FINALIZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static AN_FEATURE_FACTS: Cell<FeatureDetectBreakdown> =
+        const { Cell::new(FeatureDetectBreakdown {
+            calls: 0,
+            needs_rune: 0,
+            gate_passed: 0,
+            await_in_source: 0,
+            instance_walks: 0,
+            instance_walks_await_only: 0,
+            instance_walks_wasted: 0,
+            fragment_walks: 0,
+            fragment_walks_await_only: 0,
+            fragment_walks_wasted: 0,
+        }) };
 
     // Deterministic node counts, load-independent: one run is enough. Gated by
     // the same switch as the timers so the shipped compiler pays nothing.
@@ -1056,6 +1069,39 @@ pub fn record_analyze_css_scope(d: Duration) {
     record_analyze_bucket(&AN_CSS_SCOPE, d);
 }
 
+/// One compile's worth of `FeatureDetect` facts.
+///
+/// Deterministic, so one run settles it and the answer does not move with load.
+/// Gated by the same switch as the timers only so the shipped compiler pays
+/// nothing; there is one call per compile, which is nothing like the hot path.
+pub fn record_feature_detect(f: FeatureDetectFacts) {
+    if !timers_enabled() {
+        return;
+    }
+    AN_FEATURE_FACTS.with(|c| {
+        let mut b = c.get();
+        b.calls += 1;
+        b.needs_rune += u64::from(f.needs_rune_detection);
+        b.gate_passed += u64::from(f.gate_passed);
+        b.await_in_source += u64::from(f.await_in_source);
+        // "await only" is the walk whose rune answer is discarded; "wasted" is
+        // the part of that which could not have found an await either.
+        let await_only = !f.needs_rune_detection;
+        b.instance_walks += u64::from(f.walked_instance);
+        b.instance_walks_await_only += u64::from(f.walked_instance && await_only);
+        b.instance_walks_wasted += u64::from(f.walked_instance && await_only && !f.await_in_source);
+        b.fragment_walks += u64::from(f.walked_fragment);
+        b.fragment_walks_await_only += u64::from(f.walked_fragment && await_only);
+        b.fragment_walks_wasted += u64::from(f.walked_fragment && await_only && !f.await_in_source);
+        c.set(b);
+    });
+}
+
+/// The `FeatureDetect` facts, and clear them.
+pub fn take_feature_detect_breakdown() -> FeatureDetectBreakdown {
+    AN_FEATURE_FACTS.with(|c| c.replace(FeatureDetectBreakdown::default()))
+}
+
 /// One template node dispatched by `ScopeBuilder::visit_node`.
 ///
 /// See [`AnalyzeBreakdown::create_scopes_nodes`] for what this does and does
@@ -1101,6 +1147,53 @@ pub enum AnalyzeBucket {
 
 /// Slots in the per-bucket visit arrays: the eleven buckets plus the residual.
 pub const ANALYZE_BUCKETS: usize = 12;
+
+/// Inside the `FeatureDetect` span, which walks the instance script and the
+/// template fragment to answer two questions at once: does this component await,
+/// and does it reference a rune.
+///
+/// The second question is only asked when runes mode is not already settled
+/// (`needs_rune_detection`), but the gate in front of both walks is
+/// `source contains '$' || source contains "await"`, and every rune name starts
+/// with `$`. So on a component whose mode is already known, the walks can only
+/// return their await answer -- and if the source holds no `await` at all, that
+/// answer is `false` before the walk starts.
+///
+/// The counters are shaped to make that subset countable rather than arguable:
+/// `instance_walks` is the denominator, `instance_walks_await_only` is the part
+/// whose rune answer is discarded, and `instance_walks_wasted` is the part of
+/// *that* which could not have found an await either. A lever needs the third
+/// number; the first two on their own only say the walk ran.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct FeatureDetectBreakdown {
+    /// Compiles that reached the span. The denominator for everything else.
+    pub calls: u64,
+    /// Compiles where runes mode was still undecided, so the rune answer was
+    /// actually read.
+    pub needs_rune: u64,
+    /// Compiles that passed the `'$' || "await"` gate.
+    pub gate_passed: u64,
+    /// Compiles whose source contains `await` anywhere -- including inside
+    /// strings and comments, so this is an over-count of the ones that could
+    /// really await, which is the safe direction for a waste claim.
+    pub await_in_source: u64,
+    pub instance_walks: u64,
+    pub instance_walks_await_only: u64,
+    pub instance_walks_wasted: u64,
+    pub fragment_walks: u64,
+    pub fragment_walks_await_only: u64,
+    pub fragment_walks_wasted: u64,
+}
+
+/// The facts one compile presents to the `FeatureDetect` counters.
+#[derive(Clone, Copy)]
+pub struct FeatureDetectFacts {
+    pub needs_rune_detection: bool,
+    pub gate_passed: bool,
+    pub await_in_source: bool,
+    pub walked_instance: bool,
+    pub walked_fragment: bool,
+}
 
 /// Inside `detect_store_subscriptions`, which spends its time without walking
 /// the AST at all -- the analyze split measured zero JS child-slot expansions
