@@ -307,6 +307,7 @@ pub fn napi_take_pipeline_split() -> Value {
 pub fn napi_take_phase3_split() -> Value {
     use rsvelte_core::compiler::phases::phase3_transform::profile;
     let transform = profile::peek_pipeline_transform();
+    let compiles = profile::peek_pipeline_compiles();
     let b = profile::take_breakdown();
     let ns = |d: std::time::Duration| serde_json::json!(d.as_nanos() as u64);
     serde_json::json!({
@@ -317,6 +318,7 @@ pub fn napi_take_phase3_split() -> Value {
         "cssRender": ns(b.css_render),
         "codegen": ns(b.codegen),
         "totalNs": ns(transform),
+        "compiles": compiles,
     })
 }
 
