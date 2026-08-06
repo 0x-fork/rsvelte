@@ -7,7 +7,25 @@ of only comparing diagnostic counts, mirroring what
 every listed fixture is a real divergence from the last confirmed test run, not
 a placeholder.
 
-## Current baseline: 207 divergences
+## Current baseline: 200 divergences
+
+Seven entries left when the five highest-volume spanless warning sites were given
+their node's span (`event_directive_deprecated`,
+`element_invalid_self_closing_tag`, `export_let_unused`, `non_reactive_update`,
+`options_missing_custom_element`): `invalid-self-closing-tag`,
+`tag-custom-element-options-missing`, `unreferenced-variables`,
+`unreferenced-variables-each`, `runes-referenced-nonstate`,
+`runes-referenced-nonstate-bind-this` and
+`custom-element-props-identifier-props-option`.
+
+A further **26 listed entries already pass** and are not accounted for here — 25
+a11y fixtures plus `inline-new-class-2`, cleared by the attribute-span fix and
+not by this one. They are left listed deliberately rather than folded into the
+count above, because this ratchet's "already passing" side is printed but not
+asserted, so a stale entry is invisible to CI and only an explicit claim of
+*which* change cleared *which* entry keeps the attribution honest. Shrinking them
+belongs to whoever measures them, not to the next PR that happens to run the
+suite.
 
 The divergences fall into three clusters:
 
@@ -19,26 +37,27 @@ The divergences fall into three clusters:
   `crates/rsvelte_core/src/compiler/phases/2_analyze` rather than one bug —
   fixing it means auditing each `AnalysisError::*` construction individually.
 
-- **Warning span-only mismatches (53).** The warning `code` and `message` match
+- **Warning span-only mismatches (46).** The warning `code` and `message` match
   upstream exactly; only the reported `start`/`end` differs — typically rsvelte
   reports a whole-line/whole-node span where upstream reports a narrower
   sub-span (an attribute value, a role token, an identifier). Affects
-  `component-name-lowercase`, `custom-element-props-identifier*`,
-  `rest-eachblock-binding*`, `invalid-self-closing-tag`,
+  `component-name-lowercase`, `custom-element-props-identifier`,
+  `custom-element-props-identifier-rest`,
+  `rest-eachblock-binding*`,
   `a11y-aria-proptypes-*`, `a11y-scope`, `a11y-no-abstract-roles`,
   `a11y-role-supports-aria-props`, `a11y-heading-has-content`,
   `a11y-anchor-is-valid`, `a11y-autocomplete-valid`, `a11y-tabindex-no-positive`,
   `a11y-no-autofocus`, `a11y-no-redundant-roles`, `a11y-no-access-key`,
   `a11y-aria-activedescendant`, `a11y-not-on-components`,
   `a11y-role-has-required-aria-props`, `store-runes-conflict`,
-  `store-rune-conflic-from-props`, `runes-referenced-nonstate*`,
+  `store-rune-conflic-from-props`,
   `svelte-component-deprecated`, `component-legacy-instantiation`,
-  `inline-new-class*`, `unreferenced-variables*`, `empty-block`,
+  `inline-new-class*`, `empty-block`,
   `global-event-reference`, `illegal-attribute-character`,
   `implicitly-closed-by-{parent,sibling}`, `bidirectional-control-characters`,
   `use-the-platform`, `reactive-module-variable`, `unknown-code`,
   `script-unknown-attribute`, `script-context-module-runes-deprecated`,
-  `script-invalid-spread-attribute`, `tag-custom-element-options-missing`,
+  `script-invalid-spread-attribute`,
   `runes-legacy-syntax-warnings`, and `a11y-aria-unsupported-element`.
   Each is a narrow-the-span fix once the underlying node's precise range is
   identified (per-rule, not architectural).
