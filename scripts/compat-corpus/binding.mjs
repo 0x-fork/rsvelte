@@ -15,6 +15,12 @@
  * So record the commit at stage time and check it at use time. Absent a stamp
  * the answer is "unknown", which is treated as unusable for writing a ratchet —
  * a ratchet entry is a durable claim that a divergence exists in a given tree.
+ *
+ * The stamp is `stagedAtCommit`, never `builtFromCommit`: it records what was
+ * checked out when the library was copied, which is a lower bound on its age and
+ * not evidence of what compiled it. #2482 upgrades this to a real attestation by
+ * having the build embed its own commit; until then the field name is the honest
+ * one, because the name is what a reader three weeks from now will trust.
  */
 
 import fs from 'node:fs';
@@ -61,12 +67,14 @@ export function stageBinding(root) {
 }
 
 export function writeBindingProvenance(root) {
-	const commit = git(root, ['rev-parse', 'HEAD']);
-	if (!commit) throw new Error('cannot resolve HEAD to stamp the binding');
+	const stagedAtCommit = git(root, ['rev-parse', 'HEAD']);
+	if (!stagedAtCommit) throw new Error('cannot resolve HEAD to stamp the binding');
 	// A dirty crates/ tree means the binding may contain uncommitted work, which
 	// no commit id describes.
 	const dirty = (git(root, ['status', '--porcelain', '--', 'crates']) ?? '') !== '';
-	const stamp = { commit, dirty, stagedAt: new Date().toISOString() };
+	// Named for what it attests. This records the commit checked out when the
+	// library was copied, which is not evidence of what compiled it — see #2482.
+	const stamp = { stagedAtCommit, dirty, stagedAt: new Date().toISOString() };
 	fs.writeFileSync(path.join(root, STAMP_REL), JSON.stringify(stamp, null, '\t') + '\n');
 	return stamp;
 }
@@ -88,21 +96,25 @@ export function bindingProvenance(root) {
 	} catch {
 		return { state: 'unknown', detail: `${STAMP_REL} is unreadable` };
 	}
+	const at = stamp.stagedAtCommit;
+	if (typeof at !== 'string' || at === '') {
+		return { state: 'unknown', detail: `${STAMP_REL} records no stagedAtCommit` };
+	}
 	if (stamp.dirty) {
-		return { state: 'dirty', detail: `built from ${String(stamp.commit).slice(0, 8)} with uncommitted changes under crates/` };
+		return { state: 'dirty', detail: `staged at ${at.slice(0, 8)} with uncommitted changes under crates/` };
 	}
-	const known = git(root, ['rev-parse', '--verify', `${stamp.commit}^{commit}`]);
+	const known = git(root, ['rev-parse', '--verify', `${at}^{commit}`]);
 	if (!known) {
-		return { state: 'foreign', detail: `built from ${String(stamp.commit).slice(0, 8)}, which is not a commit in this repository` };
+		return { state: 'foreign', detail: `staged at ${at.slice(0, 8)}, which is not a commit in this repository` };
 	}
-	const behind = git(root, ['rev-list', '--count', `${stamp.commit}..HEAD`, '--', 'crates']);
+	const behind = git(root, ['rev-list', '--count', `${at}..HEAD`, '--', 'crates']);
 	if (behind && behind !== '0') {
 		return {
 			state: 'stale',
-			detail: `built from ${stamp.commit.slice(0, 8)}, which is ${behind} commit(s) touching crates/ behind HEAD`,
+			detail: `staged at ${at.slice(0, 8)}, which is ${behind} commit(s) touching crates/ behind HEAD`,
 		};
 	}
-	return { state: 'ok', detail: `built from ${stamp.commit.slice(0, 8)}` };
+	return { state: 'ok', detail: `staged at ${at.slice(0, 8)}` };
 }
 
 /** A reason string when the binding cannot back a durable claim, else null. */
@@ -116,7 +128,9 @@ if (process.argv[1] && process.argv[1].endsWith('binding.mjs') && process.argv.i
 	const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 	try {
 		const stamp = stageBinding(root);
-		console.log(`[binding] staged and stamped: ${stamp.commit.slice(0, 8)}${stamp.dirty ? ' (DIRTY crates/)' : ''}`);
+		console.log(
+			`[binding] staged at ${stamp.stagedAtCommit.slice(0, 8)}${stamp.dirty ? ' (DIRTY crates/)' : ''}`
+		);
 	} catch (e) {
 		console.error(`[binding] ${e.message}`);
 		process.exit(2);
