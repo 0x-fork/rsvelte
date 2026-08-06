@@ -89,6 +89,7 @@ fn main() {
     let _ = profile::take_scan_counts();
     let _ = profile::take_rewrite_counts();
     let _ = profile::take_collect_vars_breakdown();
+    let _ = profile::take_text_identity();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -180,6 +181,7 @@ fn main() {
     let scan = scan_total;
     let rw = profile::take_rewrite_counts();
     let cv = profile::take_collect_vars_breakdown();
+    let ti = profile::take_text_identity();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -351,6 +353,25 @@ fn main() {
             - ms(st.collect_vars),
         cv.calls,
         st.calls
+    );
+    let pn_any =
+        rw.files[rsvelte_core::compiler::phases::phase3_transform::profile::REWRITE_PN_ANY];
+    println!(
+        "      TEXT-IDENTITY checked {} (vs staged {}) | changed {} ({:.1}%) | pn_ANY {} | unexplained {} | noop {} | {}",
+        ti.checked,
+        st.calls,
+        ti.changed,
+        ti.changed as f64 / ti.checked.max(1) as f64 * 100.0,
+        pn_any,
+        ti.unexplained,
+        ti.noop,
+        if ti.unexplained == 0 && ti.changed + ti.noop == pn_any {
+            "PASS: every change is a named site"
+        } else if ti.unexplained > 0 {
+            "FAIL: an unnamed rewrite path"
+        } else {
+            "FAIL: the site counts do not close"
+        }
     );
     for (i, name) in rsvelte_core::compiler::phases::phase3_transform::profile::REWRITE_SITE_NAMES
         .iter()

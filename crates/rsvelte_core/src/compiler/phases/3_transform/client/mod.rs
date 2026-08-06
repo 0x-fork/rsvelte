@@ -4441,6 +4441,14 @@ fn instance_has_top_level_multi_declarator(ast: &Root, script: &str) -> bool {
 /// Wrapped rather than counted at each site so a new scan cannot be added
 /// without being counted: the name is the only way to call the finder here.
 #[inline]
+fn text_fingerprint(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[inline]
 fn find_counted(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let found = memmem::find(haystack, needle);
     // Charged after the search, not before: a hit stops at the match, so
@@ -4520,6 +4528,9 @@ fn transform_instance_script_for_visitors(
     }
 
     let _stage = super::profile::timer_start();
+    // Taken past the early return so this shares a denominator with the rewrite
+    // counters, and before the first `Cow` shadowing so nothing has run yet.
+    let entry_fingerprint = text_fingerprint(script);
 
     // Reset the $$array counters for this component
     // This ensures unique names across multiple $derived destructuring patterns
@@ -5956,6 +5967,9 @@ fn transform_instance_script_for_visitors(
     let runes_fastpath_eligible = analysis.runes && !dev && prop_mutation_vars.is_empty();
 
     super::profile::record_cv_line_split(super::profile::timer_elapsed(_cv));
+    // The line loop starts on the next statement, so this is the last point at
+    // which the Phase 2 spans could still line up.
+    super::profile::record_text_identity(text_fingerprint(&script_rest) != entry_fingerprint);
     super::profile::record_st_collect_vars(super::profile::timer_elapsed(_stage));
     let _stage = super::profile::timer_start();
 

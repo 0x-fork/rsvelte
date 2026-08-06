@@ -446,6 +446,10 @@ thread_local! {
     static CV_TEXT_INDEX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_BINDING_VECS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_SET_MAPS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static TEXT_CHECKED: Cell<u64> = const { Cell::new(0) };
+    static TEXT_CHANGED: Cell<u64> = const { Cell::new(0) };
+    static TEXT_UNEXPLAINED: Cell<u64> = const { Cell::new(0) };
+    static TEXT_NOOP: Cell<u64> = const { Cell::new(0) };
     static CV_PROXY_VARS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_LINE_SPLIT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_CALLS: Cell<[u64; 6]> = const { Cell::new([0; 6]) };
@@ -894,9 +898,20 @@ pub struct RewriteCounts {
     pub files: [u64; REWRITE_SITE_COUNT],
 }
 
+/// Blinds one rewrite site, so the text-identity gate's `unexplained` counter
+/// can be shown to move. A gate whose failure column is structurally unable to
+/// leave zero reports the same thing whether or not it works.
+pub fn gate_selftest_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RSVELTE_GATE_SELFTEST").is_some())
+}
+
 #[inline]
 pub fn count_rewrite(site: usize) {
     if !timers_enabled() {
+        return;
+    }
+    if gate_selftest_enabled() && site == REWRITE_PN_ARROW_PARENS {
         return;
     }
     if site != REWRITE_PN_ANY {
@@ -1065,6 +1080,51 @@ pub struct CollectVarsBreakdown {
     /// One per sub-timer, so a mismatch localises to a boundary instead of
     /// only showing up as a stage-level discrepancy.
     pub calls: [u64; 6],
+}
+
+/// Whether the staged pipeline's text is still the text Phase 2 parsed.
+///
+/// Reading the code says which statements *can* rewrite `script_rest`; only
+/// hashing the string at both ends says whether any of them, or anything the
+/// reading missed, actually did. Compare `changed` against the union of the
+/// rewrite-site counters: a higher count means a rewrite path nobody has named.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct TextIdentity {
+    pub checked: u64,
+    pub changed: u64,
+    /// Files whose text changed although no named rewrite site fired. This, not
+    /// `changed` against a count, is the test for an unnamed rewrite path: a
+    /// count comparison can be satisfied by one unknown path cancelling out
+    /// several named sites that happened to be no-ops.
+    pub unexplained: u64,
+    /// Files where a named site fired and the text came out identical anyway.
+    pub noop: u64,
+}
+
+pub fn take_text_identity() -> TextIdentity {
+    TextIdentity {
+        checked: TEXT_CHECKED.with(|c| c.replace(0)),
+        changed: TEXT_CHANGED.with(|c| c.replace(0)),
+        unexplained: TEXT_UNEXPLAINED.with(|c| c.replace(0)),
+        noop: TEXT_NOOP.with(|c| c.replace(0)),
+    }
+}
+
+#[inline]
+pub fn record_text_identity(changed: bool) {
+    if !timers_enabled() {
+        return;
+    }
+    let named_fired = REWRITE_SEEN.with(|c| c.get()[REWRITE_PN_ANY]);
+    TEXT_CHECKED.with(|c| c.set(c.get() + 1));
+    if changed {
+        TEXT_CHANGED.with(|c| c.set(c.get() + 1));
+        if !named_fired {
+            TEXT_UNEXPLAINED.with(|c| c.set(c.get() + 1));
+        }
+    } else if named_fired {
+        TEXT_NOOP.with(|c| c.set(c.get() + 1));
+    }
 }
 
 pub fn take_collect_vars_breakdown() -> CollectVarsBreakdown {
