@@ -333,6 +333,44 @@ fn main() {
     );
     println!("  ratio                        {:>8.2}x", text_price / struct_price);
 
+    // -- where the text-carried nodes came from -----------------------------
+    //
+    // `RawMapped` is emitted at three sites and all three are the instance
+    // script, which phase 2 has already parsed into a retained oxc program.
+    // Those nodes would not have to be built again if the text carrier went
+    // away; module-script and template nodes would. `Raw` cannot be used for
+    // this -- the template visitors emit it too.
+    //
+    // Read over the first pass, for the same reason every other node count is.
+    let first_mapped = inner
+        .mapped_parsed_nodes
+        .saturating_sub(inner.sp_mapped_parsed_nodes);
+    let first_other = first_parsed.saturating_sub(first_mapped);
+    let n = first_mapped as f64 / files;
+    let text_nodes = first_parsed as f64 / files;
+    // Rebuild cost for exactly the nodes that have no retained AST behind them.
+    // Conditional on the arena/lifetime obstacle being solved: while a retained
+    // program owns its own allocator, reusing its nodes means a deep copy, and
+    // the copy is a per-node cost of its own rather than zero.
+    let c = struct_price * (text_nodes - n) / 1000.0;
+    println!("\n-- origin of the text-carried nodes (first pass) --");
+    println!(
+        "  instance script (RawMapped)  {n:>8.1} /file   = {:.1}% of the {text_nodes:.1} text-carried",
+        if text_nodes > 0.0 { n / text_nodes * 100.0 } else { f64::NAN }
+    );
+    println!(
+        "  module script + template     {:>8.1} /file",
+        first_other as f64 / files
+    );
+    println!(
+        "  (c) = {struct_price:.1} ns x ({text_nodes:.1} - {n:.1}) = {c:.2} us/file   [assumes the arena obstacle is solved]"
+    );
+    println!(
+        "  closure: mapped {first_mapped} + other {first_other} = {} vs parsed(first pass) {first_parsed} -> {}",
+        first_mapped + first_other,
+        if first_mapped + first_other == first_parsed { "ok" } else { "VIOLATED" }
+    );
+
     let converted = (inner.conv_stmt + inner.conv_expr) as f64 / files;
     // `parsed_nodes` is summed over passes, and a chunk is parsed once per pass
     // plus once more within a pass when it carries comments. The program holds

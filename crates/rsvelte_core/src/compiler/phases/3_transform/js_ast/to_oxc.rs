@@ -512,7 +512,9 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         code: &str,
         source_offset: Option<u32>,
     ) -> Option<Statement<'a>> {
-        let stmts = self.parse_raw_statements(code)?;
+        // `source_offset` is `Some` exactly for `RawMapped`, which only the
+        // instance-script push emits -- see `parse_raw_statements`.
+        let stmts = self.parse_raw_statements(code, source_offset.is_some())?;
         let region = self.take_chunk_region(source_offset);
         if stmts.len() == 1 {
             stmts.into_iter().next()
@@ -1225,7 +1227,9 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     /// strips the synthetic parens. Returns `None` on a parse error.
     fn parse_raw_expression(&self, code: &str) -> Option<Expression<'a>> {
         let wrapped = format!("({})", code.trim());
-        let stmts = self.parse_chunk(&wrapped)?;
+        // `JsExpr::Raw` is never the instance script: that arrives as a
+        // statement, and as `RawMapped`.
+        let stmts = self.parse_chunk(&wrapped, false)?;
         // The synthetic parens are part of the chunk text, so the region already
         // covers them; no caller needs it for an expression.
         self.take_chunk_region(None);
@@ -1245,8 +1249,16 @@ impl<'a, 'arena> Cx<'a, 'arena> {
 
     /// Parse a raw JS statement source string into a vec of oxc [`Statement`]s
     /// (`Raw` may hold several statements). Returns `None` on a parse error.
-    fn parse_raw_statements(&self, code: &str) -> Option<Vec<Statement<'a>>> {
-        let mut stmts = self.parse_chunk(code.trim())?;
+    /// `mapped` marks the chunk as coming from `JsStatement::RawMapped`, which
+    /// is emitted at three sites (`client/mod.rs:1254/:1267/:1283`, one block)
+    /// and only for the instance script. It is threaded down so the node counts
+    /// can be split by where the text came from: the instance script already has
+    /// a parsed oxc AST from phase 2, so its nodes would not have to be rebuilt
+    /// if the text carrier went away, while module-script and template chunks
+    /// would. Plain `Raw` cannot stand in for this -- the template visitors emit
+    /// it too, at eight sites.
+    fn parse_raw_statements(&self, code: &str, mapped: bool) -> Option<Vec<Statement<'a>>> {
+        let mut stmts = self.parse_chunk(code.trim(), mapped)?;
         self.restore_legacy_pre_effect_deps(&mut stmts);
         self.restore_single_target_destructure_sequences(&mut stmts);
         Some(stmts)
@@ -1318,7 +1330,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     /// place, exactly as before. A comment-bearing chunk is re-parsed from a
     /// `pad + text` buffer so its spans land at the chunk's own region of the
     /// unified comment buffer, and its comments are collected there.
-    fn parse_chunk(&self, text: &str) -> Option<Vec<Statement<'a>>> {
+    fn parse_chunk(&self, text: &str, mapped: bool) -> Option<Vec<Statement<'a>>> {
         use crate::compiler::phases::phase3_transform::profile;
         let _t = profile::timer_start();
         let out = self.parse_chunk_inner(text);
@@ -1333,7 +1345,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         // not to do the work, and charging it to `parse_chunk` would inflate the
         // very number it is here to make comparable.
         if let Some(stmts) = out.as_ref() {
-            profile::count_to_oxc_parsed_nodes(count_parsed_nodes(stmts), second);
+            profile::count_to_oxc_parsed_nodes(count_parsed_nodes(stmts), second, mapped);
         }
         out
     }
@@ -1406,7 +1418,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     fn expand_stmt(&self, stmt: &JsStatement) -> Option<Vec<Statement<'a>>> {
         match stmt {
             JsStatement::Raw(code) => {
-                let stmts = self.parse_raw_statements(code)?;
+                let stmts = self.parse_raw_statements(code, false)?;
                 self.take_chunk_region(None);
                 Some(stmts)
             }
@@ -1414,7 +1426,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 code,
                 source_offset,
             } => {
-                let mut stmts = self.parse_raw_statements(code)?;
+                let mut stmts = self.parse_raw_statements(code, true)?;
                 if self.take_chunk_region(Some(*source_offset)).is_some() {
                     // The chunk's own spans are its comment anchors; the source
                     // offset is carried by the region's `loc_map` entry instead.

@@ -639,6 +639,10 @@ thread_local! {
         const { Cell::new((Duration::ZERO, 0, 0)) };
     static TO_OXC_SECOND_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
     static TO_OXC_SECOND_PARSED_NODES: Cell<u64> = const { Cell::new(0) };
+    // Parsed nodes that came from a `RawMapped` chunk, i.e. from the instance
+    // script. Recorded for both passes and for the second pass alone, so the
+    // split can be read over the first pass like every other node count.
+    static TO_OXC_MAPPED_PARSED_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -750,6 +754,24 @@ pub struct ToOxcBreakdown {
     pub sp_conv_stmt: u64,
     /// The part of `conv_expr` that ran in the second pass. Subset.
     pub sp_conv_expr: u64,
+    /// The part of `parsed_nodes` that came from a `RawMapped` chunk, i.e. from
+    /// the instance script rather than from the module script or the template.
+    /// Subset of `parsed_nodes`.
+    ///
+    /// This is the one origin split the IR can already answer. `Raw` cannot
+    /// stand in for it -- the template visitors emit `Raw` at eight sites -- but
+    /// `RawMapped` has three emission sites and all three are the instance
+    /// script push. It matters because those nodes are the ones phase 2 already
+    /// parsed into a retained oxc program: if the text carrier went away they
+    /// would not have to be built again, while the rest would.
+    ///
+    /// Counted in nodes, not chunks: the whole instance script is pushed as a
+    /// single `RawMapped`, so a chunk count says nothing about how much of the
+    /// program it accounts for.
+    pub mapped_parsed_nodes: u64,
+    /// The part of `mapped_parsed_nodes` counted in the second pass. Subset of
+    /// both `mapped_parsed_nodes` and `sp_parsed_nodes`.
+    pub sp_mapped_parsed_nodes: u64,
     /// The part of `parsed_nodes` counted in the second pass. Subset.
     ///
     /// This one exists to make the text-carried and structured per-node prices
@@ -861,13 +883,19 @@ pub fn count_to_oxc_expr(second: bool) {
 }
 
 #[inline]
-pub fn count_to_oxc_parsed_nodes(n: u64, second: bool) {
+pub fn count_to_oxc_parsed_nodes(n: u64, second: bool, mapped: bool) {
     if !timers_enabled() {
         return;
     }
     TO_OXC_PARSED_NODES.with(|c| c.set(c.get() + n));
     if second {
         TO_OXC_SECOND_PARSED_NODES.with(|c| c.set(c.get() + n));
+    }
+    if mapped {
+        TO_OXC_MAPPED_PARSED_NODES.with(|c| {
+            let (all, sp) = c.get();
+            c.set((all + n, if second { sp + n } else { sp }));
+        });
     }
 }
 
@@ -902,6 +930,8 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         TO_OXC_SECOND_PARSE_CHUNK.with(|c| c.replace((Duration::ZERO, 0, 0)));
     let (sp_conv_stmt, sp_conv_expr) = TO_OXC_SECOND_NODES.with(|c| c.replace((0, 0)));
     let sp_parsed_nodes = TO_OXC_SECOND_PARSED_NODES.with(|c| c.replace(0));
+    let (mapped_parsed_nodes, sp_mapped_parsed_nodes) =
+        TO_OXC_MAPPED_PARSED_NODES.with(|c| c.replace((0, 0)));
     ToOxcBreakdown {
         sp_parse_chunk,
         sp_parse_chunk_calls,
@@ -909,6 +939,8 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         sp_conv_stmt,
         sp_conv_expr,
         sp_parsed_nodes,
+        mapped_parsed_nodes,
+        sp_mapped_parsed_nodes,
         alloc_reset,
         alloc_reset_calls,
         total,
