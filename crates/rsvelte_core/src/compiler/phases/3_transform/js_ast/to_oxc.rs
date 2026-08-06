@@ -151,6 +151,7 @@ fn convert_once<'a>(
         ab: AstBuilder::new(allocator),
         arena,
         synth: RefCell::new(Synth::new(loc_base)),
+        second_pass: loc_base.is_some(),
     };
 
     // Collect, flattening multi-statement `Raw` blobs inline. A single None
@@ -323,6 +324,12 @@ struct Cx<'a, 'arena> {
     ab: AstBuilder<'a>,
     arena: &'arena JsArena,
     synth: RefCell<Synth>,
+    /// Whether this is the second conversion of the program, mirroring
+    /// `Synth::enabled`. Held out here as a plain field because the node-count
+    /// recorders read it on every dispatch, and reading it through the `RefCell`
+    /// would put a borrow in front of their `timers_enabled()` early-out --
+    /// i.e. it would cost something in the builds that are not measuring.
+    second_pass: bool,
 }
 
 impl<'a, 'arena> Cx<'a, 'arena> {
@@ -394,7 +401,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     // -- statements ---------------------------------------------------------
 
     fn stmt(&self, stmt: &JsStatement) -> Option<Statement<'a>> {
-        crate::compiler::phases::phase3_transform::profile::count_to_oxc_stmt();
+        crate::compiler::phases::phase3_transform::profile::count_to_oxc_stmt(self.second_pass);
         match stmt {
             JsStatement::Expression(e) => {
                 let expr = self.expr_id(e.expression)?;
@@ -994,7 +1001,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     // -- expressions --------------------------------------------------------
 
     fn expr(&self, expr: &JsExpr) -> Option<Expression<'a>> {
-        crate::compiler::phases::phase3_transform::profile::count_to_oxc_expr();
+        crate::compiler::phases::phase3_transform::profile::count_to_oxc_expr(self.second_pass);
         match expr {
             JsExpr::Identifier(name) => {
                 Some(Expression::new_identifier(SPAN, self.str(name), &self.ab))
@@ -1315,16 +1322,18 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         use crate::compiler::phases::phase3_transform::profile;
         let _t = profile::timer_start();
         let out = self.parse_chunk_inner(text);
+        let second = self.second_pass;
         profile::record_to_oxc_parse_chunk(
             profile::timer_elapsed(_t),
             text.len(),
             out.as_ref().map_or(0, Vec::len),
+            second,
         );
         // Deliberately after the timer stops: this walk exists to count nodes,
         // not to do the work, and charging it to `parse_chunk` would inflate the
         // very number it is here to make comparable.
         if let Some(stmts) = out.as_ref() {
-            profile::count_to_oxc_parsed_nodes(count_parsed_nodes(stmts));
+            profile::count_to_oxc_parsed_nodes(count_parsed_nodes(stmts), second);
         }
         out
     }

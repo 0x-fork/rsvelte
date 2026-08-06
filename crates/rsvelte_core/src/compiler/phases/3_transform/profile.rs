@@ -630,6 +630,15 @@ thread_local! {
     static TO_OXC_RAW_STMTS: Cell<u64> = const { Cell::new(0) };
     static TO_OXC_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
     static TO_OXC_PARSED_NODES: Cell<u64> = const { Cell::new(0) };
+
+    // Second-pass *subsets* of the counters above. Kept as subsets rather than
+    // as a disjoint bucket so the existing totals keep meaning what they meant,
+    // and so `second <= total` is an invariant the reader can check instead of
+    // a convention it has to trust.
+    static TO_OXC_SECOND_PARSE_CHUNK: Cell<(Duration, u64, u64)> =
+        const { Cell::new((Duration::ZERO, 0, 0)) };
+    static TO_OXC_SECOND_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static TO_OXC_SECOND_PARSED_NODES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -716,6 +725,40 @@ pub struct ToOxcBreakdown {
     /// time is spent either way, so a high rate would mean `X` is partly paid
     /// for output that is then thrown away.
     pub bails: u64,
+
+    /// The part of `parse_chunk` that ran in the *second* pass, i.e. inside
+    /// `second_pass` rather than alongside it.
+    ///
+    /// A **subset** of `parse_chunk`, not a sibling of it: subtract to get the
+    /// first-pass part. It exists because `parse_chunk` and `second_pass` are
+    /// otherwise quoted as if they were disjoint, and they are not -- the second
+    /// pass parses every chunk again -- so adding the two double-counts this.
+    ///
+    /// Note what this is *not*: the discarded work is the **first** pass of the
+    /// programs that needed a second one, and no flag available inside a pass
+    /// can identify those (whether a pass is kept is decided after it finishes,
+    /// by whether any chunk carried a comment). What makes the second pass a
+    /// usable stand-in is that both passes walk the same IR, so their node
+    /// counts are equal by construction -- their *times* are not, since only the
+    /// second pass re-parses comment-bearing chunks.
+    pub sp_parse_chunk: Duration,
+    /// Calls to it.
+    pub sp_parse_chunk_calls: u64,
+    /// Bytes handed to it.
+    pub sp_parse_chunk_bytes: u64,
+    /// The part of `conv_stmt` that ran in the second pass. Subset.
+    pub sp_conv_stmt: u64,
+    /// The part of `conv_expr` that ran in the second pass. Subset.
+    pub sp_conv_expr: u64,
+    /// The part of `parsed_nodes` counted in the second pass. Subset.
+    ///
+    /// This one exists to make the text-carried and structured per-node prices
+    /// commensurable. Both node counts are summed over passes, and they would
+    /// only cancel if both were inflated by the same factor -- which they are
+    /// not: every pass converts every IR node, but a comment-bearing chunk is
+    /// parsed twice in the second pass and once in the first. Without this the
+    /// ratio between the two prices cannot be checked at all.
+    pub sp_parsed_nodes: u64,
 }
 
 #[inline]
@@ -751,8 +794,10 @@ pub fn record_to_oxc_second_pass(d: Duration) {
     });
 }
 
+/// `second` is true when this is the second conversion of the program, the one
+/// that runs with a known `loc_base`.
 #[inline]
-pub fn record_to_oxc_parse_chunk(d: Duration, bytes: usize, stmts: usize) {
+pub fn record_to_oxc_parse_chunk(d: Duration, bytes: usize, stmts: usize, second: bool) {
     if !timers_enabled() {
         return;
     }
@@ -761,6 +806,12 @@ pub fn record_to_oxc_parse_chunk(d: Duration, bytes: usize, stmts: usize) {
         c.set((t + d, n + 1, b + bytes as u64));
     });
     TO_OXC_RAW_STMTS.with(|c| c.set(c.get() + stmts as u64));
+    if second {
+        TO_OXC_SECOND_PARSE_CHUNK.with(|c| {
+            let (t, n, b) = c.get();
+            c.set((t + d, n + 1, b + bytes as u64));
+        });
+    }
 }
 
 #[inline]
@@ -776,7 +827,7 @@ pub fn record_to_oxc_mappings(d: Duration, count: usize) {
 
 /// Node counts for one conversion, and whether it bailed.
 #[inline]
-pub fn count_to_oxc_stmt() {
+pub fn count_to_oxc_stmt(second: bool) {
     if !timers_enabled() {
         return;
     }
@@ -784,10 +835,16 @@ pub fn count_to_oxc_stmt() {
         let (s, e) = c.get();
         c.set((s + 1, e));
     });
+    if second {
+        TO_OXC_SECOND_NODES.with(|c| {
+            let (s, e) = c.get();
+            c.set((s + 1, e));
+        });
+    }
 }
 
 #[inline]
-pub fn count_to_oxc_expr() {
+pub fn count_to_oxc_expr(second: bool) {
     if !timers_enabled() {
         return;
     }
@@ -795,14 +852,23 @@ pub fn count_to_oxc_expr() {
         let (s, e) = c.get();
         c.set((s, e + 1));
     });
+    if second {
+        TO_OXC_SECOND_NODES.with(|c| {
+            let (s, e) = c.get();
+            c.set((s, e + 1));
+        });
+    }
 }
 
 #[inline]
-pub fn count_to_oxc_parsed_nodes(n: u64) {
+pub fn count_to_oxc_parsed_nodes(n: u64, second: bool) {
     if !timers_enabled() {
         return;
     }
     TO_OXC_PARSED_NODES.with(|c| c.set(c.get() + n));
+    if second {
+        TO_OXC_SECOND_PARSED_NODES.with(|c| c.set(c.get() + n));
+    }
 }
 
 #[inline]
@@ -832,7 +898,17 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
     let raw_stmts = TO_OXC_RAW_STMTS.with(|c| c.replace(0));
     let (conv_stmt, conv_expr) = TO_OXC_NODES.with(|c| c.replace((0, 0)));
     let parsed_nodes = TO_OXC_PARSED_NODES.with(|c| c.replace(0));
+    let (sp_parse_chunk, sp_parse_chunk_calls, sp_parse_chunk_bytes) =
+        TO_OXC_SECOND_PARSE_CHUNK.with(|c| c.replace((Duration::ZERO, 0, 0)));
+    let (sp_conv_stmt, sp_conv_expr) = TO_OXC_SECOND_NODES.with(|c| c.replace((0, 0)));
+    let sp_parsed_nodes = TO_OXC_SECOND_PARSED_NODES.with(|c| c.replace(0));
     ToOxcBreakdown {
+        sp_parse_chunk,
+        sp_parse_chunk_calls,
+        sp_parse_chunk_bytes,
+        sp_conv_stmt,
+        sp_conv_expr,
+        sp_parsed_nodes,
         alloc_reset,
         alloc_reset_calls,
         total,

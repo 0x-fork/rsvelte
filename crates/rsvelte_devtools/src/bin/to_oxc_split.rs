@@ -196,7 +196,11 @@ fn main() {
             inner.parse_chunk_calls,
         ),
         (
-            "second pass (discarded)",
+            // Not "(discarded)": what gets thrown away is the *first* pass of
+            // these programs. This line is the re-run that replaces it, and it
+            // is the more expensive of the two, since only this pass re-parses
+            // comment-bearing chunks.
+            "second pass (the re-run)",
             inner.second_pass,
             inner.second_pass_calls,
         ),
@@ -240,11 +244,95 @@ fn main() {
             per_conv(n)
         );
     }
-    // The identity the whole comparison rests on: the other side reports 449.4
-    // nodes per file, and a unit-price comparison is only about price if the
-    // volumes agree. Printed every run, because a mismatch means the two counts
-    // are of different things and the per-node numbers are not comparable.
+    // -- pass-matched view --------------------------------------------------
+    //
+    // `parse_chunk` and `second_pass` are not disjoint: the second pass parses
+    // every chunk again, so its parse time sits inside both lines. Everything
+    // below is stated over the *first* pass alone, which every program runs
+    // exactly once -- that removes the overlap by construction instead of
+    // estimating it, and gives the two per-node prices the same denominator.
     let files = sources.len().max(1) as f64;
+    let conv_all = inner.conv_stmt + inner.conv_expr;
+    let conv_sp = inner.sp_conv_stmt + inner.sp_conv_expr;
+    let first_parse = inner.parse_chunk.saturating_sub(inner.sp_parse_chunk);
+    let first_total = inner.total.saturating_sub(inner.second_pass);
+    let first_build = first_total.saturating_sub(first_parse);
+    let first_conv = conv_all.saturating_sub(conv_sp);
+    let first_parsed = inner.parsed_nodes.saturating_sub(inner.sp_parsed_nodes);
+
+    println!("\n-- per pass (second pass is a SUBSET of the totals above) --");
+    println!(
+        "{:<28}{:>14}{:>14}{:>14}",
+        "quantity", "all passes", "second pass", "first pass"
+    );
+    let row = |name: &str, all: u64, sp: u64| {
+        println!(
+            "{name:<28}{all:>14}{sp:>14}{:>14}",
+            all.saturating_sub(sp)
+        );
+    };
+    row("converted nodes", conv_all, conv_sp);
+    row("parsed nodes", inner.parsed_nodes, inner.sp_parsed_nodes);
+    row(
+        "parse_chunk calls",
+        inner.parse_chunk_calls,
+        inner.sp_parse_chunk_calls,
+    );
+    row(
+        "parse_chunk bytes",
+        inner.parse_chunk_bytes,
+        inner.sp_parse_chunk_bytes,
+    );
+    println!(
+        "{:<28}{:>14.1}{:>14.1}{:>14.1}",
+        "parse_chunk ms",
+        ms(inner.parse_chunk),
+        ms(inner.sp_parse_chunk),
+        ms(first_parse)
+    );
+    // The subset invariant, printed rather than assumed. A violation would mean
+    // the flag is being read in a pass it does not describe, which is exactly
+    // the failure this split exists to rule out.
+    let subset_ok = inner.sp_parse_chunk <= inner.parse_chunk
+        && inner.sp_parse_chunk <= inner.second_pass
+        && conv_sp <= conv_all
+        && inner.sp_parsed_nodes <= inner.parsed_nodes;
+    println!(
+        "subset invariant (second <= total, and second-pass parse <= second pass): {}",
+        if subset_ok { "ok" } else { "VIOLATED" }
+    );
+    // (6): how much of the second pass is parsing. Quoted so `parse_chunk` and
+    // `second_pass` are never added together.
+    println!(
+        "overlap: parse_chunk inside second pass = {:.1} ms = {:.1}% of X, {:.1}% of the second pass",
+        ms(inner.sp_parse_chunk),
+        of_x(inner.sp_parse_chunk),
+        inner.sp_parse_chunk.as_secs_f64() / inner.second_pass.as_secs_f64().max(f64::MIN_POSITIVE)
+            * 100.0
+    );
+
+    // The two prices the text-carried-vs-structured reading rests on, both over
+    // the first pass so neither is inflated by a re-run the other did not have.
+    println!("\n-- per-node price, first pass only --");
+    let per_node = |d: Duration, n: u64| {
+        if n == 0 {
+            f64::NAN
+        } else {
+            d.as_secs_f64() * 1e9 / n as f64
+        }
+    };
+    let text_price = per_node(first_parse, first_parsed);
+    let struct_price = per_node(first_build, first_conv);
+    println!(
+        "  text-carried (parse_chunk)   {text_price:>8.1} ns/node   over {:.1} nodes/file",
+        first_parsed as f64 / files
+    );
+    println!(
+        "  structured (node building)   {struct_price:>8.1} ns/node   over {:.1} nodes/file",
+        first_conv as f64 / files
+    );
+    println!("  ratio                        {:>8.2}x", text_price / struct_price);
+
     let converted = (inner.conv_stmt + inner.conv_expr) as f64 / files;
     // `parsed_nodes` is summed over passes, and a chunk is parsed once per pass
     // plus once more within a pass when it carries comments. The program holds
@@ -258,8 +346,15 @@ fn main() {
         inner.raw_stmts as f64 / inner.oxc_stmts_out.max(1) as f64
     };
     let parsed = inner.parsed_nodes as f64 / files / raw_stmt_passes;
+    // Kept for continuity with the earlier runs, but NOT an identity to close.
+    // 449.4 counts ESTree nodes in the *printed output*, re-parsed with acorn;
+    // these count dispatches taken while *building*. The two differ in both
+    // directions -- a discarded pass adds to the build side without adding to
+    // the output, and text-carried nodes reach the output without a dispatch --
+    // so there is no arithmetic that makes them meet, and forcing one would only
+    // amount to choosing the projection that fits.
     println!(
-        "\nnode identity (vs 449.4 reported for this corpus)"
+        "\nbuild-side node count (NOT commensurable with the reported 449.4)"
     );
     println!("  converted            {converted:>8.1} /file");
     println!(
