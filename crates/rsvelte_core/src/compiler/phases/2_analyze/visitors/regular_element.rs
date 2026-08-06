@@ -1134,7 +1134,10 @@ pub fn visit<'a, 'b: 'a>(
                 // on_directive::visit doesn't have access to the parent type.
                 // Reference: svelte/packages/svelte/src/compiler/phases/2-analyze/visitors/OnDirective.js
                 if context.analysis.runes {
-                    context.emit_warning(warnings::event_directive_deprecated(&on.name));
+                    let mut warning = warnings::event_directive_deprecated(&on.name);
+                    warning.start = Some(on.start);
+                    warning.end = Some(on.end);
+                    context.emit_warning(warning);
                 }
 
                 // Track event directive for mixed_event_handler_syntaxes check
