@@ -4390,7 +4390,11 @@ pub(super) fn transform_state_vars_ast(
         let _pt = super::super::profile::timer_start();
         let parsed = Parser::new(alloc, script, source_type).parse();
         let _parse_elapsed = super::super::profile::timer_elapsed(_pt);
-        super::super::profile::record_direct_parse(_parse_elapsed, script.len());
+        super::super::profile::record_direct_parse(
+            super::super::profile::DP_AST_STATE,
+            _parse_elapsed,
+            script.len(),
+        );
         super::super::profile::record_at_parse(_parse_elapsed);
 
         if parsed.panicked || !parsed.diagnostics.is_empty() {

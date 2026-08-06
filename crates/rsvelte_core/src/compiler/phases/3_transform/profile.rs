@@ -463,6 +463,10 @@ thread_local! {
     static REWRITE_SEEN: Cell<[bool; REWRITE_SITE_COUNT]> = const { Cell::new([false; REWRITE_SITE_COUNT]) };
     static SCAN_SITE_BYTES: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
     static SCAN_SITE_CALLS: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
+    static DP_TIME: Cell<[Duration; DP_SITE_COUNT]> =
+        const { Cell::new([Duration::ZERO; DP_SITE_COUNT]) };
+    static DP_CALLS: Cell<[u64; DP_SITE_COUNT]> = const { Cell::new([0; DP_SITE_COUNT]) };
+    static DP_BYTES: Cell<[u64; DP_SITE_COUNT]> = const { Cell::new([0; DP_SITE_COUNT]) };
     static ST_CALLS: Cell<u64> = const { Cell::new(0) };
     static ST_ENTRIES: Cell<u64> = const { Cell::new(0) };
     static ST_PROCESS_ACCUMULATED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -501,13 +505,28 @@ pub fn record_reparse(parse: Duration, visit: Duration, bytes: usize) {
 }
 
 #[inline]
-pub fn record_direct_parse(parse: Duration, bytes: usize) {
+pub fn record_direct_parse(site: usize, parse: Duration, bytes: usize) {
     if !timers_enabled() {
         return;
     }
     REPARSE_DIRECT.with(|c| {
         let (p, n, b) = c.get();
         c.set((p + parse, n + 1, b + bytes as u64));
+    });
+    DP_TIME.with(|c| {
+        let mut v = c.get();
+        v[site] += parse;
+        c.set(v);
+    });
+    DP_CALLS.with(|c| {
+        let mut v = c.get();
+        v[site] += 1;
+        c.set(v);
+    });
+    DP_BYTES.with(|c| {
+        let mut v = c.get();
+        v[site] += bytes as u64;
+        c.set(v);
     });
     record_tf_parse(parse);
 }
@@ -917,6 +936,71 @@ pub const REWRITE_SITE_NAMES: [&str; REWRITE_SITE_COUNT] = [
 pub struct RewriteCounts {
     pub calls: [u64; REWRITE_SITE_COUNT],
     pub files: [u64; REWRITE_SITE_COUNT],
+}
+
+/// The passes that build their own `Parser` instead of going through the shared
+/// driver, one constant per call site rather than per module.
+///
+/// Two sites in the same file can differ in the only property that matters here
+/// -- whether they re-parse a whole script or a single wrapped expression -- so
+/// folding them by module would average a 10-byte parse into a 3000-byte one and
+/// report a size that neither site has.
+pub const DP_AST_STATE: usize = 0;
+pub const DP_NORMALIZE: usize = 1;
+pub const DP_PRIVATE_CLASS: usize = 2;
+/// The retry that wraps the source in a synthetic class after the first parse
+/// reported diagnostics. Separate from [`DP_PRIVATE_CLASS`] because it only
+/// fires on the failure path: merged, a rare double parse would look like a
+/// common single one.
+pub const DP_PRIVATE_CLASS_WRAPPED: usize = 3;
+pub const DP_SEMANTIC: usize = 4;
+pub const DP_PROPS_IS_SIMPLE: usize = 5;
+pub const DP_PROPS_SHOULD_PROXY: usize = 6;
+pub const DP_MODULE_COMMENTS: usize = 7;
+pub const DP_DESTR_IS_SIMPLE: usize = 8;
+pub const DP_DESTR_LITERAL_KEY: usize = 9;
+pub const DP_SITE_COUNT: usize = 10;
+pub const DP_SITE_NAMES: [&str; DP_SITE_COUNT] = [
+    "ast_state (instance script)",
+    "normalize (generated JS)",
+    "private_class",
+    "private_class (wrapped retry)",
+    "with_semantic",
+    "props ast_expr_is_simple",
+    "props ast_should_proxy",
+    "strip_module_toplevel_comments",
+    "destructure is_simple",
+    "destructure literal_key",
+];
+
+/// Per-site split of [`ReparseBreakdown::direct_parse`].
+///
+/// Reported against the unsplit totals rather than on its own: a site array can
+/// be short by a whole call site and still look plausible, and the only thing
+/// that catches that is `Σ sites == direct_calls` printed every run.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectParseSites {
+    pub time: [Duration; DP_SITE_COUNT],
+    pub calls: [u64; DP_SITE_COUNT],
+    pub bytes: [u64; DP_SITE_COUNT],
+}
+
+impl Default for DirectParseSites {
+    fn default() -> Self {
+        Self {
+            time: [Duration::ZERO; DP_SITE_COUNT],
+            calls: [0; DP_SITE_COUNT],
+            bytes: [0; DP_SITE_COUNT],
+        }
+    }
+}
+
+pub fn take_direct_parse_sites() -> DirectParseSites {
+    DirectParseSites {
+        time: DP_TIME.with(|c| c.replace([Duration::ZERO; DP_SITE_COUNT])),
+        calls: DP_CALLS.with(|c| c.replace([0; DP_SITE_COUNT])),
+        bytes: DP_BYTES.with(|c| c.replace([0; DP_SITE_COUNT])),
+    }
 }
 
 /// Blinds one rewrite site, so the text-identity gate's `unexplained` counter

@@ -232,6 +232,7 @@ fn single_pass(
             })
             .parse();
         super::super::profile::record_direct_parse(
+            super::super::profile::DP_PRIVATE_CLASS,
             super::super::profile::timer_elapsed(_pt),
             source.len(),
         );
@@ -263,6 +264,7 @@ fn single_pass(
                 })
                 .parse();
             super::super::profile::record_direct_parse(
+                super::super::profile::DP_PRIVATE_CLASS_WRAPPED,
                 super::super::profile::timer_elapsed(_pt),
                 parse_str.len(),
             );

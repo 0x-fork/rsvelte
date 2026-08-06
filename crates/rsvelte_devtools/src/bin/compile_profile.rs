@@ -90,6 +90,7 @@ fn main() {
     let _ = profile::take_rewrite_counts();
     let _ = profile::take_collect_vars_breakdown();
     let _ = profile::take_text_identity();
+    let _ = profile::take_direct_parse_sites();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -182,6 +183,7 @@ fn main() {
     let rw = profile::take_rewrite_counts();
     let cv = profile::take_collect_vars_breakdown();
     let ti = profile::take_text_identity();
+    let dp = profile::take_direct_parse_sites();
 
     // The whole compile, measured independently of the buckets, so a phase
     // nobody instrumented lands in the residual instead of inflating a share.
@@ -438,7 +440,7 @@ fn main() {
         "    PAIRING entries_outside_parent {}",
         st.entries_outside_parent
     );
-    report_reparse(&mut rows, ms(total));
+    report_reparse(&mut rows, ms(total), &dp);
     if let Some(path) = std::env::args()
         .position(|a| a == "--dump-rows")
         .and_then(|i| std::env::args().nth(i + 1))
@@ -927,10 +929,16 @@ fn report_scan_bands(rows: &[ScalingRow]) {
             passes,
             staged as f64 / script as f64,
             calls as f64 / band.len() as f64,
-            if passes > 0.0 { ns_per_byte / passes } else { 0.0 }
+            if passes > 0.0 {
+                ns_per_byte / passes
+            } else {
+                0.0
+            }
         );
     }
-    println!("    (last column = measured ns/B for this band / effective passes = what one pass costs)");
+    println!(
+        "    (last column = measured ns/B for this band / effective passes = what one pass costs)"
+    );
 }
 
 /// Bucket shares and scaling exponents against one predictor.
@@ -1030,9 +1038,67 @@ fn report_scaling(rows: &[ScalingRow], label: &str, predictor: fn(&ScalingRow) -
 /// pipeline hands the same script back to the parser. It needs no quiet machine,
 /// so it answers "constant factor or superlinear" independently of the timings
 /// next to it.
+/// Splits `reparse (direct)` by call site, ranked by time.
+///
+/// Ranked by time rather than by calls because the two disagree by design here:
+/// four of the sites parse a wrapped single expression a few bytes long, and one
+/// parses a whole generated file. Both columns are printed so a site that is
+/// frequent-and-cheap cannot be mistaken for one that is rare-and-expensive.
+///
+/// The identity line is the point of the function. A site array can be missing a
+/// whole call site and still print ten plausible rows, and nothing else in this
+/// profiler would notice; only `Σ sites == direct_calls`, taken from a counter
+/// that predates the split, can.
+fn report_direct_parse_sites(dp: profile::DirectParseSites, sum: &profile::ReparseBreakdown) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let site_ms: f64 = dp.time.iter().copied().map(ms).sum();
+    let site_calls: u64 = dp.calls.iter().sum();
+    let site_bytes: u64 = dp.bytes.iter().sum();
+    let verdict = if site_calls == sum.direct_calls && site_bytes == sum.direct_bytes {
+        "PASS"
+    } else {
+        "FAIL: a call site is unrecorded"
+    };
+    println!(
+        "    DP IDENTITY calls {site_calls} vs direct_calls {} | bytes {site_bytes} vs {} | {verdict}",
+        sum.direct_calls, sum.direct_bytes
+    );
+    let mut order: Vec<usize> = (0..profile::DP_SITE_COUNT).collect();
+    order.sort_by(|&a, &b| dp.time[b].cmp(&dp.time[a]));
+    println!(
+        "    {:<32} {:>8} {:>7} {:>9} {:>7} {:>9}",
+        "site", "ms", "%direct", "calls", "%calls", "B/call"
+    );
+    for i in order {
+        let calls = dp.calls[i];
+        println!(
+            "    {:<32} {:8.2} {:6.1}% {:9} {:6.1}% {:9.1}",
+            profile::DP_SITE_NAMES[i],
+            ms(dp.time[i]),
+            if site_ms > 0.0 {
+                ms(dp.time[i]) / site_ms * 100.0
+            } else {
+                0.0
+            },
+            calls,
+            if site_calls > 0 {
+                calls as f64 / site_calls as f64 * 100.0
+            } else {
+                0.0
+            },
+            if calls > 0 {
+                dp.bytes[i] as f64 / calls as f64
+            } else {
+                0.0
+            },
+        );
+    }
+}
+
 fn report_reparse(
     rows: &mut [(usize, std::time::Duration, profile::ReparseBreakdown)],
     total_ms: f64,
+    dp: &profile::DirectParseSites,
 ) {
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
     let sum: profile::ReparseBreakdown = rows.iter().fold(
@@ -1063,6 +1129,7 @@ fn report_reparse(
         sum.direct_calls,
         sum.direct_bytes
     );
+    report_direct_parse_sites(*dp, &sum);
 
     rows.sort_by_key(|&(bytes, ..)| bytes);
     let n = rows.len();

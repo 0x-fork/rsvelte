@@ -2685,7 +2685,11 @@ pub(crate) fn strip_module_toplevel_comments(src: &str) -> String {
     let allocator = Allocator::default();
     let _pt = super::profile::timer_start();
     let ret = Parser::new(&allocator, src, SourceType::mjs()).parse();
-    super::profile::record_direct_parse(super::profile::timer_elapsed(_pt), src.len());
+    super::profile::record_direct_parse(
+        super::profile::DP_MODULE_COMMENTS,
+        super::profile::timer_elapsed(_pt),
+        src.len(),
+    );
     if !ret.diagnostics.is_empty() {
         return src.to_string();
     }
@@ -4580,8 +4584,8 @@ fn transform_instance_script_for_visitors(
         || (class_transform_can_add_declarations && might_have_comma_separated_declaration(&script))
     {
         {
-        super::profile::count_rewrite(super::profile::REWRITE_PN_SPLIT_DECLS);
-        std::borrow::Cow::Owned(crate::compiler::phases::phase3_transform::server::transform_script::split_comma_separated_declarations(&script))
+            super::profile::count_rewrite(super::profile::REWRITE_PN_SPLIT_DECLS);
+            std::borrow::Cow::Owned(crate::compiler::phases::phase3_transform::server::transform_script::split_comma_separated_declarations(&script))
         }
     } else {
         script

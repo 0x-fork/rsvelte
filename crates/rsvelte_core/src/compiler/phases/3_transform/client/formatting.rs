@@ -857,6 +857,7 @@ pub(crate) fn normalize_js_with_oxc(js: &str, indent_level: usize) -> String {
         let _pt = super::super::profile::timer_start();
         let parsed = Parser::new(allocator, &protected, SourceType::mjs()).parse();
         super::super::profile::record_direct_parse(
+            super::super::profile::DP_NORMALIZE,
             super::super::profile::timer_elapsed(_pt),
             protected.len(),
         );

@@ -61,6 +61,7 @@ where
         })
         .parse();
     super::super::profile::record_direct_parse(
+        super::super::profile::DP_SEMANTIC,
         super::super::profile::timer_elapsed(_pt),
         source.len(),
     );

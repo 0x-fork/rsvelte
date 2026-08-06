@@ -1174,6 +1174,7 @@ pub(super) fn string_is_simple_expression(s: &str) -> bool {
     })
     .parse();
     super::super::profile::record_direct_parse(
+        super::super::profile::DP_DESTR_IS_SIMPLE,
         super::super::profile::timer_elapsed(_pt),
         wrapped.len(),
     );
@@ -1202,6 +1203,7 @@ pub(super) fn literal_key_value(source: &str) -> Option<String> {
         })
         .parse();
     super::super::profile::record_direct_parse(
+        super::super::profile::DP_DESTR_LITERAL_KEY,
         super::super::profile::timer_elapsed(_pt),
         wrapped.len(),
     );
