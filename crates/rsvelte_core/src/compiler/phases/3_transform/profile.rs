@@ -643,6 +643,15 @@ thread_local! {
     // script. Recorded for both passes and for the second pass alone, so the
     // split can be read over the first pass like every other node count.
     static TO_OXC_MAPPED_PARSED_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    // (resets, capacity samples, peak arena capacity in bytes).
+    //
+    // Two counters, not one, because a negative control showed one was not
+    // enough: with every reset deleted, a capacity recorded *inside* the reset
+    // stayed at its initial 0 and the gate read "ok". The instrument could not
+    // observe the growth it exists to detect, in exactly the case it exists for.
+    // The sample count is what tells "the arena never grew" apart from "nobody
+    // ever looked".
+    static CODEGEN_ARENA: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -754,6 +763,19 @@ pub struct ToOxcBreakdown {
     pub sp_conv_stmt: u64,
     /// The part of `conv_expr` that ran in the second pass. Subset.
     pub sp_conv_expr: u64,
+    /// Resets of the client codegen arena. Must equal the number of
+    /// conversions: the reset sits at the one site that converts, so a second
+    /// converting path added without one shows up here and nowhere else.
+    pub arena_resets: u64,
+    /// Times the arena's capacity was sampled. Sampled once per conversion,
+    /// after the conversion rather than inside the reset, so that deleting the
+    /// reset leaves this moving -- a gate whose evidence disappears along with
+    /// the thing it is checking cannot fail.
+    pub arena_samples: u64,
+    /// The largest capacity the arena reached across those samples. Must not
+    /// grow with the corpus -- if it does, the arena is no longer being freed
+    /// between compiles.
+    pub arena_capacity: u64,
     /// The part of `parsed_nodes` that came from a `RawMapped` chunk, i.e. from
     /// the instance script rather than from the module script or the template.
     /// Subset of `parsed_nodes`.
@@ -781,6 +803,46 @@ pub struct ToOxcBreakdown {
     /// parsed twice in the second pass and once in the first. Without this the
     /// ratio between the two prices cannot be checked at all.
     pub sp_parsed_nodes: u64,
+}
+
+#[inline]
+pub fn record_codegen_arena_reset() {
+    if !timers_enabled() {
+        return;
+    }
+    CODEGEN_ARENA.with(|c| {
+        let (resets, samples, peak) = c.get();
+        c.set((resets + 1, samples, peak));
+    });
+}
+
+/// Sample the arena's capacity after a conversion has used it.
+///
+/// Deliberately *not* called from the reset. A negative control on the first
+/// version of this gate deleted every reset, and the capacity -- recorded
+/// inside the reset -- stayed at its initial 0, so the gate read "ok" in
+/// precisely the case it exists to catch.
+#[inline]
+pub fn record_codegen_arena_capacity(capacity: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    CODEGEN_ARENA.with(|c| {
+        let (resets, samples, peak) = c.get();
+        c.set((resets, samples + 1, peak.max(capacity)));
+    });
+}
+
+/// Read the peak arena capacity so far without draining it.
+///
+/// A reader needs this partway through a corpus, not only at the end: the
+/// invariant is "the arena does not accumulate across compiles", and two
+/// weaker forms of it both passed the negative control -- a fixed 64 MiB
+/// ceiling (cleared by 17 KB while the arena grew 64x) and `peak(N/2) ==
+/// peak(N)` (which fails because the growth saturates).
+#[must_use]
+pub fn peek_codegen_arena_peak() -> u64 {
+    CODEGEN_ARENA.with(|c| c.get().2)
 }
 
 #[inline]
@@ -930,6 +992,8 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         TO_OXC_SECOND_PARSE_CHUNK.with(|c| c.replace((Duration::ZERO, 0, 0)));
     let (sp_conv_stmt, sp_conv_expr) = TO_OXC_SECOND_NODES.with(|c| c.replace((0, 0)));
     let sp_parsed_nodes = TO_OXC_SECOND_PARSED_NODES.with(|c| c.replace(0));
+    let (arena_resets, arena_samples, arena_capacity) =
+        CODEGEN_ARENA.with(|c| c.replace((0, 0, 0)));
     let (mapped_parsed_nodes, sp_mapped_parsed_nodes) =
         TO_OXC_MAPPED_PARSED_NODES.with(|c| c.replace((0, 0)));
     ToOxcBreakdown {
@@ -939,6 +1003,9 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         sp_conv_stmt,
         sp_conv_expr,
         sp_parsed_nodes,
+        arena_resets,
+        arena_samples,
+        arena_capacity,
         mapped_parsed_nodes,
         sp_mapped_parsed_nodes,
         alloc_reset,

@@ -95,7 +95,15 @@ fn main() {
     let _ = profile::take_esrap_breakdown();
     let _ = profile::take_breakdown();
 
-    for source in &sources {
+    // Sampled after the first timed compile, so the arena gate can ask that the
+    // peak not move for the remaining N-1. The warm-up above has already brought
+    // a working arena to its steady state, so a reset that frees leaves this
+    // flat; a reset that is missing keeps growing through the loop.
+    let mut arena_peak_first = 0;
+    for (index, source) in sources.iter().enumerate() {
+        if index == 1 {
+            arena_peak_first = profile::peek_codegen_arena_peak();
+        }
         let _ = compile_with_external_sourcemap_content(
             source,
             CompileOptions {
@@ -403,6 +411,49 @@ fn main() {
         "  ★ total              {:>8.1} /file  -> {:.4}x",
         converted + parsed,
         (converted + parsed) / 449.4
+    );
+    // The resource no-op, which sha256 and the deterministic work counters
+    // structurally cannot see: an arena that stops being freed changes no output
+    // byte and no unit of work, only address space, and only in a process that
+    // compiles many files.
+    //
+    // The denominator is conversions, not files: the reset lives at the one
+    // converting site, and a scriptless component takes the handwritten printer
+    // without ever reaching it. Reading the denominator off the file count
+    // reported a missing reset on the first run of this gate, when what was
+    // actually wrong was the denominator.
+    //
+    // The verdict form was chosen *after* running the negative control, not
+    // before. Two earlier forms passed it: a fixed 64 MiB ceiling, cleared by
+    // 17,152 B while the arena grew 64x, and `peak(N/2) == peak(N)`, which fails
+    // because the growth saturates -- so "grows with N" is not even true of the
+    // broken build. The sample count is checked first, so a run where nothing
+    // looked reads NO EVIDENCE rather than passing.
+    //
+    // Named fragility: one file far outside the warm-up's size range could
+    // legitimately grow the arena once and trip this. On flowbite it does not --
+    // the peak is flat across all 1296, 26 KB max file included.
+    println!(
+        "\narena: resets {} vs conversions {} -> {} ; peak capacity {} B after 1 -> {} B after {} \
+over {} samples -> {}",
+        inner.arena_resets,
+        inner.total_calls,
+        if inner.arena_resets == inner.total_calls {
+            "ok"
+        } else {
+            "RESET COUNT OFF"
+        },
+        arena_peak_first,
+        inner.arena_capacity,
+        inner.total_calls,
+        inner.arena_samples,
+        if inner.arena_samples != inner.total_calls {
+            "NO EVIDENCE"
+        } else if inner.arena_capacity == arena_peak_first {
+            "ok"
+        } else {
+            "GROWING"
+        }
     );
     println!(
         "\ntwo-pass rate {:.1}% of conversions; bail rate {:.1}%",

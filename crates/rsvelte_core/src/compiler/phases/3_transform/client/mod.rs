@@ -2349,7 +2349,8 @@ fn transform_client_with_visitors(
             let _reset = super::profile::timer_start();
             alloc.reset();
             super::profile::record_to_oxc_alloc_reset(super::profile::timer_elapsed(_reset));
-            super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
+            super::profile::record_codegen_arena_reset();
+            let out = super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
                 |converted| {
                     // Keep `;` empty statements: the parsed-`Raw` `;;` are real
                     // EmptyStatement nodes the official compiler output preserves.
@@ -2393,7 +2394,13 @@ fn transform_client_with_visitors(
                         }
                     }
                 },
-            )
+            );
+            // After the conversion, and outside the reset above: this is what
+            // makes a deleted reset visible instead of silent, since the
+            // evidence then no longer disappears along with the thing being
+            // checked.
+            super::profile::record_codegen_arena_capacity(alloc.capacity() as u64);
+            out
         });
         if let Some((code, mappings)) = converted {
             super::profile::record_codegen(super::profile::timer_elapsed(_codegen_start));
