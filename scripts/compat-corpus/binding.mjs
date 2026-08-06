@@ -62,8 +62,31 @@ export function stageBinding(root) {
 		);
 	}
 	fs.mkdirSync(path.join(root, '.corpus-cache'), { recursive: true });
-	fs.copyFileSync(built, path.join(root, BINDING_REL));
+	const dest = path.join(root, BINDING_REL);
+	// Overwriting a loaded dylib in place leaves macOS holding a stale signature
+	// for the path and it SIGKILLs anything that loads it, so land a new inode.
+	const tmp = `${dest}.staging`;
+	fs.copyFileSync(built, tmp);
+	fs.renameSync(tmp, dest);
+	assertBindingLoads(root, dest);
 	return writeBindingProvenance(root);
+}
+
+/**
+ * Stamping a binding that cannot load is the failure this whole module exists to
+ * prevent, one level down: the attestation would outlive the thing it describes.
+ */
+function assertBindingLoads(root, dest) {
+	const probe = path.join(root, 'scripts/compat-corpus/binding-load-probe.mjs');
+	try {
+		execFileSync(process.execPath, [probe, dest], { stdio: ['ignore', 'ignore', 'pipe'] });
+	} catch (e) {
+		fs.rmSync(dest, { force: true });
+		const signal = e?.signal ? ` (${e.signal})` : '';
+		throw new Error(
+			`the staged binding does not load${signal} — removed it rather than stamping it; nothing was written to ${STAMP_REL}`
+		);
+	}
 }
 
 export function writeBindingProvenance(root) {
