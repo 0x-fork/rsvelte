@@ -467,6 +467,12 @@ thread_local! {
     static AT_RETAINED_GATE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static AT_CANDIDATE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static AT_PROBE_CTX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static LS_STAGED: Cell<u64> = const { Cell::new(0) };
+    static LS_GATED: Cell<u64> = const { Cell::new(0) };
+    static LS_MATCHED: Cell<u64> = const { Cell::new(0) };
+    static LS_MISMATCHED: Cell<u64> = const { Cell::new(0) };
+    static LS_GROUPS_SCAN: Cell<u64> = const { Cell::new(0) };
+    static LS_GROUPS_AST: Cell<u64> = const { Cell::new(0) };
     static PP_SHADOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static PP_PROP_MUTATION: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static PP_DEV_TAIL: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -1489,6 +1495,63 @@ pub struct AstTransformsBreakdown {
     /// than scanning. Split out because only the first site is text work, and a
     /// single `probe` figure cannot be sorted into (a) or (b).
     pub probe_ctx: Duration,
+}
+
+/// Agreement between the line scan's statement boundaries and the ones the
+/// Phase 2 program implies.
+///
+/// Whether the scan can be replaced by the parser's answer is a measurement,
+/// not a reading of the code: the scan has hand-written rules for cases the
+/// grammar settles differently, and the only way to know they agree is to run
+/// both and compare. `staged` is the denominator, `gated` the files where the
+/// retained program still describes the text, `matched` the ones where the two
+/// enumerations are identical.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct LineSplitAgreement {
+    pub staged: u64,
+    pub gated: u64,
+    pub matched: u64,
+    /// Files that passed the gate but produced a different group sequence, kept
+    /// apart from `gated - matched` so a counting slip cannot hide inside a
+    /// subtraction.
+    pub mismatched: u64,
+    pub groups_scan: u64,
+    pub groups_ast: u64,
+}
+
+pub fn line_split_dual_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RSVELTE_LINE_SPLIT_DUAL").is_some())
+}
+
+#[inline]
+pub fn record_line_split(gated: bool, matched: bool, groups_scan: usize, groups_ast: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    LS_STAGED.with(|c| c.set(c.get() + 1));
+    if !gated {
+        return;
+    }
+    LS_GATED.with(|c| c.set(c.get() + 1));
+    if matched {
+        LS_MATCHED.with(|c| c.set(c.get() + 1));
+    } else {
+        LS_MISMATCHED.with(|c| c.set(c.get() + 1));
+    }
+    LS_GROUPS_SCAN.with(|c| c.set(c.get() + groups_scan as u64));
+    LS_GROUPS_AST.with(|c| c.set(c.get() + groups_ast as u64));
+}
+
+pub fn take_line_split_agreement() -> LineSplitAgreement {
+    LineSplitAgreement {
+        staged: LS_STAGED.with(|c| c.replace(0)),
+        gated: LS_GATED.with(|c| c.replace(0)),
+        matched: LS_MATCHED.with(|c| c.replace(0)),
+        mismatched: LS_MISMATCHED.with(|c| c.replace(0)),
+        groups_scan: LS_GROUPS_SCAN.with(|c| c.replace(0)),
+        groups_ast: LS_GROUPS_AST.with(|c| c.replace(0)),
+    }
 }
 
 /// The passes after the AST transform, split far enough to say which of them

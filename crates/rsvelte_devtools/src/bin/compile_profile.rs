@@ -92,6 +92,7 @@ fn main() {
     let _ = profile::take_text_identity();
     let _ = profile::take_direct_parse_sites();
     let _ = profile::take_post_passes_breakdown();
+    let _ = profile::take_line_split_agreement();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -178,6 +179,7 @@ fn main() {
     let script_text_breakdown = profile::take_script_text_breakdown();
     let at = profile::take_ast_transforms_breakdown();
     let pp = profile::take_post_passes_breakdown();
+    let ls = profile::take_line_split_agreement();
     let tf = profile::take_template_fragment_breakdown();
     let asm = profile::take_assembly_breakdown();
     let rs = profile::take_residual_breakdown();
@@ -337,6 +339,28 @@ fn main() {
         );
     }
     println!("    (statements processed: {})", st.statements);
+    if ls.staged > 0 {
+        // Printed only when asked for, so a run without the comparison cannot be
+        // read as a run where the comparison found nothing.
+        let share = |n: u64, d: u64| {
+            if d > 0 {
+                n as f64 / d as f64 * 100.0
+            } else {
+                0.0
+            }
+        };
+        println!(
+            "    LINE-SPLIT staged {} | gated {} ({:.1}%) | matched {} ({:.1}% of gated) | mismatched {} | groups scan {} vs ast {}",
+            ls.staged,
+            ls.gated,
+            share(ls.gated, ls.staged),
+            ls.matched,
+            share(ls.matched, ls.gated),
+            ls.mismatched,
+            ls.groups_scan,
+            ls.groups_ast
+        );
+    }
     // Load-independent: the question a 15x ratio asks is how many times the
     // pipeline walks its input, not how long each walk took.
     println!(

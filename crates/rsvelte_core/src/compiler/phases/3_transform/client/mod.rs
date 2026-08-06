@@ -51,6 +51,7 @@ mod state_reads_ast;
 mod state_set_reactive_ast;
 mod state_snapshot_ast;
 mod state_transforms;
+mod statement_spans;
 mod store_assign_ast;
 mod store_member_mutate_ast;
 mod store_transforms;
@@ -5977,6 +5978,12 @@ fn transform_instance_script_for_visitors(
     // which the Phase 2 spans could still line up.
     super::profile::record_text_identity(text_fingerprint(&script_rest) != entry_fingerprint);
     super::profile::record_st_collect_vars(super::profile::timer_elapsed(_stage));
+    // Records the boundaries the scan below actually produces, so they can be
+    // compared against the ones the retained program implies. Off unless asked
+    // for: the comparison is the increment's evidence, not part of compiling.
+    let mut scan_groups: Vec<(usize, usize)> = Vec::new();
+    let dual_run = super::profile::line_split_dual_enabled();
+    let mut acc_start_line = 0usize;
     let _stage = super::profile::timer_start();
 
     while line_idx < script_lines.len() {
@@ -6042,6 +6049,9 @@ fn transform_instance_script_for_visitors(
         }
 
         // Add line to accumulator (zero-copy borrow from script_lines)
+        if accumulated_lines.is_empty() {
+            acc_start_line = line_idx;
+        }
         accumulated_lines.push(line);
 
         // Incrementally update depth counters (only scans this new line, not the whole buffer)
@@ -6168,6 +6178,9 @@ fn transform_instance_script_for_visitors(
                         if !needs_rune && !needs_export && !needs_destructure {
                             result.push_str(&statement);
                             result.push('\n');
+                            if dual_run {
+                                scan_groups.push((acc_start_line, line_idx));
+                            }
                             accumulated_lines.clear();
                             // Reset depth counters for next statement
                             depth_paren = 0;
@@ -6203,6 +6216,9 @@ fn transform_instance_script_for_visitors(
                         has_legacy_export_let,
                         &mut reactive_stmt_ordinal,
                     );
+                    if dual_run {
+                        scan_groups.push((acc_start_line, line_idx));
+                    }
                     accumulated_lines.clear();
                     // Reset depth counters for next statement
                     depth_paren = 0;
@@ -6219,6 +6235,9 @@ fn transform_instance_script_for_visitors(
 
     // Process any remaining accumulated lines
     if !accumulated_lines.is_empty() {
+        if dual_run {
+            scan_groups.push((acc_start_line, acc_start_line + accumulated_lines.len() - 1));
+        }
         process_accumulated(
             &accumulated_lines,
             &mut result,
@@ -6243,6 +6262,27 @@ fn transform_instance_script_for_visitors(
     }
 
     super::profile::record_st_line_loop(super::profile::timer_elapsed(_stage));
+    if dual_run {
+        // The gate is the identity the spans depend on, checked directly rather
+        // than through a hash: the comparison stops at the first differing byte,
+        // and it is the same test the retained-program fast path already makes
+        // for 0.023 µs a file.
+        let gated = retained_program
+            .map(|retained| retained.source() == &script_rest[..])
+            .unwrap_or(false);
+        let ast_groups = retained_program
+            .filter(|_| gated)
+            .and_then(|retained| {
+                statement_spans::statement_line_groups(&script_rest, retained.program())
+            })
+            .unwrap_or_default();
+        super::profile::record_line_split(
+            gated,
+            gated && ast_groups == scan_groups,
+            scan_groups.len(),
+            ast_groups.len(),
+        );
+    }
     let _stage = super::profile::timer_start();
 
     // Append reactive statements at the end, mirroring the official Svelte compiler which
