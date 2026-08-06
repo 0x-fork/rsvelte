@@ -46,7 +46,7 @@ quoted key dropped in a destructured `$derived`) and #2034 (`$.to_array` arity
 with a rest element) — were resolved by #2036, which mirrored #2010's client
 destructuring fixes onto the server target.
 
-## Client dev (`known-failures.client-dev.json`, 20 entries)
+## Client dev (`known-failures.client-dev.json`, 0 entries)
 
 The `client-dev` target is the `client` target with `dev: true`. It is a
 separate ratchet because `dev` gates 18 client codegen files plus the CSS
@@ -137,143 +137,76 @@ took it to 20. That half of upstream's condition had no equivalent there, so a
 bare assignment statement inside an `{@attach}` block body was wrapped even
 though its value is discarded.
 
-### How the counts below are derived
+Restricting the component-prop exemption to a component that is a `Fragment`
+child took it to 18. Upstream spells it `path.at(-2) === 'Component' &&
+path.at(-3) === 'Fragment'`, and an element's children are the one container it
+does not visit through a `Fragment` node, so a component nested in an element
+keeps the wrap.
 
-The enrolment-era table attributed each entry by its **first differing line**.
-That is a trap this campaign hit four times: a pure statement **reordering**
-reports as the helper on the expected side being *absent*, so a positioning bug
-reads as an unported feature. #2020, #2022 and #2023 were all filed as "not
-emitted" and all turned out to be emitted in the right number and the wrong
-place.
+Nesting the legacy `$.invalidate_inner_signals` sequence inside the ownership
+wrap took it to 16. Upstream builds that sequence in `build_assignment` and
+hands the result to `validate_mutation`, so it is the wrap's third argument;
+rsvelte's text pass matched only the `prop(...)` call and left the sequence
+around the wrap instead.
 
-The table is now derived by **comparing how many times each helper appears** on
-each side, which separates the two directions and cannot be fooled by order:
+Validating every prop-rooted `bind:` setter mutation took it to 14.
+`validate_mutation` gates on the *root binding* being a prop, not on whether the
+mutation itself is wrapped, so a runes non-bindable prop — which assigns the
+member directly, with no `prop(…, true)` call around it — needs the wrap too.
 
-| Cluster | under-emits | over-emits | Upstream emitter (`phases/3-transform/client/`) | Issue |
-|---|---:|---:|---|---|
-| `$.assign` / `$.assign_async` | 2 | 2 | `visitors/AssignmentExpression.js` | #2064 |
-| equality instrumentation | 1 | 0 | `visitors/BinaryExpression.js` | #2064 |
-| `$.track_reactivity_loss(...)` | 0 | 3 | `visitors/AwaitExpression.js` | #2064 |
-| ownership mutation validation | 2 | 0 | `transform-client.js`, `visitors/shared/{component,utils}.js` | #2027 |
-| `$.tag()` / `$.tag_proxy()` | 2 | 0 | `visitors/VariableDeclaration.js` | #2064 |
-| `console.*` wrapping | 0 | 2 | `visitors/CallExpression.js` | #2064 |
+Labelling every proxied `$state` initializer took it to 12.
+`create_state_declarator` decides on the **visited** expression, so in dev an
+`a === b` initializer has already become a `$.strict_equals(...)` call and
+therefore proxies (an arithmetic `BinaryExpression` still does not); and a
+`$state` declared inside a template handler body reaches the expression
+converter, which had no way back to the declarator's name.
 
-The ownership row splits into two halves: entries missing the
-`$.create_ownership_validator($$props)` preamble entirely, and entries that have
-it but under-emit call sites. The preamble half is now empty; both survivors
-emit their `$$ownership_validator.binding(...)` calls and are missing exactly one
-`$$ownership_validator.mutation(...)` each.
+Instrumenting a `$derived` destructuring default took it to 11. The pattern's
+source text was lifted verbatim before the walk reached it, so a default value
+never got the dev equality rewrite any other expression gets.
 
-The signal read/write row is now empty: `$state` reassignment is resolved per
-binding rather than per name, so same-named `$state` locals in sibling scopes no
-longer share one classification and lose their `$.state(...)` wrapper.
+Locating the traced function past a comment took it to 9. The `$inspect.trace()`
+label carries `locate_node(fn)`, which rsvelte finds by scanning backwards from
+the call — and a comment between the function head and the call answered for it.
 
-12 entries are attributed to a cluster; the remaining **8** show no
-difference in any dev helper: 2 are a `$.trace` label's line:column, 2 are
-redundant parentheses around an ownership wrapper, 1 is a statement missing
-from a legacy `$:` body, 1 is the ` /* (unused) ` marker's own mapping in a
-minified stylesheet and 2 are one-off shapes (an `$.assign` location, an
-`$.assign_async` wrap). All are tracked in #2064. The legacy `bind:` `function get()/set()` shape was 47
-entries of that residue and is fixed: `build_each_block_accessor_parts` now
-hands the element `bind:` path the unthunked getter body plus the setter body,
-so `dev` can emit upstream's named accessors (`BindDirective.js:46-54`). The
-component `bind:` path keeps consuming the same bodies for its object-literal
-`get`/`set` methods.
+Resolving a shadowed name through the scope chain a script reference actually
+sees took it to 7. Two things fed the `console.*` wrap's `scope.evaluate`
+lookup the wrong binding: a legacy instance declaration wrote its initializer
+onto a same-named module binding (the write resolved through the root scope's
+declarations only), and a template binding — an each item — stayed a candidate
+for a reference inside the instance script.
 
-### What is left of the `$.assign` row
+Leaving the async-destructuring IIFE uninstrumented took it to 4. `[a, b] =
+await …` is lowered to `await (async ($$value) => { … })(…)`, and the dev
+`await` pass wrapped that generated call as well as the source `await` it was
+built around — upstream destructures after a single instrumented `await`.
 
-`$.assign(object, 'prop', operator, value, location)` is upstream's dev warning
-for a coerced-away proxy (`AssignmentExpression.js:170-236`): it fires only when
-the assignment's *value* is used (`path.at(-1) !== 'ExpressionStatement'`), the
-operator is non-coercive, and the right-hand side is not a known primitive.
-rsvelte emits it from the template paths (`expression_converter`, `attribute`)
-but has no collector on the instance / module script paths, so a `(obj.prop =
-value)` written inside a script — most often inside a `new Promise((resolve) =>
-…)` — stays bare. The location argument is what makes this more than a copy of
-`instance_dev_tail_ast`'s other collectors: it is a position in the *original*
-`.svelte` source, and those passes run over already-settled transform output.
+Four last fixes took it to 0. `build_assignment` hands the `await` it adds to
+`context.visit`, so `$.assign_async(…)` is instrumented like any other `await`
+while `arrow` (`utils/builders.js`) collapses the lazy getter it wraps back to a
+synchronous `() => x()`. A site the transform decision rejects still has to be
+spent, or a later identical member chain reports its position. The dev `await`
+wrapper opens with `(`, so it continues *any* statement ASI left open — not just
+another wrapped `await`, which is all the previous check covered. And in a
+partially pruned selector list the `/* (unused) ` markers are `prependRight` /
+`appendRight` insertions while the separator before a pruned selector goes
+through `overwrite`, which keeps the chunk it replaces — so both selectors and
+that separator still carry source-map segments.
 
-### What is left of the equality and await rows
+### What is left
 
-Both rewrites ride the instance-script AST pass, which sat under
-`if analysis.runes` — so a legacy (non-runes) component was never instrumented
-at all. #2116 gave the legacy path its own entry point into the same two
-AST collectors (`instance_dev_tail_ast`), which cleared 257 entries and left
-every `track_reactivity_loss` under-emit module-side (197 in a component's
-`<script module>`, 18 in a `.svelte.(js|ts)`). #2090 closed those by adding the
-same `await` collector to `module_dev_tail_ast`'s batch, clearing a further 212
-entries:
+Nothing. All three targets are at 0, and every dev-helper cluster the
+enrolment-era table tracked — `$.assign`, the equality instrumentation,
+`$.track_reactivity_loss`, ownership mutation validation, `$.tag()` /
+`$.tag_proxy()`, `console.*` wrapping and the signal read/write row — is empty.
 
-| | legacy component | runes component | `<script module>` | module script |
-|---|---:|---:|---:|---:|
-| equality under-emits | 0 | 1 | 0 | 0 |
-| `track_reactivity_loss` under-emits | 0 | 0 | 0 | 0 |
+Counting method, for whoever picks this up: attribute an entry by **comparing
+how many times each helper appears** on each side, never by the first differing
+line. A pure statement **reordering** reports as the helper on the expected side
+being *absent*, so a positioning bug reads as an unported feature — #2020, #2022
+and #2023 were all filed as "not emitted" and all turned out to be emitted in
+the right number and the wrong place.
 
-Both instrumentations are now emitted for every script kind; only over-emits
-remain. The three `track_reactivity_loss` over-emits are all the *destructured*
-async assignment shape (`[a, b] = await …`): rsvelte lowers it to an async IIFE
-and instruments the IIFE call as well as the inner `await`, where upstream
-destructures after a single wrapped `await`. That is a lowering-shape
-difference, not an instrumentation gap — #2064 long-tail.
-
-The one equality residual is likewise not an instrumentation gap: it is a
-`$props()` destructuring default that the runes AST pass emits as generated
-`$.fallback(...)` text and never re-visits — #2064 long-tail. The three
-constant-folded template expressions (`{1 === 1}` → `"true"`) that used to sit
-in this row are fixed.
-
-### What is left of the `$.tag()` row
-
-The #2021 series covered every declaration shape reachable from the legacy and
-runes script passes; the last one was an uninitialized legacy source with no
-trailing semicolon (`let sub` on its own line, which is what a `bind:this`
-target or a stripped TypeScript annotation leaves), whose emitter built the
-`$.mutable_source()` call without the dev label.
-
-The 2 remaining under-emits are both `$.tag_proxy` and neither is a labelling
-gap. One is a `$state(…)` declared *inside a template event handler*, which the
-declarator tag pass never sees because it walks script statements, not template
-expressions. The other is `$state(a === b)`: upstream calls `should_proxy` on
-the **already-visited** initialiser, so the dev-only `$.strict_equals(…)`
-rewrite turns a `BinaryExpression` (never proxied) into a `CallExpression`
-(proxied), and rsvelte decides before that rewrite. Both are #2064 long-tail.
-
-### What is left of the `console.*` row
-
-The row was 68 under / 73 over: two ad-hoc predicates decided the wrap, and
-neither was upstream's `scope.evaluate(arg).has_unknown`. #2028 routed both onto
-the `Evaluation` lattice already ported for the server transform, and gave the
-template path (event handlers, `{expr}`, `$:` bodies) a decision at all — it had
-none, which was every under-emit.
-
-The 2 remaining over-emits are both *shadowing*: the generated text the script
-pass rewrites has no scope chain, so an identifier is only resolved when the
-component declares that name exactly once. `<script module>`'s `foo` next to the
-instance script's `foo`, and a `$state` `method` next to an `{#each}`-destructured
-`method`, therefore stay conservative. Resolving them needs a scope-carrying
-rewrite of the script path — #2064 long-tail.
-
-### What is left of the ownership row
-
-The 2 remaining under-emits are both `bind:this={prop[expr]}` on an element
-inside an `{#each}`: the setter upstream builds is
-`($$value, j) => $$ownership_validator.mutation(null, ['divs', j], …)`, whose
-path tail is the each-block index *expression*, not a literal member name.
-rsvelte's `bind:this` path wraps only the non-parameterised setter shape, so the
-each-scoped one falls through — #2064 long-tail.
-
-### What is left of the signal read/write row
-
-The 7 under-emits are all a computed path element inside an already-emitted
-`$$ownership_validator.mutation(...)`. Upstream builds that element through the
-binding's own read transform (`transform?.read ? transform.read(left.property) :
-left.property`, `shared/utils.js`), so a slot-let / each-block index arrives as
-`$.get(index)` and a store as `prop()`; rsvelte pushes the bare identifier.
-
-**#1981 is confirmed absent.** The run contains zero
-`$$ownership_validator.binding(` divergences, so the #1989 fix holds across the
-whole corpus. The ownership row above is a *different* gap (mutation tracking,
-not bindings) that only this lane could surface.
 
 ## Hard-cluster warnings for future work
 

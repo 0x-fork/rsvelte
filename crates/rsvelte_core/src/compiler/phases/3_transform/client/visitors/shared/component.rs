@@ -983,7 +983,7 @@ fn process_on_directive(
     // outlives this borrow and traversal is single-threaded (no aliasing).
     let arena_local = unsafe { &*(&context.arena as *const _) };
     let saved_in_component_attribute = context.state.in_component_attribute;
-    context.state.in_component_attribute = true;
+    context.state.in_component_attribute = !context.state.parent_is_regular_element;
     let mut handler = build_event_handler(
         arena_local,
         on_directive.expression.as_ref(),
@@ -1142,7 +1142,7 @@ fn process_regular_attribute(
     // The closure is invoked for each chunk's transformed expression.
     let arena_ptr = (&context.arena) as *const _;
     let saved_in_component_attribute = context.state.in_component_attribute;
-    context.state.in_component_attribute = true;
+    context.state.in_component_attribute = !context.state.parent_is_regular_element;
     let result = build_attribute_value(&attr.value, context, |value, metadata| {
         let has_await = metadata.has_await();
         let has_state = metadata.has_state();
@@ -1305,6 +1305,46 @@ fn is_snippet_identifier(value: &AttributeValue, context: &ComponentContext) -> 
 }
 
 /// Process a bind directive.
+/// `validate_mutation` (`shared/utils.js:390`) for a `bind:` setter body — the
+/// directive never reaches the assignment visitor that normally applies it.
+fn validate_bind_setter_mutation(
+    expression: JsExpr,
+    bind: &BindDirective<'_>,
+    ignored_codes: &[String],
+    context: &mut ComponentContext,
+) -> JsExpr {
+    use crate::compiler::phases::phase3_transform::client::visitors::expression_converter::{
+        check_ownership_validation, ownership_alias_literal,
+    };
+
+    if !context.state.dev
+        || ignored_codes
+            .iter()
+            .any(|code| code == "ownership_invalid_mutation")
+    {
+        return expression;
+    }
+    let Some((prop_alias, path, source_loc)) =
+        check_ownership_validation(Some(bind.expression.as_json()), context)
+    else {
+        return expression;
+    };
+    let mut args = vec![
+        ownership_alias_literal(prop_alias),
+        b::array(path),
+        expression,
+    ];
+    if let Some((line, col)) = source_loc {
+        args.push(b::literal_number(line as f64));
+        args.push(b::literal_number(col as f64));
+    }
+    b::call(
+        &context.arena,
+        b::member_path(&context.arena, "$$ownership_validator.mutation"),
+        args,
+    )
+}
+
 fn process_bind_directive<'a>(
     bind: &BindDirective<'a>,
     context: &mut ComponentContext,
@@ -1788,41 +1828,7 @@ fn process_bind_directive<'a>(
                 let wrapped = crate::compiler::phases::phase3_transform::client::visitors::expression_converter::wrap_with_legacy_invalidate(
                     call, &root_name, context,
                 );
-                // Dev mode: wrap prop member mutations with the ownership validator too,
-                // mirroring the generic AssignmentExpression path (validate_mutation in
-                // utils.js), since bind: directives never flow through that visitor.
-                let mutation_ignored = ignored_codes
-                    .iter()
-                    .any(|c| c == "ownership_invalid_mutation");
-                let wrapped = if context.state.dev && !mutation_ignored {
-                    if let Some((prop_alias, path, source_loc)) =
-                        crate::compiler::phases::phase3_transform::client::visitors::expression_converter::check_ownership_validation(
-                            Some(bind.expression.as_json()),
-                            context,
-                        )
-                    {
-                        let mut args = vec![
-                            crate::compiler::phases::phase3_transform::client::visitors::expression_converter::ownership_alias_literal(
-                                prop_alias,
-                            ),
-                            b::array(path),
-                            wrapped,
-                        ];
-                        if let Some((line, col)) = source_loc {
-                            args.push(b::literal_number(line as f64));
-                            args.push(b::literal_number(col as f64));
-                        }
-                        b::call(
-                            &context.arena,
-                            b::member_path(&context.arena, "$$ownership_validator.mutation"),
-                            args,
-                        )
-                    } else {
-                        wrapped
-                    }
-                } else {
-                    wrapped
-                };
+                let wrapped = validate_bind_setter_mutation(wrapped, bind, ignored_codes, context);
                 vec![b::stmt(&context.arena, wrapped)]
             } else if is_state {
                 if context.state.analysis.runes {
@@ -1833,6 +1839,8 @@ fn process_bind_directive<'a>(
                         transformed_expression.clone(),
                         b::id("$$value"),
                     );
+                    let assignment =
+                        validate_bind_setter_mutation(assignment, bind, ignored_codes, context);
                     vec![b::stmt(&context.arena, assignment)]
                 } else {
                     // In legacy mode, wrap in $.mutate():
@@ -1855,14 +1863,14 @@ fn process_bind_directive<'a>(
                 // Upstream falls through to `context.next()`, which visits the whole
                 // assignment target — inner references (an each-block thunk in a
                 // computed key) carry read transforms even when the root has none.
-                vec![b::stmt(
+                let assignment = b::assign(
                     &context.arena,
-                    b::assign(
-                        &context.arena,
-                        transformed_expression.clone(),
-                        b::id("$$value"),
-                    ),
-                )]
+                    transformed_expression.clone(),
+                    b::id("$$value"),
+                );
+                let assignment =
+                    validate_bind_setter_mutation(assignment, bind, ignored_codes, context);
+                vec![b::stmt(&context.arena, assignment)]
             }
         } else {
             vec![b::stmt(
@@ -2306,6 +2314,8 @@ fn visit_slot_children(
 
     // Save the current state
     // This mirrors Fragment.js which creates a new state with fresh consts, init, update, etc.
+    let saved_parent_is_regular_element =
+        std::mem::take(&mut context.state.parent_is_regular_element);
     let saved_init = std::mem::take(&mut context.state.init);
     let saved_update = std::mem::take(&mut context.state.update);
     let saved_after_update = std::mem::take(&mut context.state.after_update);
@@ -2834,6 +2844,7 @@ fn visit_slot_children(
     context.state.node = saved_node;
     context.state.is_standalone = saved_is_standalone;
     context.state.metadata.namespace = saved_namespace;
+    context.state.parent_is_regular_element = saved_parent_is_regular_element;
 
     result
 }

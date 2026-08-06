@@ -20,7 +20,7 @@ use oxc_span::Span;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UpdateOperator};
 use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::scope::ScopeId;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::destructure_transforms::{
     ArrayHelperRead, build_fallback_string, extract_destructure_paths, js_number_to_string,
@@ -113,7 +113,11 @@ fn derived_insert_label(dev: bool, pattern_text: &str) -> Option<&'static str> {
 /// For Identifier nodes, looks up the non_proxy_vars list (which contains variables
 /// with known non-proxyable initial values).
 /// For all other expression types (CallExpression, MemberExpression, etc.), returns `true`.
-fn should_proxy_ast(expr: &Expression<'_>, non_proxy_vars: &[String]) -> bool {
+///
+/// `dev` reflects whether the caller decides on the *visited* expression, as
+/// `create_state_declarator` does — by then the dev equality rewrite has turned
+/// an `a === b` initializer into a `$.strict_equals(...)` call.
+fn should_proxy_ast(expr: &Expression<'_>, non_proxy_vars: &[String], dev: bool) -> bool {
     match expr {
         Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
@@ -125,13 +129,26 @@ fn should_proxy_ast(expr: &Expression<'_>, non_proxy_vars: &[String]) -> bool {
         Expression::ArrowFunctionExpression(_) => false,
         Expression::FunctionExpression(_) => false,
         Expression::UnaryExpression(_) => false,
-        Expression::BinaryExpression(_) => false,
+        Expression::BinaryExpression(binary) => {
+            use oxc_syntax::operator::BinaryOperator;
+            dev && matches!(
+                binary.operator,
+                BinaryOperator::StrictEquality
+                    | BinaryOperator::StrictInequality
+                    | BinaryOperator::Equality
+                    | BinaryOperator::Inequality
+            )
+        }
         // TypeScript casts: unwrap and recurse on the inner expression.
-        Expression::TSAsExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars),
-        Expression::TSSatisfiesExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars),
-        Expression::TSNonNullExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars),
-        Expression::TSTypeAssertion(e) => should_proxy_ast(&e.expression, non_proxy_vars),
-        Expression::TSInstantiationExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars),
+        Expression::TSAsExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars, dev),
+        Expression::TSSatisfiesExpression(e) => {
+            should_proxy_ast(&e.expression, non_proxy_vars, dev)
+        }
+        Expression::TSNonNullExpression(e) => should_proxy_ast(&e.expression, non_proxy_vars, dev),
+        Expression::TSTypeAssertion(e) => should_proxy_ast(&e.expression, non_proxy_vars, dev),
+        Expression::TSInstantiationExpression(e) => {
+            should_proxy_ast(&e.expression, non_proxy_vars, dev)
+        }
         Expression::Identifier(ident) => {
             if ident.name == "undefined" {
                 return false;
@@ -144,7 +161,7 @@ fn should_proxy_ast(expr: &Expression<'_>, non_proxy_vars: &[String]) -> bool {
         }
         // ParenthesizedExpression: check inner expression
         Expression::ParenthesizedExpression(paren) => {
-            should_proxy_ast(&paren.expression, non_proxy_vars)
+            should_proxy_ast(&paren.expression, non_proxy_vars, dev)
         }
         // SequenceExpression (comma): upstream `should_proxy` does NOT whitelist
         // SequenceExpression, so it falls through to `return true` — a comma
@@ -239,7 +256,8 @@ struct StateVarCollector<'a, 's> {
     /// Subtrees carrying a `svelte-ignore await_reactivity_loss`.
     await_ignore_ranges: super::await_reactivity_loss_ast::AwaitIgnoreRanges,
     /// Starts of `await` expressions that are a whole statement relying on ASI.
-    unterminated_await_starts: FxHashSet<u32>,
+    /// Statement start → end of the statement a `;` has to separate it from.
+    await_separators: FxHashMap<u32, u32>,
 
     // --- Phase A-2 fields ---
     /// Prop source variables that need getter/setter wrapping: `prop` -> `prop()`.
@@ -367,7 +385,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             scoped_vars: vec![FxHashSet::default()],
             in_shorthand_property: false,
             await_ignore_ranges: Default::default(),
-            unterminated_await_starts: FxHashSet::default(),
+            await_separators: FxHashMap::default(),
             prop_source_vars: prop_source_set,
             non_bindable_prop_vars: non_bindable_set,
             store_sub_vars: store_sub_set,
@@ -838,7 +856,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         let (needs_proxy, is_explicit_undefined) = if let Some(arg) = call.arguments.first() {
             let arg_expr = arg.as_expression();
             let needs_proxy = arg_expr
-                .map(|e| should_proxy_ast(e, self.non_proxy_vars))
+                .map(|e| should_proxy_ast(e, self.non_proxy_vars, self.dev))
                 .unwrap_or(false);
             let is_undef = matches!(
                 arg_expr,
@@ -1281,10 +1299,14 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         let wrapped_source = self.apply_and_drain_inner_replacements(arg_span.start, arg_span.end);
 
         // Extract the destructured pattern's source text — the recursive
-        // text helper walks this string.
+        // text helper walks this string. Walk it first so a default value
+        // carries the same rewrites any other expression would (the dev
+        // equality instrumentation, above all); binding names are visited as
+        // declarations, not references, so they stay untouched.
         let pattern_span = declarator.id.span();
+        self.visit_binding_pattern(&declarator.id);
         let pattern_text =
-            self.source[pattern_span.start as usize..pattern_span.end as usize].to_string();
+            self.apply_and_drain_inner_replacements(pattern_span.start, pattern_span.end);
         let pattern_text = pattern_text.trim().to_string();
 
         let mut declarations: Vec<String> = Vec::new();
@@ -1990,7 +2012,10 @@ impl<'a, 's> StateVarCollector<'a, 's> {
     /// boundary. Suppressed by a leading `svelte-ignore await_reactivity_loss`.
     /// Returns `true` when the expression was rewritten.
     fn try_rewrite_await_reactivity_loss(&mut self, expr: &AwaitExpression<'_>) -> bool {
-        if !self.dev || self.is_await_reactivity_loss_ignored(expr.span.start) {
+        if !self.dev
+            || self.is_await_reactivity_loss_ignored(expr.span.start)
+            || super::await_reactivity_loss_ast::is_destructuring_iife_call(&expr.argument)
+        {
             return false;
         }
 
@@ -2000,11 +2025,20 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         let arg_span = expr.argument.span();
         let arg_text = self.apply_and_drain_inner_replacements(arg_span.start, arg_span.end);
 
-        let mut replacement = format!("(await $.track_reactivity_loss({}))()", arg_text.trim());
-        if self.unterminated_await_starts.contains(&expr.span.start) {
-            replacement.push(';');
-        }
-        self.add_replacement(expr.span.start, expr.span.end, replacement);
+        let wrap = format!("(await $.track_reactivity_loss({}))()", arg_text.trim());
+        // The `;` rides inside this replacement rather than being appended to
+        // the statement before it, which may have no replacement of its own.
+        let (start, replacement) = match self.await_separators.get(&expr.span.start) {
+            Some(&prev_end) => (
+                prev_end,
+                format!(
+                    ";{}{wrap}",
+                    &self.source[prev_end as usize..expr.span.start as usize]
+                ),
+            ),
+            None => (expr.span.start, wrap),
+        };
+        self.add_replacement(start, expr.span.end, replacement);
         true
     }
 
@@ -2324,14 +2358,11 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
     }
 
     fn visit_statements(&mut self, stmts: &oxc_allocator::Vec<'ast, Statement<'ast>>) {
-        for pair in stmts.windows(2) {
-            if let Some(start) = super::await_reactivity_loss_ast::unterminated_await_statement(
-                &pair[0],
+        self.await_separators
+            .extend(super::await_reactivity_loss_ast::separator_positions(
+                stmts,
                 self.source,
-            ) {
-                self.unterminated_await_starts.insert(start);
-            }
-        }
+            ));
         walk::walk_statements(self, stmts);
     }
 
@@ -2800,7 +2831,11 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
                             && self
                                 .ident_rhs_site_decision(&expr.right)
                                 .unwrap_or_else(|| {
-                                    should_proxy_ast(&expr.right, self.reassign_non_proxy_vars)
+                                    should_proxy_ast(
+                                        &expr.right,
+                                        self.reassign_non_proxy_vars,
+                                        false,
+                                    )
                                 });
 
                         let replacement = if needs_proxy {
@@ -2843,7 +2878,11 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
                             && self
                                 .ident_rhs_site_decision(&expr.right)
                                 .unwrap_or_else(|| {
-                                    should_proxy_ast(&expr.right, self.reassign_non_proxy_vars)
+                                    should_proxy_ast(
+                                        &expr.right,
+                                        self.reassign_non_proxy_vars,
+                                        false,
+                                    )
                                 });
 
                         let replacement = if needs_proxy {
