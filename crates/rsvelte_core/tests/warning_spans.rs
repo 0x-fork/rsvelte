@@ -78,3 +78,46 @@ fn event_directive_each_directive_gets_its_own_position() {
     );
     assert!(first < second);
 }
+
+// ---- element_invalid_self_closing_tag --------------------------------------
+// Upstream: `visitors/RegularElement.js` -> `w.element_invalid_self_closing_tag(node, node.name)`,
+// where `node` is the element.
+
+const SELF_CLOSING: &str = "element_invalid_self_closing_tag";
+
+#[test]
+fn self_closing_points_at_the_offending_element() {
+    let src = "<div>\n\t<span />\n</div>\n";
+    let ws = warnings(src);
+    let (line, column, text) = at(src, &ws, SELF_CLOSING, 0);
+    assert_eq!(line, 2, "expected the line holding the self-closing tag");
+    assert!(
+        text.starts_with("<span />"),
+        "expected the element, got {line}:{column} -> {text:?}"
+    );
+}
+
+/// Two offenders on one line must get distinct columns.
+#[test]
+fn self_closing_each_element_gets_its_own_position() {
+    let src = "<p />, <b />\n";
+    let ws = warnings(src);
+    let (_, first, first_text) = at(src, &ws, SELF_CLOSING, 0);
+    let (_, second, second_text) = at(src, &ws, SELF_CLOSING, 1);
+    assert_eq!(first, 0, "expected `<p />` at column 0");
+    assert!(first_text.starts_with("<p />"));
+    assert_eq!(second, 7, "expected `<b />` at column 7");
+    assert!(second_text.starts_with("<b />"));
+}
+
+/// Void and SVG elements are exempt — pins that attaching a span did not widen
+/// which elements warn.
+#[test]
+fn self_closing_void_and_svg_still_do_not_warn() {
+    let ws = warnings("<br />\n<svg><rect /></svg>\n");
+    assert!(
+        !ws.iter().any(|w| w.code == SELF_CLOSING),
+        "unexpected `{SELF_CLOSING}` in {:?}",
+        ws.iter().map(|w| &w.code).collect::<Vec<_>>()
+    );
+}
