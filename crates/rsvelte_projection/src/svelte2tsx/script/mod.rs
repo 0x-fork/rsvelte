@@ -273,10 +273,10 @@ pub fn process_instance_script(
                 {
                     exported_names.set_uses_runes(true);
                 }
-                oxc::Statement::ExportNamedDeclaration(export) => {
+                oxc::Statement::ExportDeclaration(export) => {
                     // Also check exports for declared names
-                    if let Some(ref decl) = export.declaration {
-                        match decl {
+                    {
+                        match &export.declaration {
                             oxc::Declaration::VariableDeclaration(var_decl) => {
                                 // Only `let` is a reactive prop; `var`/`const` are
                                 // exports (mirror official isLet === NodeFlags.Let).
@@ -462,9 +462,41 @@ pub fn process_instance_script(
 
         // Pass 2: handle exports
         for stmt in program.body.iter() {
-            if let oxc::Statement::ExportNamedDeclaration(export) = stmt {
+            if let oxc::Statement::ExportDeclaration(export) = stmt {
                 handle_export_named_decl(
-                    export,
+                    export.span,
+                    Some(&export.declaration),
+                    &[],
+                    offset,
+                    str,
+                    exported_names,
+                    true,
+                    &possible_exports,
+                    raw_content,
+                    is_ts,
+                    basename,
+                    emit_jsdoc,
+                );
+            } else if let oxc::Statement::ExportNamedDeclaration(export) = stmt {
+                handle_export_named_decl(
+                    export.span,
+                    None,
+                    &export.specifiers,
+                    offset,
+                    str,
+                    exported_names,
+                    true,
+                    &possible_exports,
+                    raw_content,
+                    is_ts,
+                    basename,
+                    emit_jsdoc,
+                );
+            } else if let oxc::Statement::ExportFromDeclaration(export) = stmt {
+                handle_export_named_decl(
+                    export.span,
+                    None,
+                    &export.specifiers,
                     offset,
                     str,
                     exported_names,
@@ -807,49 +839,44 @@ pub fn process_module_script(
                             .insert(id.name.to_string());
                     }
                 }
-                oxc::Statement::ExportNamedDeclaration(export) => {
-                    if let Some(ref decl) = export.declaration {
-                        match decl {
-                            oxc::Declaration::VariableDeclaration(var_decl) => {
-                                for declarator in var_decl.declarations.iter() {
-                                    for n in extract_all_names_from_binding_pattern(&declarator.id)
-                                    {
-                                        exported_names.module_value_names.insert(n);
-                                    }
-                                }
+                oxc::Statement::ExportDeclaration(export) => match &export.declaration {
+                    oxc::Declaration::VariableDeclaration(var_decl) => {
+                        for declarator in var_decl.declarations.iter() {
+                            for n in extract_all_names_from_binding_pattern(&declarator.id) {
+                                exported_names.module_value_names.insert(n);
                             }
-                            oxc::Declaration::FunctionDeclaration(func) => {
-                                if let Some(ref id) = func.id {
-                                    exported_names
-                                        .module_value_names
-                                        .insert(id.name.to_string());
-                                }
-                            }
-                            oxc::Declaration::ClassDeclaration(class) => {
-                                if let Some(ref id) = class.id {
-                                    exported_names
-                                        .module_value_names
-                                        .insert(id.name.to_string());
-                                }
-                            }
-                            oxc::Declaration::TSTypeAliasDeclaration(t) => {
-                                let name = t.id.name.to_string();
-                                if is_special_type_name(&name) {
-                                    return Err(sentinel_type_in_module_script_error(&name));
-                                }
-                                exported_names.module_type_names.insert(name);
-                            }
-                            oxc::Declaration::TSInterfaceDeclaration(iface) => {
-                                let name = iface.id.name.to_string();
-                                if is_special_type_name(&name) {
-                                    return Err(sentinel_type_in_module_script_error(&name));
-                                }
-                                exported_names.module_type_names.insert(name);
-                            }
-                            _ => {}
                         }
                     }
-                }
+                    oxc::Declaration::FunctionDeclaration(func) => {
+                        if let Some(ref id) = func.id {
+                            exported_names
+                                .module_value_names
+                                .insert(id.name.to_string());
+                        }
+                    }
+                    oxc::Declaration::ClassDeclaration(class) => {
+                        if let Some(ref id) = class.id {
+                            exported_names
+                                .module_value_names
+                                .insert(id.name.to_string());
+                        }
+                    }
+                    oxc::Declaration::TSTypeAliasDeclaration(t) => {
+                        let name = t.id.name.to_string();
+                        if is_special_type_name(&name) {
+                            return Err(sentinel_type_in_module_script_error(&name));
+                        }
+                        exported_names.module_type_names.insert(name);
+                    }
+                    oxc::Declaration::TSInterfaceDeclaration(iface) => {
+                        let name = iface.id.name.to_string();
+                        if is_special_type_name(&name) {
+                            return Err(sentinel_type_in_module_script_error(&name));
+                        }
+                        exported_names.module_type_names.insert(name);
+                    }
+                    _ => {}
+                },
                 oxc::Statement::TSTypeAliasDeclaration(t) => {
                     let name = t.id.name.to_string();
                     if is_special_type_name(&name) {

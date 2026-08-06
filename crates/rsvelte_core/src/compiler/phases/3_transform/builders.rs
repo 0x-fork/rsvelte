@@ -188,7 +188,7 @@ impl<'a> B<'a> {
         Expression::CallExpression(CallExpression::boxed(
             SPAN,
             callee,
-            oxc_ast::builder::NONE,
+            None,
             args,
             false,
             &self.ab(),
@@ -220,10 +220,23 @@ impl<'a> B<'a> {
         args: Vec<Expression<'a>>,
     ) -> Expression<'a> {
         use oxc_ast::ast::ChainElement;
-        let callee = callee.into_expr(self);
+        let mut callee = callee.into_expr(self);
+        // Upstream's callee is a chain *element* (`unwrap_optional(…).callee`), never a
+        // nested `ChainExpression`; reparsing the callee text re-adds that wrapper, and
+        // keeping it would close the chain and print `(a?.b)?.()` instead of `a?.b?.()`.
+        if let Expression::ChainExpression(chain) = callee {
+            callee = match chain.unbox().expression {
+                ChainElement::CallExpression(c) => Expression::CallExpression(c),
+                ChainElement::TSNonNullExpression(e) => Expression::TSNonNullExpression(e),
+                ChainElement::ComputedMemberExpression(m) => {
+                    Expression::ComputedMemberExpression(m)
+                }
+                ChainElement::StaticMemberExpression(m) => Expression::StaticMemberExpression(m),
+                ChainElement::PrivateFieldExpression(m) => Expression::PrivateFieldExpression(m),
+            };
+        }
         let args = self.args(args);
-        let call =
-            CallExpression::boxed(SPAN, callee, oxc_ast::builder::NONE, args, true, &self.ab());
+        let call = CallExpression::boxed(SPAN, callee, None, args, true, &self.ab());
         // Wrap in a ChainExpression so esrap prints the `?.()` chain form.
         Expression::ChainExpression(ChainExpression::boxed(
             SPAN,
@@ -236,13 +249,7 @@ impl<'a> B<'a> {
     pub fn new_expr(self, callee: impl IntoExpr<'a>, args: Vec<Expression<'a>>) -> Expression<'a> {
         let callee = callee.into_expr(self);
         let args = self.args(args);
-        Expression::NewExpression(NewExpression::boxed(
-            SPAN,
-            callee,
-            oxc_ast::builder::NONE,
-            args,
-            &self.ab(),
-        ))
+        Expression::NewExpression(NewExpression::boxed(SPAN, callee, None, args, &self.ab()))
     }
 
     /// Convert a `Vec<Expression>` into an arena `Vec<Argument>`.
@@ -427,7 +434,7 @@ impl<'a> B<'a> {
                 &self.ab(),
             ));
         }
-        BindingPattern::new_object_pattern(SPAN, props, oxc_ast::builder::NONE, &self.ab())
+        BindingPattern::new_object_pattern(SPAN, props, None, &self.ab())
     }
 
     /// Reinterpret an `Expression` as a `BindingPattern`, mirroring upstream's
@@ -516,8 +523,8 @@ impl<'a> B<'a> {
                 SPAN,
                 ArenaVec::new_in(&self.ab()),
                 pat,
-                oxc_ast::builder::NONE,
-                oxc_ast::builder::NONE,
+                None,
+                None,
                 false,
                 None,
                 false,
@@ -533,7 +540,7 @@ impl<'a> B<'a> {
                     SPAN,
                     ArenaVec::new_in(&self.ab()),
                     rest_el,
-                    oxc_ast::builder::NONE,
+                    None,
                     &self.ab(),
                 )
             });
@@ -563,14 +570,26 @@ impl<'a> B<'a> {
     ) -> Expression<'a> {
         Expression::ArrowFunctionExpression(ArrowFunctionExpression::boxed(
             SPAN,
-            body_is_expression,
             is_async,
-            oxc_ast::builder::NONE,
-            params,
-            oxc_ast::builder::NONE,
-            body,
+            None,
+            ArenaBox::new_in(params, &self.ab()),
+            None,
+            self.arrow_body(body, body_is_expression),
             &self.ab(),
         ))
+    }
+
+    /// oxc models a concise arrow body as the bare expression, so unwrap the
+    /// single `ExpressionStatement` callers still pass as a `FunctionBody`.
+    fn arrow_body(self, mut body: FunctionBody<'a>, is_expression: bool) -> ArrowFunctionBody<'a> {
+        if is_expression
+            && body.statements.len() == 1
+            && matches!(body.statements[0], Statement::ExpressionStatement(_))
+            && let Some(Statement::ExpressionStatement(es)) = body.statements.pop()
+        {
+            return ArrowFunctionBody::from(es.unbox().expression);
+        }
+        ArrowFunctionBody::FunctionBody(ArenaBox::new_in(body, &self.ab()))
     }
 
     /// `(params) => expr` — concise-body arrow.
@@ -623,11 +642,11 @@ impl<'a> B<'a> {
             false,
             is_async,
             false,
-            oxc_ast::builder::NONE,
-            oxc_ast::builder::NONE,
-            params,
-            oxc_ast::builder::NONE,
-            Some(body),
+            None,
+            None,
+            ArenaBox::new_in(params, &self.ab()),
+            None,
+            Some(ArenaBox::new_in(body, &self.ab())),
             &self.ab(),
         );
         Expression::FunctionExpression(func)
@@ -649,11 +668,11 @@ impl<'a> B<'a> {
             false,
             is_async,
             false,
-            oxc_ast::builder::NONE,
-            oxc_ast::builder::NONE,
-            params,
-            oxc_ast::builder::NONE,
-            Some(body),
+            None,
+            None,
+            ArenaBox::new_in(params, &self.ab()),
+            None,
+            Some(ArenaBox::new_in(body, &self.ab())),
             &self.ab(),
         );
         Statement::from(oxc_ast::ast::Declaration::FunctionDeclaration(func))
@@ -714,7 +733,7 @@ impl<'a> B<'a> {
                 SPAN,
                 kind,
                 pat,
-                oxc_ast::builder::NONE,
+                None,
                 init,
                 false,
                 &self.ab(),
@@ -730,15 +749,8 @@ impl<'a> B<'a> {
         pattern: BindingPattern<'a>,
         init: Option<Expression<'a>>,
     ) -> Statement<'a> {
-        let declarator = VariableDeclarator::new(
-            SPAN,
-            kind,
-            pattern,
-            oxc_ast::builder::NONE,
-            init,
-            false,
-            &self.ab(),
-        );
+        let declarator =
+            VariableDeclarator::new(SPAN, kind, pattern, None, init, false, &self.ab());
         let decls = ArenaVec::from_value_in(declarator, &self.ab());
         let decl = VariableDeclaration::boxed(SPAN, kind, decls, false, &self.ab());
         Statement::VariableDeclaration(decl)
@@ -862,7 +874,7 @@ impl<'a> B<'a> {
                 SPAN,
                 kind,
                 pat,
-                oxc_ast::builder::NONE,
+                None,
                 init,
                 false,
                 &self.ab(),
@@ -917,7 +929,7 @@ impl<'a> B<'a> {
             Some(specs),
             self.module_source(source),
             None,
-            oxc_ast::builder::NONE,
+            None,
             ImportOrExportKind::Value,
             &self.ab(),
         );
@@ -951,7 +963,7 @@ impl<'a> B<'a> {
             specifiers,
             self.module_source(source),
             None,
-            oxc_ast::builder::NONE,
+            None,
             ImportOrExportKind::Value,
             &self.ab(),
         );
