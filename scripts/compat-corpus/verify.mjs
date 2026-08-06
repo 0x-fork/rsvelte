@@ -81,6 +81,7 @@ import { fileURLToPath } from 'node:url';
 import { flattenTemplateHoles, stripBlankLines, readIf, firstDiffLine, oxfmtTree } from './normalize.mjs';
 import { TARGET_KEYS as ALL_TARGET_KEYS, selectTargets } from './targets.mjs';
 import { MIN_FULL_CORPUS_ENTRIES, OUTPUT_TREES, cleanupArtifacts } from './artifacts.mjs';
+import { refuseUnrepresentativeBaseline } from './baseline-guard.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
@@ -121,6 +122,15 @@ const FROM_REPORT = (() => {
 const UPDATE_FAMILIES = [UPDATE_BASELINE && 'output', UPDATE_WARNING_BASELINE && 'warning'].filter(Boolean);
 if (UPDATE_FAMILIES.length) {
 	console.log(`[verify] rewriting ${UPDATE_FAMILIES.join(' + ')} ratchets for ${TARGET_KEYS.join(', ')}`);
+}
+
+// Target subsets are safe here because every target ratchets to its own file,
+// so a narrowed run rewrites only the files it measured; --no-fmt is not.
+if (UPDATE_FAMILIES.length) {
+	refuseUnrepresentativeBaseline('verify', [
+		NO_FMT &&
+			'--no-fmt counts formatting-only differences as failures, which the corpus gate tolerates by contract',
+	]);
 }
 
 // --from-report reconstructs only the output ratchets, so pairing it with the
