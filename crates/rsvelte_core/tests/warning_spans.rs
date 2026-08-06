@@ -180,3 +180,33 @@ fn non_reactive_update_points_at_the_declared_identifier() {
         "expected the identifier, not the statement or the template read, got {line}:{column} -> {text:?}"
     );
 }
+
+// ---- options_missing_custom_element ----------------------------------------
+// Upstream: `2-analyze/index.js` walks `root.options.attributes` and calls
+// `w.options_missing_custom_element(attribute)` — the attribute, not the element.
+
+const MISSING_CUSTOM_ELEMENT: &str = "options_missing_custom_element";
+
+#[test]
+fn options_missing_custom_element_points_at_the_attribute() {
+    let src = "<svelte:options customElement=\"my-thing\" />\n\n<p>hi</p>\n";
+    let ws = warnings(src);
+    let (line, column, text) = at(src, &ws, MISSING_CUSTOM_ELEMENT, 0);
+    assert_eq!(line, 1);
+    assert!(
+        text.starts_with("customElement="),
+        "expected the attribute, not `<svelte:options`, got {line}:{column} -> {text:?}"
+    );
+}
+
+/// The attribute need not be first, so the column cannot be the element's.
+#[test]
+fn options_missing_custom_element_ignores_preceding_attributes() {
+    let src = "<svelte:options namespace=\"html\" customElement=\"my-thing\" />\n\n<p>hi</p>\n";
+    let ws = warnings(src);
+    let (line, column, text) = at(src, &ws, MISSING_CUSTOM_ELEMENT, 0);
+    assert!(
+        text.starts_with("customElement="),
+        "expected the attribute, got {line}:{column} -> {text:?}"
+    );
+}

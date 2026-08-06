@@ -239,9 +239,18 @@ pub(crate) fn analyze_prepared_component_with_retained(
         && svelte_options.custom_element.is_some()
         && !options.custom_element
     {
-        analysis
-            .warnings
-            .push(warnings::options_missing_custom_element());
+        let mut warning = warnings::options_missing_custom_element();
+        // Upstream raises this while walking `root.options.attributes`, so the
+        // position is the `customElement` attribute rather than the element.
+        if let Some(attribute) = svelte_options
+            .attributes
+            .iter()
+            .find(|a| a.name.as_str() == "customElement")
+        {
+            warning.start = Some(attribute.start);
+            warning.end = Some(attribute.end);
+        }
+        analysis.warnings.push(warning);
     }
 
     // Extract script content for Phase 3 (avoids re-parsing)
