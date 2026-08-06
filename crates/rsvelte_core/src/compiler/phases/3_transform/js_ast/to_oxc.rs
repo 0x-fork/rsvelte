@@ -50,6 +50,37 @@ use oxc_syntax::operator::{
 };
 use std::cell::RefCell;
 
+/// Counts the nodes in parsed-out-of-text statements, using the *same* two node
+/// classes the conversion counters use (`Statement` and `Expression`).
+///
+/// Nodes that arrive as `Raw` text never reach `Cx::stmt`/`Cx::expr` -- oxc's
+/// parser builds them -- so without this the converted-node count is not the
+/// program's node count, and a per-node price divided by it is a price per the
+/// wrong denominator. Counting the same two classes on both sides is what makes
+/// the two commensurable.
+struct ParsedNodeCounter(u64);
+
+impl<'a> oxc_ast_visit::Visit<'a> for ParsedNodeCounter {
+    fn visit_statement(&mut self, it: &Statement<'a>) {
+        self.0 += 1;
+        oxc_ast_visit::walk::walk_statement(self, it);
+    }
+
+    fn visit_expression(&mut self, it: &Expression<'a>) {
+        self.0 += 1;
+        oxc_ast_visit::walk::walk_expression(self, it);
+    }
+}
+
+fn count_parsed_nodes(stmts: &[Statement<'_>]) -> u64 {
+    use oxc_ast_visit::Visit;
+    let mut counter = ParsedNodeCounter(0);
+    for stmt in stmts {
+        counter.visit_statement(stmt);
+    }
+    counter.0
+}
+
 /// A converted program plus the comment coordinate space it needs to be printed
 /// in (see the module docs). `comment_source` is `None` for the common
 /// comment-free program, which prints exactly as before.
@@ -1289,6 +1320,12 @@ impl<'a, 'arena> Cx<'a, 'arena> {
             text.len(),
             out.as_ref().map_or(0, Vec::len),
         );
+        // Deliberately after the timer stops: this walk exists to count nodes,
+        // not to do the work, and charging it to `parse_chunk` would inflate the
+        // very number it is here to make comparable.
+        if let Some(stmts) = out.as_ref() {
+            profile::count_to_oxc_parsed_nodes(count_parsed_nodes(stmts));
+        }
         out
     }
 

@@ -629,6 +629,7 @@ thread_local! {
     static TO_OXC_COUNTS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
     static TO_OXC_RAW_STMTS: Cell<u64> = const { Cell::new(0) };
     static TO_OXC_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static TO_OXC_PARSED_NODES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -692,6 +693,16 @@ pub struct ToOxcBreakdown {
     pub conv_stmt: u64,
     /// `Cx::expr` dispatches, the other central `match`.
     pub conv_expr: u64,
+    /// Nodes inside statements `parse_chunk` returned, counted in the same two
+    /// classes as `conv_stmt`/`conv_expr`. `Raw` text is parsed by oxc rather
+    /// than converted, so these never reach either dispatch -- and the program's
+    /// node count is this plus the converted ones, not the converted ones alone.
+    ///
+    /// Inflated the same way `parse_chunk_calls` is: the probe pass parses every
+    /// chunk, and a comment-bearing chunk is parsed twice within a pass. Divide
+    /// by the passes, or compare against a single-pass corpus, before using it
+    /// as a program node count.
+    pub parsed_nodes: u64,
     /// Statements `parse_chunk` returned, i.e. statements that reach the oxc
     /// program by being *parsed out of generated text* rather than converted
     /// from an IR node. Those are built by oxc's parser, not by the converter.
@@ -787,6 +798,14 @@ pub fn count_to_oxc_expr() {
 }
 
 #[inline]
+pub fn count_to_oxc_parsed_nodes(n: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_PARSED_NODES.with(|c| c.set(c.get() + n));
+}
+
+#[inline]
 pub fn record_to_oxc_shape(js_stmts: usize, oxc_stmts: usize, bailed: bool) {
     if !timers_enabled() {
         return;
@@ -812,6 +831,7 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
     let (js_stmts_in, oxc_stmts_out, bails) = TO_OXC_COUNTS.with(|c| c.replace((0, 0, 0)));
     let raw_stmts = TO_OXC_RAW_STMTS.with(|c| c.replace(0));
     let (conv_stmt, conv_expr) = TO_OXC_NODES.with(|c| c.replace((0, 0)));
+    let parsed_nodes = TO_OXC_PARSED_NODES.with(|c| c.replace(0));
     ToOxcBreakdown {
         alloc_reset,
         alloc_reset_calls,
@@ -829,6 +849,7 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         oxc_stmts_out,
         conv_stmt,
         conv_expr,
+        parsed_nodes,
         raw_stmts,
         bails,
     }

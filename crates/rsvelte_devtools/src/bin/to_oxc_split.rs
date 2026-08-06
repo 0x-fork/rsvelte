@@ -224,6 +224,7 @@ fn main() {
         ("converted nodes", inner.conv_stmt + inner.conv_expr),
         ("  stmt dispatches", inner.conv_stmt),
         ("  expr dispatches", inner.conv_expr),
+        ("parsed nodes (all passes)", inner.parsed_nodes),
         ("IR statements in", inner.js_stmts_in),
         ("oxc statements out (top)", inner.oxc_stmts_out),
         ("stmts out of parse_chunk", inner.raw_stmts),
@@ -243,11 +244,32 @@ fn main() {
     // nodes per file, and a unit-price comparison is only about price if the
     // volumes agree. Printed every run, because a mismatch means the two counts
     // are of different things and the per-node numbers are not comparable.
-    let nodes_per_file = (inner.conv_stmt + inner.conv_expr) as f64 / sources.len().max(1) as f64;
+    let files = sources.len().max(1) as f64;
+    let converted = (inner.conv_stmt + inner.conv_expr) as f64 / files;
+    // `parsed_nodes` is summed over passes, and a chunk is parsed once per pass
+    // plus once more within a pass when it carries comments. The program holds
+    // each of those nodes once, so the count has to be divided by the passes
+    // that actually ran to be a per-program figure. `parse_chunk_calls` over the
+    // chunks a single pass would parse is that factor, measured rather than
+    // assumed -- and it is printed so the correction is visible.
+    let raw_stmt_passes = if inner.raw_stmts == 0 {
+        1.0
+    } else {
+        inner.raw_stmts as f64 / inner.oxc_stmts_out.max(1) as f64
+    };
+    let parsed = inner.parsed_nodes as f64 / files / raw_stmt_passes;
     println!(
-        "\nnode identity: {:.1} converted nodes/file vs 449.4 reported -> {:.3}x",
-        nodes_per_file,
-        nodes_per_file / 449.4
+        "\nnode identity (vs 449.4 reported for this corpus)"
+    );
+    println!("  converted            {converted:>8.1} /file");
+    println!(
+        "  parsed from text     {parsed:>8.1} /file  (raw counted {:.1}, over {raw_stmt_passes:.2} passes)",
+        inner.parsed_nodes as f64 / files
+    );
+    println!(
+        "  ★ total              {:>8.1} /file  -> {:.4}x",
+        converted + parsed,
+        (converted + parsed) / 449.4
     );
     println!(
         "\ntwo-pass rate {:.1}% of conversions; bail rate {:.1}%",
