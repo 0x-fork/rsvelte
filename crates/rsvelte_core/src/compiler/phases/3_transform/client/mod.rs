@@ -6254,10 +6254,12 @@ fn transform_instance_script_for_visitors(
     // (order_reactive_statements in 2-analyze/index.js) and then iterates them
     // in that sorted order. We perform the topological sort here at emission time.
     if !pending_reactive_statements.is_empty() {
+        let _ra = super::profile::timer_start();
         let sorted = sort_reactive_statements(pending_reactive_statements);
         for (_, _, reactive_stmt) in &sorted {
             result.push_str(reactive_stmt);
         }
+        super::profile::record_at_reactive_append(super::profile::timer_elapsed(_ra));
     }
 
     // AST-based transforms for runes mode.
@@ -6363,16 +6365,23 @@ fn transform_instance_script_for_visitors(
                 analysis: Some(analysis),
                 exported_names: &exported_names,
             };
-            super::profile::record_at_probe(super::profile::timer_elapsed(_probe));
+            super::profile::record_at_probe_ctx(super::profile::timer_elapsed(_probe));
             let mut used_retained = false;
             #[cfg(feature = "measure-ast-state")]
             if retained_program.is_none() {
                 crate::measure_ast_state::record_bail(crate::measure_ast_state::Bail::NotRetained);
             }
             let ast_result = retained_program.and_then(|program| {
+                // Charged around the comparison alone, not around the closure:
+                // the projection path inside it records `at_walk` and
+                // `at_output`, and a timer spanning both would double-count them
+                // out of a residual that is computed by subtraction.
+                let _rg = super::profile::timer_start();
                 let retained_core = original_script.trim();
                 let result_core = result.trim();
-                if retained_core != result_core {
+                let core_mismatch = retained_core != result_core;
+                super::profile::record_at_retained_gate(super::profile::timer_elapsed(_rg));
+                if core_mismatch {
                     #[cfg(feature = "measure-ast-state")]
                     crate::measure_ast_state::record_bail(
                         crate::measure_ast_state::Bail::CoreMismatch,
@@ -6497,20 +6506,25 @@ fn transform_instance_script_for_visitors(
     // top-level references), so neither text-based nor AST-based transforms handle them.
     // This must run regardless of runes mode.
     if !shadowed_local_reactive_vars.is_empty() {
+        let _ps = super::profile::timer_start();
         result = transform_shadowed_local_state_vars(&result, &shadowed_local_reactive_vars);
+        super::profile::record_pp_shadow(super::profile::timer_elapsed(_ps));
     }
 
     // Must run after the runes AST pass: it matches the post-transform `prop()` getter
     // form, which does not exist yet while the per-statement pipeline is still running.
     // Reference: validate_mutation() in shared/utils.js
     if !prop_mutation_vars.is_empty() {
+        let _pm = super::profile::timer_start();
         result = wrap_prop_mutation_validation(&result, &prop_mutation_vars, &analysis.source);
+        super::profile::record_pp_prop_mutation(super::profile::timer_elapsed(_pm));
     }
 
     // Dev-mode equality / `await` instrumentation for legacy components. Upstream
     // runs one visitor map over both modes; here the runes half rides inside the
     // `analysis.runes` AST pass above, so legacy needs its own entry point. It goes
     // last so the operands it copies are the settled, already-wrapped ones.
+    let _dt = super::profile::timer_start();
     if dev
         && !analysis.runes
         && let Some(instrumented) =
@@ -6525,6 +6539,7 @@ fn transform_instance_script_for_visitors(
     {
         result = instrumented;
     }
+    super::profile::record_pp_dev_tail(super::profile::timer_elapsed(_dt));
 
     super::profile::record_st_post_passes(super::profile::timer_elapsed(_stage));
 

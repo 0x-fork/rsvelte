@@ -91,6 +91,7 @@ fn main() {
     let _ = profile::take_collect_vars_breakdown();
     let _ = profile::take_text_identity();
     let _ = profile::take_direct_parse_sites();
+    let _ = profile::take_post_passes_breakdown();
 
     // A failing compile leaves several phase timers unrecorded: the `?` on the
     // phase call returns before the recorder runs, so that compile's parse,
@@ -176,6 +177,7 @@ fn main() {
     let transform_breakdown = totals;
     let script_text_breakdown = profile::take_script_text_breakdown();
     let at = profile::take_ast_transforms_breakdown();
+    let pp = profile::take_post_passes_breakdown();
     let tf = profile::take_template_fragment_breakdown();
     let asm = profile::take_assembly_breakdown();
     let rs = profile::take_residual_breakdown();
@@ -282,6 +284,11 @@ fn main() {
         ),
         ("ast_transforms", ms(st.ast_transforms)),
         ("  at_probe", ms(at.probe)),
+        ("    at_probe_scan", ms(at.probe) - ms(at.probe_ctx)),
+        ("    at_probe_ctx", ms(at.probe_ctx)),
+        ("  at_candidate", ms(at.candidate)),
+        ("  at_retained_gate", ms(at.retained_gate)),
+        ("  at_reactive_append", ms(at.reactive_append)),
         ("  at_parse", ms(at.parse)),
         ("  at_walk", ms(at.walk)),
         ("  at_output", ms(at.output)),
@@ -290,10 +297,26 @@ fn main() {
             "  at_rest",
             residual(
                 st.ast_transforms,
-                &[at.probe, at.parse, at.walk, at.output, at.store_unsub],
+                &[
+                    at.probe,
+                    at.candidate,
+                    at.retained_gate,
+                    at.reactive_append,
+                    at.parse,
+                    at.walk,
+                    at.output,
+                    at.store_unsub,
+                ],
             ),
         ),
         ("post_passes", ms(st.post_passes)),
+        ("  pp_shadow", ms(pp.shadow)),
+        ("  pp_prop_mutation", ms(pp.prop_mutation)),
+        ("  pp_dev_tail", ms(pp.dev_tail)),
+        (
+            "  pp_rest",
+            residual(st.post_passes, &[pp.shadow, pp.prop_mutation, pp.dev_tail]),
+        ),
         (
             "prologue+earlyout",
             residual(

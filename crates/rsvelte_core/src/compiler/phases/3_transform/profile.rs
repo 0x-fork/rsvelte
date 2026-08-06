@@ -463,6 +463,13 @@ thread_local! {
     static REWRITE_SEEN: Cell<[bool; REWRITE_SITE_COUNT]> = const { Cell::new([false; REWRITE_SITE_COUNT]) };
     static SCAN_SITE_BYTES: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
     static SCAN_SITE_CALLS: Cell<[u64; SCAN_SITE_COUNT]> = const { Cell::new([0; SCAN_SITE_COUNT]) };
+    static AT_REACTIVE_APPEND: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_RETAINED_GATE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_CANDIDATE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static AT_PROBE_CTX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static PP_SHADOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static PP_PROP_MUTATION: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static PP_DEV_TAIL: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static DP_TIME: Cell<[Duration; DP_SITE_COUNT]> =
         const { Cell::new([Duration::ZERO; DP_SITE_COUNT]) };
     static DP_CALLS: Cell<[u64; DP_SITE_COUNT]> = const { Cell::new([0; DP_SITE_COUNT]) };
@@ -1467,6 +1474,92 @@ pub struct AstTransformsBreakdown {
     pub store_unsub: Duration,
     pub parse_calls: u64,
     pub walk_calls: u64,
+    /// Sorting the pending `$:` statements and concatenating them onto the
+    /// result. Text assembly, with no counterpart once the pass owns nodes.
+    pub reactive_append: Duration,
+    /// Deciding whether the retained program still describes the text: two
+    /// `trim`s and a whole-script `!=`, plus the projection attempt when the
+    /// comparison passes. Charged whether or not the fast path is taken, which
+    /// is the point -- it is what the text detour costs even on the files the
+    /// retained program cannot help.
+    pub retained_gate: Duration,
+    /// `has_state_transform_candidate`, the text probe that gates the reparse.
+    pub candidate: Duration,
+    /// The second `record_at_probe` site: building the config struct rather
+    /// than scanning. Split out because only the first site is text work, and a
+    /// single `probe` figure cannot be sorted into (a) or (b).
+    pub probe_ctx: Duration,
+}
+
+/// The passes after the AST transform, split far enough to say which of them
+/// still reads the whole script as text.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct PostPassesBreakdown {
+    pub shadow: Duration,
+    pub prop_mutation: Duration,
+    pub dev_tail: Duration,
+}
+
+pub fn take_post_passes_breakdown() -> PostPassesBreakdown {
+    PostPassesBreakdown {
+        shadow: PP_SHADOW.with(|c| c.replace(Duration::ZERO)),
+        prop_mutation: PP_PROP_MUTATION.with(|c| c.replace(Duration::ZERO)),
+        dev_tail: PP_DEV_TAIL.with(|c| c.replace(Duration::ZERO)),
+    }
+}
+
+#[inline]
+pub fn record_pp_shadow(d: Duration) {
+    if timers_enabled() {
+        PP_SHADOW.with(|c| c.set(c.get() + d));
+    }
+}
+
+#[inline]
+pub fn record_pp_prop_mutation(d: Duration) {
+    if timers_enabled() {
+        PP_PROP_MUTATION.with(|c| c.set(c.get() + d));
+    }
+}
+
+#[inline]
+pub fn record_pp_dev_tail(d: Duration) {
+    if timers_enabled() {
+        PP_DEV_TAIL.with(|c| c.set(c.get() + d));
+    }
+}
+
+#[inline]
+pub fn record_at_reactive_append(d: Duration) {
+    if timers_enabled() {
+        AT_REACTIVE_APPEND.with(|c| c.set(c.get() + d));
+    }
+}
+
+#[inline]
+pub fn record_at_retained_gate(d: Duration) {
+    if timers_enabled() {
+        AT_RETAINED_GATE.with(|c| c.set(c.get() + d));
+    }
+}
+
+#[inline]
+pub fn record_at_candidate(d: Duration) {
+    if timers_enabled() {
+        AT_CANDIDATE.with(|c| c.set(c.get() + d));
+    }
+}
+
+/// Records the config-building probe site into both the existing `probe` total
+/// and its own bucket, so the split is additive against a figure taken before
+/// the split existed.
+#[inline]
+pub fn record_at_probe_ctx(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    AT_PROBE.with(|c| c.set(c.get() + d));
+    AT_PROBE_CTX.with(|c| c.set(c.get() + d));
 }
 
 pub fn take_ast_transforms_breakdown() -> AstTransformsBreakdown {
@@ -1478,6 +1571,10 @@ pub fn take_ast_transforms_breakdown() -> AstTransformsBreakdown {
         store_unsub: AT_STORE_UNSUB.with(|c| c.replace(Duration::ZERO)),
         parse_calls: AT_PARSE_CALLS.with(|c| c.replace(0)),
         walk_calls: AT_WALK_CALLS.with(|c| c.replace(0)),
+        reactive_append: AT_REACTIVE_APPEND.with(|c| c.replace(Duration::ZERO)),
+        retained_gate: AT_RETAINED_GATE.with(|c| c.replace(Duration::ZERO)),
+        candidate: AT_CANDIDATE.with(|c| c.replace(Duration::ZERO)),
+        probe_ctx: AT_PROBE_CTX.with(|c| c.replace(Duration::ZERO)),
     }
 }
 

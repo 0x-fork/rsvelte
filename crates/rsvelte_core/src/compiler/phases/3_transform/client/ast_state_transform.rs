@@ -4381,7 +4381,10 @@ pub(super) fn transform_state_vars_ast(
     script: &str,
     config: &AstTransformConfig,
 ) -> Option<String> {
-    if !has_state_transform_candidate(script, config) {
+    let _ct = super::super::profile::timer_start();
+    let candidate = has_state_transform_candidate(script, config);
+    super::super::profile::record_at_candidate(super::super::profile::timer_elapsed(_ct));
+    if !candidate {
         return None;
     }
 
