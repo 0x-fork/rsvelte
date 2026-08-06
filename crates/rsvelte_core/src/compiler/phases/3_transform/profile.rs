@@ -619,6 +619,219 @@ thread_local! {
     static ESRAP_PIPE: Cell<(Duration, Duration, u64)> =
         const { Cell::new((Duration::ZERO, Duration::ZERO, 0)) };
     static ESRAP_NORMALIZE: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+
+    static TO_OXC_ALLOC_RESET: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static TO_OXC_TOTAL: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static TO_OXC_SECOND: Cell<(Duration, u64)> = const { Cell::new((Duration::ZERO, 0)) };
+    static TO_OXC_PARSE_CHUNK: Cell<(Duration, u64, u64)> =
+        const { Cell::new((Duration::ZERO, 0, 0)) };
+    static TO_OXC_MAPPINGS: Cell<(Duration, u64, u64)> = const { Cell::new((Duration::ZERO, 0, 0)) };
+    static TO_OXC_COUNTS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+    static TO_OXC_RAW_STMTS: Cell<u64> = const { Cell::new(0) };
+    static TO_OXC_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// Split of the codegen bucket's non-printing half.
+///
+/// `X = codegen - P` has been quoted as "`program_to_oxc`", but the codegen
+/// timer spans three things, and only the middle one is that function: the
+/// allocator reset, the conversion, and the esrap-to-source mapping conversion
+/// that runs *after* the printer's own timer stops. Splitting them matters
+/// because they sort differently -- one is a fixed cost, one is the IR-to-oxc
+/// work svelte-rs replaces with direct construction, and one is source-map
+/// bookkeeping neither compiler avoids.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ToOxcBreakdown {
+    /// `Allocator::reset` on the retained thread-local arena.
+    pub alloc_reset: Duration,
+    /// Calls to it.
+    pub alloc_reset_calls: u64,
+    /// The whole of `program_to_oxc`, both passes included.
+    pub total: Duration,
+    /// Calls to it.
+    pub total_calls: u64,
+    /// The second `convert_once`, which runs only when a chunk turned out to
+    /// carry comments. The whole first pass is then thrown away, so this is a
+    /// doubling rather than an increment -- worth its own line because it is
+    /// pure waste rather than work anyone has to do.
+    pub second_pass: Duration,
+    /// Calls to it, i.e. programs that needed two passes.
+    pub second_pass_calls: u64,
+    /// `parse_chunk`: parsing the opaque generated-JS text the IR carries as
+    /// `Raw`. This is the text-to-AST bridge, and the part with no counterpart
+    /// in a compiler that builds oxc nodes directly.
+    pub parse_chunk: Duration,
+    /// Calls to it. A comment-bearing chunk is parsed twice within a pass (once
+    /// to discover the comments, once padded), and the probe pass parses it
+    /// again, so one chunk can be counted three times. That is the measurement.
+    pub parse_chunk_calls: u64,
+    /// Bytes handed to it.
+    pub parse_chunk_bytes: u64,
+    /// `esrap_mappings_to_source_mappings`, which sits outside the printer's
+    /// timer but inside codegen, and so lands in `X` despite being source-map
+    /// work rather than conversion work.
+    pub mappings_convert: Duration,
+    /// Calls to it.
+    pub mappings_convert_calls: u64,
+    /// Mappings converted.
+    pub mappings_out: u64,
+    /// IR statements handed to the converter, summed over the program bodies.
+    pub js_stmts_in: u64,
+    /// oxc statements the converter produced at program level.
+    pub oxc_stmts_out: u64,
+    /// `Cx::stmt` dispatches -- one of the converter's two central `match`es, so
+    /// this counts every IR statement it converts without touching the arms.
+    /// Together with `conv_expr` this is the node count the per-node price is
+    /// divided by, and the number that has to agree with the other side's for
+    /// the comparison to be about unit price rather than volume.
+    ///
+    /// Nodes that arrive as `Raw` text never reach either dispatch: they are
+    /// parsed by oxc, so they appear in the output program without being
+    /// converted. That makes this a count of *converted* nodes, which is
+    /// deliberately not the same as nodes in the output.
+    pub conv_stmt: u64,
+    /// `Cx::expr` dispatches, the other central `match`.
+    pub conv_expr: u64,
+    /// Statements `parse_chunk` returned, i.e. statements that reach the oxc
+    /// program by being *parsed out of generated text* rather than converted
+    /// from an IR node. Those are built by oxc's parser, not by the converter.
+    ///
+    /// **Not a subset of `oxc_stmts_out`**, and it can exceed it: the probe pass
+    /// parses every chunk too, and a comment-bearing chunk is parsed twice
+    /// within a pass, so a chunk's statements can be counted three times while
+    /// the output holds them once.
+    pub raw_stmts: u64,
+    /// Conversions that returned `None` and fell back to the text codegen. The
+    /// time is spent either way, so a high rate would mean `X` is partly paid
+    /// for output that is then thrown away.
+    pub bails: u64,
+}
+
+#[inline]
+pub fn record_to_oxc_alloc_reset(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_ALLOC_RESET.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+#[inline]
+pub fn record_to_oxc_total(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_TOTAL.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+#[inline]
+pub fn record_to_oxc_second_pass(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_SECOND.with(|c| {
+        let (t, n) = c.get();
+        c.set((t + d, n + 1));
+    });
+}
+
+#[inline]
+pub fn record_to_oxc_parse_chunk(d: Duration, bytes: usize, stmts: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_PARSE_CHUNK.with(|c| {
+        let (t, n, b) = c.get();
+        c.set((t + d, n + 1, b + bytes as u64));
+    });
+    TO_OXC_RAW_STMTS.with(|c| c.set(c.get() + stmts as u64));
+}
+
+#[inline]
+pub fn record_to_oxc_mappings(d: Duration, count: usize) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_MAPPINGS.with(|c| {
+        let (t, n, m) = c.get();
+        c.set((t + d, n + 1, m + count as u64));
+    });
+}
+
+/// Node counts for one conversion, and whether it bailed.
+#[inline]
+pub fn count_to_oxc_stmt() {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_NODES.with(|c| {
+        let (s, e) = c.get();
+        c.set((s + 1, e));
+    });
+}
+
+#[inline]
+pub fn count_to_oxc_expr() {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_NODES.with(|c| {
+        let (s, e) = c.get();
+        c.set((s, e + 1));
+    });
+}
+
+#[inline]
+pub fn record_to_oxc_shape(js_stmts: usize, oxc_stmts: usize, bailed: bool) {
+    if !timers_enabled() {
+        return;
+    }
+    TO_OXC_COUNTS.with(|c| {
+        let (j, o, b) = c.get();
+        c.set((
+            j + js_stmts as u64,
+            o + oxc_stmts as u64,
+            b + u64::from(bailed),
+        ));
+    });
+}
+
+pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
+    let (alloc_reset, alloc_reset_calls) = TO_OXC_ALLOC_RESET.with(|c| c.replace((Duration::ZERO, 0)));
+    let (total, total_calls) = TO_OXC_TOTAL.with(|c| c.replace((Duration::ZERO, 0)));
+    let (second_pass, second_pass_calls) = TO_OXC_SECOND.with(|c| c.replace((Duration::ZERO, 0)));
+    let (parse_chunk, parse_chunk_calls, parse_chunk_bytes) =
+        TO_OXC_PARSE_CHUNK.with(|c| c.replace((Duration::ZERO, 0, 0)));
+    let (mappings_convert, mappings_convert_calls, mappings_out) =
+        TO_OXC_MAPPINGS.with(|c| c.replace((Duration::ZERO, 0, 0)));
+    let (js_stmts_in, oxc_stmts_out, bails) = TO_OXC_COUNTS.with(|c| c.replace((0, 0, 0)));
+    let raw_stmts = TO_OXC_RAW_STMTS.with(|c| c.replace(0));
+    let (conv_stmt, conv_expr) = TO_OXC_NODES.with(|c| c.replace((0, 0)));
+    ToOxcBreakdown {
+        alloc_reset,
+        alloc_reset_calls,
+        total,
+        total_calls,
+        second_pass,
+        second_pass_calls,
+        parse_chunk,
+        parse_chunk_calls,
+        parse_chunk_bytes,
+        mappings_convert,
+        mappings_convert_calls,
+        mappings_out,
+        js_stmts_in,
+        oxc_stmts_out,
+        conv_stmt,
+        conv_expr,
+        raw_stmts,
+        bails,
+    }
 }
 
 #[inline]

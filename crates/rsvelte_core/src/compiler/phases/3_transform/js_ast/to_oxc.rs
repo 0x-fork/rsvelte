@@ -74,12 +74,34 @@ pub fn program_to_oxc<'a>(
     arena: &JsArena,
     allocator: &'a oxc_allocator::Allocator,
 ) -> Option<Converted<'a>> {
+    use crate::compiler::phases::phase3_transform::profile;
+    let _total = profile::timer_start();
+    let out = program_to_oxc_inner(program, arena, allocator);
+    profile::record_to_oxc_total(profile::timer_elapsed(_total));
+    profile::record_to_oxc_shape(
+        program.body.len(),
+        out.as_ref().map_or(0, |c| c.program.body.len()),
+        out.is_none(),
+    );
+    out
+}
+
+fn program_to_oxc_inner<'a>(
+    program: &JsProgram,
+    arena: &JsArena,
+    allocator: &'a oxc_allocator::Allocator,
+) -> Option<Converted<'a>> {
+    use crate::compiler::phases::phase3_transform::profile;
     let (probe, synth) = convert_once(program, arena, allocator, None)?;
     if !synth.saw_comments {
         return Some(probe);
     }
     let loc_base = synth.max_span.saturating_add(2);
+    // The first pass is discarded wholesale here -- this is a second conversion
+    // of the same program, not an increment on the first.
+    let _second = profile::timer_start();
     let (converted, synth) = convert_once(program, arena, allocator, Some(loc_base))?;
+    profile::record_to_oxc_second_pass(profile::timer_elapsed(_second));
     // Every span the pass produced outside a chunk region must stay below
     // `loc_base`, or the printer would mistake it for a real location.
     if synth.max_span >= loc_base {
@@ -341,6 +363,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     // -- statements ---------------------------------------------------------
 
     fn stmt(&self, stmt: &JsStatement) -> Option<Statement<'a>> {
+        crate::compiler::phases::phase3_transform::profile::count_to_oxc_stmt();
         match stmt {
             JsStatement::Expression(e) => {
                 let expr = self.expr_id(e.expression)?;
@@ -940,6 +963,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     // -- expressions --------------------------------------------------------
 
     fn expr(&self, expr: &JsExpr) -> Option<Expression<'a>> {
+        crate::compiler::phases::phase3_transform::profile::count_to_oxc_expr();
         match expr {
             JsExpr::Identifier(name) => {
                 Some(Expression::new_identifier(SPAN, self.str(name), &self.ab))
@@ -1257,6 +1281,18 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     /// `pad + text` buffer so its spans land at the chunk's own region of the
     /// unified comment buffer, and its comments are collected there.
     fn parse_chunk(&self, text: &str) -> Option<Vec<Statement<'a>>> {
+        use crate::compiler::phases::phase3_transform::profile;
+        let _t = profile::timer_start();
+        let out = self.parse_chunk_inner(text);
+        profile::record_to_oxc_parse_chunk(
+            profile::timer_elapsed(_t),
+            text.len(),
+            out.as_ref().map_or(0, Vec::len),
+        );
+        out
+    }
+
+    fn parse_chunk_inner(&self, text: &str) -> Option<Vec<Statement<'a>>> {
         let owned = self.ab.allocator().alloc_str(text);
         let ret = oxc_parser::Parser::new(self.ab.allocator(), owned, oxc_span::SourceType::mjs())
             .parse();

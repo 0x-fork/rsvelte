@@ -2346,7 +2346,9 @@ fn transform_client_with_visitors(
     if *CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some() {
         let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
             let mut alloc = cell.borrow_mut();
+            let _reset = super::profile::timer_start();
             alloc.reset();
+            super::profile::record_to_oxc_alloc_reset(super::profile::timer_elapsed(_reset));
             super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
                 |converted| {
                     // Keep `;` empty statements: the parsed-`Raw` `;;` are real
@@ -2371,7 +2373,7 @@ fn transform_client_with_visitors(
                             super::profile::record_esrap_client_split(
                                 super::profile::timer_elapsed(_t),
                             );
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
+                            (pm.code, timed_mappings(&pm.mappings))
                         }
                         None if options.enable_sourcemap => {
                             let _t = super::profile::timer_start();
@@ -2379,7 +2381,7 @@ fn transform_client_with_visitors(
                             super::profile::record_esrap_client_map(super::profile::timer_elapsed(
                                 _t,
                             ));
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
+                            (pm.code, timed_mappings(&pm.mappings))
                         }
                         None => {
                             let _t = super::profile::timer_start();
@@ -2422,6 +2424,17 @@ fn transform_client_with_visitors(
 /// Convert esrap's flat, generated-order mapping list into the
 /// [`SourceMapping`] list the downstream VLQ encoder (`encode_vlq_mappings`)
 /// consumes.
+/// `esrap_mappings_to_source_mappings`, timed. It runs after the printer's own
+/// timer stops but before codegen's does, so it lands in `X = codegen - P` even
+/// though it is source-map bookkeeping rather than conversion work. Charged here
+/// so the split can put it where it belongs.
+fn timed_mappings(mappings: &[rsvelte_esrap::Mapping]) -> Vec<SourceMapping> {
+    let _t = super::profile::timer_start();
+    let out = esrap_mappings_to_source_mappings(mappings);
+    super::profile::record_to_oxc_mappings(super::profile::timer_elapsed(_t), mappings.len());
+    out
+}
+
 fn esrap_mappings_to_source_mappings(mappings: &[rsvelte_esrap::Mapping]) -> Vec<SourceMapping> {
     mappings
         .iter()
