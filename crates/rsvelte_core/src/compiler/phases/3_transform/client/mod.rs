@@ -220,13 +220,20 @@ pub(crate) fn transform_client(
     source: &str,
     options: &CompileOptions,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    codegen_arena: &oxc_allocator::Allocator,
 ) -> Result<CodegenResult, TransformError> {
     if ast::oracle::enabled() {
         // Run both pipelines and score the AST one against the text one, which
         // is the specification here (it passes every fixture). The text result
         // is what we return, so turning the oracle on cannot change output.
-        let oracle =
-            transform_client_with_visitors(analysis, ast, source, options, retained_scripts)?;
+        let oracle = transform_client_with_visitors(
+            analysis,
+            ast,
+            source,
+            options,
+            retained_scripts,
+            codegen_arena,
+        )?;
         ast::oracle::record(
             match ast::transform_client_ast(analysis, ast, source, options) {
                 None => ast::oracle::Verdict::FellBack,
@@ -243,7 +250,7 @@ pub(crate) fn transform_client(
         return Ok(result);
     }
 
-    transform_client_with_visitors(analysis, ast, source, options, retained_scripts)
+    transform_client_with_visitors(analysis, ast, source, options, retained_scripts, codegen_arena)
 }
 
 /// Transform a module (.svelte.js/.svelte.ts) into client-side JavaScript.
@@ -424,6 +431,7 @@ fn transform_client_with_visitors(
     source: &str,
     options: &CompileOptions,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    codegen_arena: &oxc_allocator::Allocator,
 ) -> Result<CodegenResult, TransformError> {
     use crate::compiler::phases::phase3_transform::client::visitors::fragment::fragment;
 
@@ -2344,12 +2352,13 @@ fn transform_client_with_visitors(
     // Scriptless components use the faster handwritten printer. Scripts need
     // OXC/esrap for official formatting and coordinate-aware comment placement.
     if *CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some() {
-        let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
-            let mut alloc = cell.borrow_mut();
-            let _reset = super::profile::timer_start();
-            alloc.reset();
-            super::profile::record_to_oxc_alloc_reset(super::profile::timer_elapsed(_reset));
-            super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
+        // The arena arrives already reset, from whichever entry owns this
+        // compile -- see `reset_codegen_arena`. Resetting here instead would
+        // free anything an earlier phase had put in it, which is the one thing
+        // the reuse of this arena has to allow next.
+        let converted = {
+            let alloc = codegen_arena;
+            super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, alloc).map(
                 |converted| {
                     // Keep `;` empty statements: the parsed-`Raw` `;;` are real
                     // EmptyStatement nodes the official compiler output preserves.
@@ -2394,7 +2403,7 @@ fn transform_client_with_visitors(
                     }
                 },
             )
-        });
+        };
         if let Some((code, mappings)) = converted {
             super::profile::record_codegen(super::profile::timer_elapsed(_codegen_start));
             return Ok(CodegenResult { code, mappings });
@@ -2451,12 +2460,46 @@ fn esrap_mappings_to_source_mappings(mappings: &[rsvelte_esrap::Mapping]) -> Vec
 }
 
 // Thread-local OXC allocator for the client `to_oxc` direct-AST print path.
-// Mirrors the SSR script
-// allocator pattern in `server/build.rs`: reset-and-reuse per compile so the
-// buffer is retained across calls without per-call allocation.
+// Mirrors the SSR script allocator pattern in `server/build.rs`: reset-and-reuse
+// per compile so the buffer is retained across calls without per-call
+// allocation.
 thread_local! {
     static CLIENT_TO_OXC_ALLOCATOR: std::cell::RefCell<oxc_allocator::Allocator> =
         std::cell::RefCell::new(oxc_allocator::Allocator::default());
+}
+
+/// Reset the client codegen arena, once, at the start of a compile.
+///
+/// The reset used to sit next to the one place that allocates into this arena,
+/// which made it impossible to get wrong -- and also impossible to move. It has
+/// to move: the reason to reuse this arena at all is that phase 1's parsed
+/// script could live in it too, and a reset that runs at codegen time would
+/// free that script right before codegen needs it.
+///
+/// Every entry that can reach the client transform calls this: `Toolchain`
+/// before it parses anything, and [`super::transform_component`] for the
+/// callers that build no toolchain. Missing one does not change a byte of
+/// output or a unit of work -- it makes the arena grow for the life of the
+/// process -- so it is worth naming the reason there are two.
+///
+/// The sites that *use* this arena were easy to enumerate: there is one. The
+/// paths that *reach* it were not, and it is the paths that decide where a
+/// reset belongs.
+pub(crate) fn reset_codegen_arena() {
+    CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
+        let _reset = super::profile::timer_start();
+        let mut alloc = cell.borrow_mut();
+        alloc.reset();
+        super::profile::record_to_oxc_alloc_reset(super::profile::timer_elapsed(_reset));
+        super::profile::record_codegen_arena(alloc.capacity() as u64);
+    });
+}
+
+/// Run `f` with the client codegen arena, which the caller's entry has already
+/// reset. Takes `&` rather than `&mut` so that a second reset partway through a
+/// compile does not typecheck.
+pub(crate) fn with_codegen_arena<T>(f: impl FnOnce(&oxc_allocator::Allocator) -> T) -> T {
+    CLIENT_TO_OXC_ALLOCATOR.with(|cell| f(&cell.borrow()))
 }
 
 static CLIENT_USE_OXC: LazyLock<bool> =

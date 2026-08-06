@@ -331,6 +331,11 @@ impl<'source> PreparedComponent<'source> {
             // SAFETY: the guard is dropped before `ast` moves into the result.
             let _arena_guard =
                 unsafe { crate::ast::arena::SerializeArenaGuard::new(&ast.arena as *const _) };
+            // Before the scripts are parsed, not after: the arena is reused
+            // across compiles, and the next step for it is to hold phase 1's
+            // parsed script as well as codegen's output. A reset at codegen
+            // time would free that script exactly when codegen needs it.
+            crate::compiler::phases::phase3_transform::client::reset_codegen_arena();
             let (options, analysis, runes_mode, retained_scripts) =
                 crate::compiler::prepare_and_analyze(&mut ast, source, options)?;
             (options, Box::new(analysis), runes_mode, retained_scripts)
@@ -390,13 +395,18 @@ impl<'source> PreparedComponent<'source> {
         let options = adjusted_options.as_ref().unwrap_or(&self.options);
         let include_sourcemap_content = include_sourcemap_content || options.sourcemap.is_some();
         let _transform_start = crate::compiler::phases::phase3_transform::profile::timer_start();
-        let transform_result = transform_component_with_scripts(
-            &self.analysis,
-            &self.ast,
-            self.source,
-            options,
-            include_sourcemap_content,
-            Some(&self.retained_scripts),
+        let transform_result = crate::compiler::phases::phase3_transform::client::with_codegen_arena(
+            |codegen_arena| {
+                transform_component_with_scripts(
+                    &self.analysis,
+                    &self.ast,
+                    self.source,
+                    options,
+                    include_sourcemap_content,
+                    Some(&self.retained_scripts),
+                    codegen_arena,
+                )
+            },
         )
         .map_err(CompileError::from)?;
         crate::compiler::phases::phase3_transform::profile::record_pipeline_transform(

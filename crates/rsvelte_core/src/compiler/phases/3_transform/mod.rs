@@ -95,14 +95,23 @@ pub(crate) fn transform_component_with_sourcemap_content(
     options: &CompileOptions,
     include_sourcemap_content: bool,
 ) -> Result<TransformResult, TransformError> {
-    transform_component_with_scripts(
-        analysis,
-        ast,
-        source,
-        options,
-        include_sourcemap_content,
-        None,
-    )
+    // This is the entry for callers that build no `Toolchain` -- the devtools
+    // binaries and the benchmarks. They own the compile, so they own the reset;
+    // `Toolchain` does the same for its own. Resetting here also keeps the reset
+    // count on these paths exactly what it was when the reset lived inside
+    // codegen, which is what makes the benchmarks still comparable.
+    client::reset_codegen_arena();
+    client::with_codegen_arena(|codegen_arena| {
+        transform_component_with_scripts(
+            analysis,
+            ast,
+            source,
+            options,
+            include_sourcemap_content,
+            None,
+            codegen_arena,
+        )
+    })
 }
 
 pub(crate) fn transform_component_with_scripts(
@@ -112,6 +121,7 @@ pub(crate) fn transform_component_with_scripts(
     options: &CompileOptions,
     include_sourcemap_content: bool,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    codegen_arena: &oxc_allocator::Allocator,
 ) -> Result<TransformResult, TransformError> {
     use js_ast::codegen::{
         SourceMapping, encode_vlq_mappings, generate_sourcemap_json, get_source_name,
@@ -120,8 +130,14 @@ pub(crate) fn transform_component_with_scripts(
 
     let (js, mut js_mappings) = match options.generate {
         GenerateMode::Client => {
-            let result =
-                client::transform_client(analysis, ast, source, options, retained_scripts)?;
+            let result = client::transform_client(
+                analysis,
+                ast,
+                source,
+                options,
+                retained_scripts,
+                codegen_arena,
+            )?;
 
             if options.enable_sourcemap {
                 // Merge codegen-tracked mappings with full token-level mappings.

@@ -643,6 +643,8 @@ thread_local! {
     // script. Recorded for both passes and for the second pass alone, so the
     // split can be read over the first pass like every other node count.
     static TO_OXC_MAPPED_PARSED_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    // (resets, arena capacity in bytes after the latest reset).
+    static CODEGEN_ARENA: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -754,6 +756,13 @@ pub struct ToOxcBreakdown {
     pub sp_conv_stmt: u64,
     /// The part of `conv_expr` that ran in the second pass. Subset.
     pub sp_conv_expr: u64,
+    /// Resets of the client codegen arena. Must equal the number of compiles:
+    /// the reset lives at the entries now, so a path that reaches codegen
+    /// without one shows up here and nowhere else.
+    pub arena_resets: u64,
+    /// The arena's capacity after the last reset. Must not grow with the corpus
+    /// -- if it does, the arena is no longer being freed between compiles.
+    pub arena_capacity: u64,
     /// The part of `parsed_nodes` that came from a `RawMapped` chunk, i.e. from
     /// the instance script rather than from the module script or the template.
     /// Subset of `parsed_nodes`.
@@ -813,6 +822,31 @@ pub fn record_to_oxc_second_pass(d: Duration) {
     TO_OXC_SECOND.with(|c| {
         let (t, n) = c.get();
         c.set((t + d, n + 1));
+    });
+}
+
+/// Called once per reset of the client codegen arena, with the arena's capacity
+/// *after* the reset.
+///
+/// This exists because the reset moved out of the code that allocates and into
+/// the entries, and a path that reaches codegen without passing an entry would
+/// leave the arena to grow for the life of the process. Nothing else here would
+/// notice: the output is identical byte for byte and the work counts do not
+/// move, so sha256 and the deterministic counters both pass. What changes is
+/// space, and only in a process that compiles many files.
+///
+/// So it is recorded as two numbers with a fixed relationship to the corpus:
+/// `resets` must equal the number of compiles, and `capacity` must not grow
+/// with it. A missing reset breaks the first; a reset that has stopped freeing
+/// breaks the second.
+#[inline]
+pub fn record_codegen_arena(capacity: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    CODEGEN_ARENA.with(|c| {
+        let (n, _) = c.get();
+        c.set((n + 1, capacity));
     });
 }
 
@@ -932,6 +966,7 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
     let sp_parsed_nodes = TO_OXC_SECOND_PARSED_NODES.with(|c| c.replace(0));
     let (mapped_parsed_nodes, sp_mapped_parsed_nodes) =
         TO_OXC_MAPPED_PARSED_NODES.with(|c| c.replace((0, 0)));
+    let (arena_resets, arena_capacity) = CODEGEN_ARENA.with(|c| c.replace((0, 0)));
     ToOxcBreakdown {
         sp_parse_chunk,
         sp_parse_chunk_calls,
@@ -941,6 +976,8 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         sp_parsed_nodes,
         mapped_parsed_nodes,
         sp_mapped_parsed_nodes,
+        arena_resets,
+        arena_capacity,
         alloc_reset,
         alloc_reset_calls,
         total,

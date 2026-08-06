@@ -404,6 +404,29 @@ fn main() {
         converted + parsed,
         (converted + parsed) / 449.4
     );
+    // The resource gate. The reset moved from the code that allocates into the
+    // entries, and a path that reaches codegen without an entry would leave the
+    // arena growing for the life of the process -- while the output stays
+    // byte-identical and every work count stays put. Neither sha256 nor the
+    // deterministic counters can see that; these two numbers can.
+    //
+    // The denominator is files, not `total_calls`: the latter counts
+    // `program_to_oxc` invocations, and a component with no script never gets
+    // that far while still being compiled -- and still resetting. Comparing
+    // against it reported a missing reset on the first run of this gate, when
+    // what was actually wrong was the denominator.
+    let compiles = sources.len() as u64;
+    println!(
+        "\narena: resets {} vs compiles {} -> {} ; capacity after last reset {} B -> {}",
+        inner.arena_resets,
+        compiles,
+        if inner.arena_resets == compiles { "ok" } else { "RESET COUNT OFF" },
+        inner.arena_capacity,
+        // A per-compile arena keeps a warm chunk; one that is never freed grows
+        // with the corpus. The bound is deliberately loose -- it is there to
+        // separate "constant" from "linear in N", not to pin a size.
+        if inner.arena_capacity < 64 * 1024 * 1024 { "ok" } else { "GROWING" }
+    );
     println!(
         "\ntwo-pass rate {:.1}% of conversions; bail rate {:.1}%",
         inner.second_pass_calls as f64 / inner.total_calls.max(1) as f64 * 100.0,
