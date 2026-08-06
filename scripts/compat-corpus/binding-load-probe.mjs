@@ -12,3 +12,7 @@ if (!out?.js?.code) {
 	console.error('binding loaded but produced no js output');
 	process.exit(1);
 }
+// Report what the binary says it was built from. A binding predating the export
+// says nothing, which is different from saying "unknown".
+const info = typeof binding.buildInfo === 'function' ? binding.buildInfo() : null;
+process.stdout.write(JSON.stringify(info));

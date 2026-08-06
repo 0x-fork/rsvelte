@@ -2125,3 +2125,29 @@ fn compile_batch_async_task(
         externalize_sourcemap_content,
     }))
 }
+
+/// What this library was compiled from, as recorded at build time.
+#[napi(object)]
+pub struct NapiBuildInfo {
+    /// Commit HEAD pointed at when this cdylib was compiled, or `"unknown"`
+    /// when it was built outside a git checkout.
+    pub commit: String,
+    /// Whether `crates/` had uncommitted changes at build time, in which case
+    /// no commit id fully describes this library.
+    pub dirty: bool,
+}
+
+/// Report the commit this binary was built from.
+///
+/// Staging can only record the commit that happened to be checked out when a
+/// file was copied, which is a lower bound on its age rather than evidence of
+/// what compiled it — a binary built before a fix and copied after it looks
+/// newer than the fix it lacks. Reading provenance out of the library closes
+/// that gap.
+#[napi(js_name = "buildInfo", catch_unwind)]
+pub fn napi_build_info() -> NapiBuildInfo {
+    NapiBuildInfo {
+        commit: env!("RSVELTE_BUILD_COMMIT").to_string(),
+        dirty: env!("RSVELTE_BUILD_DIRTY") == "1",
+    }
+}

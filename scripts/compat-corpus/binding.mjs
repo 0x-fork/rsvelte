@@ -68,18 +68,32 @@ export function stageBinding(root) {
 	const tmp = `${dest}.staging`;
 	fs.copyFileSync(built, tmp);
 	fs.renameSync(tmp, dest);
-	assertBindingLoads(root, dest);
-	return writeBindingProvenance(root);
+	const built_from = assertBindingLoads(root, dest);
+	if (built_from?.commit && built_from.commit !== 'unknown') {
+		const head = git(root, ['rev-parse', 'HEAD']);
+		if (head && built_from.commit !== head) {
+			fs.rmSync(dest, { force: true });
+			throw new Error(
+				`the built library reports commit ${built_from.commit.slice(0, 8)} but HEAD is ${head.slice(0, 8)} — ` +
+					`it was compiled from a different tree, so staging it here would attest a commit that never produced it; ` +
+					`removed it and wrote no stamp (rebuild at this HEAD)`
+			);
+		}
+	}
+	return writeBindingProvenance(root, built_from);
 }
 
 /**
  * Stamping a binding that cannot load is the failure this whole module exists to
  * prevent, one level down: the attestation would outlive the thing it describes.
+ *
+ * @returns the binary's self-reported build info, or null if it predates the export
  */
 function assertBindingLoads(root, dest) {
 	const probe = path.join(root, 'scripts/compat-corpus/binding-load-probe.mjs');
+	let stdout;
 	try {
-		execFileSync(process.execPath, [probe, dest], { stdio: ['ignore', 'ignore', 'pipe'] });
+		stdout = execFileSync(process.execPath, [probe, dest], { stdio: ['ignore', 'pipe', 'pipe'] });
 	} catch (e) {
 		fs.rmSync(dest, { force: true });
 		const signal = e?.signal ? ` (${e.signal})` : '';
@@ -87,17 +101,29 @@ function assertBindingLoads(root, dest) {
 			`the staged binding does not load${signal} — removed it rather than stamping it; nothing was written to ${STAMP_REL}`
 		);
 	}
+	try {
+		return JSON.parse(String(stdout));
+	} catch {
+		return null;
+	}
 }
 
-export function writeBindingProvenance(root) {
+export function writeBindingProvenance(root, builtFrom = null) {
 	const stagedAtCommit = git(root, ['rev-parse', 'HEAD']);
 	if (!stagedAtCommit) throw new Error('cannot resolve HEAD to stamp the binding');
 	// A dirty crates/ tree means the binding may contain uncommitted work, which
 	// no commit id describes.
 	const dirty = (git(root, ['status', '--porcelain', '--', 'crates']) ?? '') !== '';
-	// Named for what it attests. This records the commit checked out when the
-	// library was copied, which is not evidence of what compiled it — see #2482.
-	const stamp = { stagedAtCommit, dirty, stagedAt: new Date().toISOString() };
+	// builtFromCommit is what the binary reports about itself and is the field
+	// worth trusting; stagedAtCommit only records what was checked out when the
+	// file was copied, and is kept for bindings predating the export.
+	const stamp = {
+		builtFromCommit: builtFrom?.commit ?? null,
+		builtDirty: builtFrom?.dirty ?? null,
+		stagedAtCommit,
+		dirty,
+		stagedAt: new Date().toISOString(),
+	};
 	fs.writeFileSync(path.join(root, STAMP_REL), JSON.stringify(stamp, null, '\t') + '\n');
 	return stamp;
 }
@@ -119,25 +145,35 @@ export function bindingProvenance(root) {
 	} catch {
 		return { state: 'unknown', detail: `${STAMP_REL} is unreadable` };
 	}
-	const at = stamp.stagedAtCommit;
+	// Prefer what the binary reported about itself; fall back to the staging
+	// observation only for libraries built before the export existed.
+	const attested = typeof stamp.builtFromCommit === 'string' && stamp.builtFromCommit !== 'unknown';
+	const at = attested ? stamp.builtFromCommit : stamp.stagedAtCommit;
+	const how = attested ? 'built from' : 'staged at (inferred; binary reported nothing)';
 	if (typeof at !== 'string' || at === '') {
-		return { state: 'unknown', detail: `${STAMP_REL} records no stagedAtCommit` };
+		return { state: 'unknown', detail: `${STAMP_REL} records no commit` };
 	}
-	if (stamp.dirty) {
-		return { state: 'dirty', detail: `staged at ${at.slice(0, 8)} with uncommitted changes under crates/` };
+	if (attested && stamp.builtDirty) {
+		return {
+			state: 'dirty',
+			detail: `built from ${at.slice(0, 8)} with uncommitted changes under crates/`,
+		};
+	}
+	if (!attested && stamp.dirty) {
+		return { state: 'dirty', detail: `${how} ${at.slice(0, 8)} with uncommitted changes under crates/` };
 	}
 	const known = git(root, ['rev-parse', '--verify', `${at}^{commit}`]);
 	if (!known) {
-		return { state: 'foreign', detail: `staged at ${at.slice(0, 8)}, which is not a commit in this repository` };
+		return { state: 'foreign', detail: `${how} ${at.slice(0, 8)}, which is not a commit in this repository` };
 	}
 	const behind = git(root, ['rev-list', '--count', `${at}..HEAD`, '--', 'crates']);
 	if (behind && behind !== '0') {
 		return {
 			state: 'stale',
-			detail: `staged at ${at.slice(0, 8)}, which is ${behind} commit(s) touching crates/ behind HEAD`,
+			detail: `${how} ${at.slice(0, 8)}, which is ${behind} commit(s) touching crates/ behind HEAD`,
 		};
 	}
-	return { state: 'ok', detail: `staged at ${at.slice(0, 8)}` };
+	return { state: 'ok', detail: `${how} ${at.slice(0, 8)}` };
 }
 
 /** A reason string when the binding cannot back a durable claim, else null. */
