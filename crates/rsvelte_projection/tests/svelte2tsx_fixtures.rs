@@ -68,6 +68,13 @@ fn test_svelte2tsx_fixtures() {
     let outcomes = match iter_svelte2tsx_outcomes() {
         Some(o) => o,
         None => {
+            // Only a job that promised this submodule may fail on its absence.
+            assert!(
+                std::env::var_os("RSVELTE_REQUIRE_PREREQS").is_none(),
+                "submodules/language-tools is not checked out in a job that \
+                 declares RSVELTE_REQUIRE_PREREQS — every svelte2tsx fixture \
+                 assertion would be silently skipped."
+            );
             eprintln!("Skipping: language-tools submodule not available");
             return;
         }
