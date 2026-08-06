@@ -682,7 +682,12 @@ pub(crate) fn analyze_prepared_component_with_retained(
                     .contains(&"non_reactive_update".to_string())
                 {
                     let name = binding.name.clone();
-                    analysis.warnings.push(warnings::non_reactive_update(&name));
+                    let declaration = binding.declaration_start;
+                    let mut warning = warnings::non_reactive_update(&name);
+                    // Upstream warns on `binding.node`, the declaration identifier.
+                    warning.start = declaration;
+                    warning.end = declaration.map(|start| start + name.len() as u32);
+                    analysis.warnings.push(warning);
                 }
             }
         }

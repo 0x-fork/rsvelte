@@ -162,3 +162,21 @@ fn export_let_unused_each_declaration_gets_its_own_position() {
     assert!(line[sorted[0]..].starts_with("first,"));
     assert!(line[sorted[1]..].starts_with("second;"));
 }
+
+// ---- non_reactive_update ---------------------------------------------------
+// Upstream: `2-analyze/index.js` -> `w.non_reactive_update(binding.node, name)`,
+// where `binding.node` is the declaration identifier.
+
+const NON_REACTIVE_UPDATE: &str = "non_reactive_update";
+
+#[test]
+fn non_reactive_update_points_at_the_declared_identifier() {
+    let src = "<script>\n\tlet { label } = $props();\n\tlet count = 0;\n\tfunction bump() {\n\t\tcount += 1;\n\t}\n</script>\n\n<button onclick={bump}>{label} {count}</button>\n";
+    let ws = warnings(src);
+    let (line, column, text) = at(src, &ws, NON_REACTIVE_UPDATE, 0);
+    assert_eq!(line, 3, "expected the line holding the declaration");
+    assert!(
+        text.starts_with("count = 0;"),
+        "expected the identifier, not the statement or the template read, got {line}:{column} -> {text:?}"
+    );
+}
