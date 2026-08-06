@@ -78,6 +78,26 @@ pub(super) fn transform_store_assignments_client(
     result
 }
 
+/// A JavaScript `IdentifierPart`, as far as these boundary scans need it.
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Whether the character ending at byte `pos` continues an identifier.
+///
+/// `s.as_bytes()[pos - 1] as char` cannot answer this: `u8 as char` is a
+/// Latin-1 decode, so a UTF-8 continuation byte becomes a character that is not
+/// in the source (`名` ends in `0x8D` → U+008D, not alphanumeric) and the
+/// boundary test silently inverts.
+fn preceded_by_ident_char(s: &str, pos: usize) -> bool {
+    s[..pos].chars().next_back().is_some_and(is_ident_char)
+}
+
+/// Whether the character starting at byte `pos` continues an identifier.
+fn followed_by_ident_char(s: &str, pos: usize) -> bool {
+    s[pos..].chars().next().is_some_and(is_ident_char)
+}
+
 /// Check if a store subscription name appears as a function parameter in a statement.
 /// This detects patterns like `function bar($derived, $effect)` where the store sub name
 /// is actually a function parameter, not a store reference.
@@ -122,20 +142,10 @@ pub(super) fn is_function_parameter_in_statement(statement: &str, store_sub: &st
         if let Some(found) = statement[pos..].find(store_sub) {
             let abs_found = pos + found;
             // Check word boundary before
-            let before_ok = if abs_found == 0 {
-                true
-            } else {
-                let prev = statement.as_bytes()[abs_found - 1] as char;
-                !prev.is_alphanumeric() && prev != '_' && prev != '$'
-            };
+            let before_ok = !preceded_by_ident_char(statement, abs_found);
             // Check word boundary after
             let after_pos = abs_found + store_sub_len;
-            let after_ok = if after_pos >= statement.len() {
-                true
-            } else {
-                let next = statement.as_bytes()[after_pos] as char;
-                !next.is_alphanumeric() && next != '_' && next != '$'
-            };
+            let after_ok = !followed_by_ident_char(statement, after_pos);
 
             if before_ok && after_ok {
                 // Check if followed by `=>` (with optional whitespace) = simple arrow param
@@ -231,13 +241,7 @@ pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -
             let abs_pos = search_start + pos;
 
             // Check if this is a word boundary (not part of a larger identifier)
-            let before_ok = if abs_pos == 0 {
-                true
-            } else {
-                let prev_byte = result.as_bytes()[abs_pos - 1];
-                let prev_char = prev_byte as char;
-                !prev_char.is_alphanumeric() && prev_char != '_' && prev_char != '$'
-            };
+            let before_ok = !preceded_by_ident_char(&result, abs_pos);
 
             if !before_ok {
                 // Not a word boundary, skip
@@ -255,17 +259,17 @@ pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -
             // treated as being in function params.
             let before_text = &result[..abs_pos];
             let is_in_func_params = {
-                // Find the nearest unmatched `(` before our position.
+                // Find the nearest unmatched `(` before our position. `(` and `)`
+                // are ASCII, so this compares bytes rather than decoding them.
                 let bytes = before_text.as_bytes();
                 let mut depth: i32 = 0;
                 let mut open_paren_pos: Option<usize> = None;
                 let mut i = bytes.len();
                 while i > 0 {
                     i -= 1;
-                    let ch = bytes[i] as char;
-                    if ch == ')' {
+                    if bytes[i] == b')' {
                         depth += 1;
-                    } else if ch == '(' {
+                    } else if bytes[i] == b'(' {
                         if depth == 0 {
                             open_paren_pos = Some(i);
                             break;
@@ -277,30 +281,25 @@ pub(super) fn transform_store_sub_calls(line: &str, store_sub_vars: &[String]) -
                     // Check what is immediately before the `(`, skipping whitespace
                     // and an optional identifier (the function name).
                     let mut k = p;
-                    while k > 0 && (bytes[k - 1] as char).is_whitespace() {
-                        k -= 1;
-                    }
+                    let skip_back = |k: &mut usize, pred: fn(char) -> bool| {
+                        while let Some(c) = before_text[..*k].chars().next_back() {
+                            if !pred(c) {
+                                break;
+                            }
+                            *k -= c.len_utf8();
+                        }
+                    };
+                    skip_back(&mut k, char::is_whitespace);
                     // Skip an optional identifier (function name) before `(`
-                    while k > 0 && {
-                        let ch = bytes[k - 1] as char;
-                        ch.is_alphanumeric() || ch == '_' || ch == '$'
-                    } {
-                        k -= 1;
-                    }
+                    skip_back(&mut k, is_ident_char);
                     // Skip whitespace before identifier
-                    while k > 0 && (bytes[k - 1] as char).is_whitespace() {
-                        k -= 1;
-                    }
+                    skip_back(&mut k, char::is_whitespace);
                     // Now check if preceded by `function` keyword
                     if k >= 8 {
                         let prefix =
                             crate::compiler::utils::char_boundary_lookback(before_text, k, 8);
                         prefix == "function"
-                            && (k == 8
-                                || !{
-                                    let c = bytes[k - 9] as char;
-                                    c.is_alphanumeric() || c == '_' || c == '$'
-                                })
+                            && (k == 8 || !preceded_by_ident_char(before_text, k - 8))
                     } else {
                         false
                     }
@@ -551,6 +550,10 @@ pub(super) fn transform_store_member_mutations(
 mod tests {
     use super::*;
 
+    fn subs() -> Vec<String> {
+        vec!["$count".to_string()]
+    }
+
     #[test]
     fn store_read_survives_a_non_ascii_store_name() {
         let vars = vec!["$\u{540d}\u{524d}".to_string()];
@@ -567,5 +570,120 @@ mod tests {
             transform_store_reads_client("$\u{540d}\u{524d}();", &vars),
             "$\u{540d}\u{524d}();"
         );
+    }
+
+    #[test]
+    fn standalone_store_sub_call_gets_the_getter() {
+        assert_eq!(
+            transform_store_sub_calls("x = $count(1);", &subs()),
+            "x = $count()(1);"
+        );
+    }
+
+    #[test]
+    fn ascii_prefixed_identifier_is_rejected() {
+        assert_eq!(
+            transform_store_sub_calls("x = a$count(1);", &subs()),
+            "x = a$count(1);"
+        );
+    }
+
+    /// Guard on current `main`: the widened identifier pre-filter added by
+    /// #2389 folds the whole line into one word and bails before the boundary
+    /// test runs, so this passes with or without the decode fix. It only
+    /// discriminates once a second, standalone occurrence holds the gate open —
+    /// see `mixed_line_transforms_only_the_standalone_occurrence`.
+    #[test]
+    fn non_ascii_prefixed_identifier_is_rejected() {
+        assert_eq!(
+            transform_store_sub_calls("x = \u{540d}$count(1);", &subs()),
+            "x = \u{540d}$count(1);"
+        );
+    }
+
+    #[test]
+    fn mixed_line_transforms_only_the_standalone_occurrence() {
+        assert_eq!(
+            transform_store_sub_calls("x = $count(1) + \u{540d}$count(1);", &subs()),
+            "x = $count()(1) + \u{540d}$count(1);"
+        );
+    }
+
+    #[test]
+    fn ascii_function_param_list_is_skipped() {
+        assert_eq!(
+            transform_store_sub_calls("function f($count(1)) {}", &subs()),
+            "function f($count(1)) {}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_function_name_matches_its_ascii_control() {
+        // The identifier skip that finds the `function` keyword read
+        // `bytes[k - 1] as char`; the bytes of a non-ASCII name decode to
+        // Latin-1 characters that are not identifier characters, so the param
+        // list went unrecognised.
+        assert_eq!(
+            transform_store_sub_calls("function \u{540d}($count(1)) {}", &subs()),
+            "function \u{540d}($count(1)) {}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_before_the_call_does_not_panic() {
+        // `\u{2020}` is `E2 80 A0`. `0xA0 as char` is U+00A0 NBSP, accepted by
+        // `is_whitespace`, and `0x80 as char` is a control character rejected by
+        // both predicates \u{2014} so the byte cursor halted inside the character
+        // and `char_boundary_lookback` sliced on a non-boundary.
+        assert_eq!(
+            transform_store_sub_calls("let value = \u{2020}($count(1));", &subs()),
+            "let value = \u{2020}($count()(1));"
+        );
+        // ASCII control: same shape, same answer.
+        assert_eq!(
+            transform_store_sub_calls("let value = f($count(1));", &subs()),
+            "let value = f($count()(1));"
+        );
+    }
+
+    #[test]
+    fn ascii_arrow_param_is_a_parameter() {
+        assert!(is_function_parameter_in_statement(
+            "f($count => $count * 2)",
+            "$count"
+        ));
+    }
+
+    #[test]
+    fn non_ascii_prefixed_arrow_param_is_not_a_parameter() {
+        assert!(!is_function_parameter_in_statement(
+            "f(\u{540d}$count => \u{540d}$count * 2)",
+            "$count"
+        ));
+    }
+
+    // The rune callers pass a hard-coded ASCII needle and reach
+    // `is_function_parameter_in_statement` with no identifier pre-filter in
+    // front of them, so the non-ASCII character lives in the *statement*, never
+    // in the needle.
+    #[test]
+    fn ascii_rune_arrow_param_is_a_parameter() {
+        assert!(is_function_parameter_in_statement("$state => x", "$state"));
+    }
+
+    #[test]
+    fn ascii_prefixed_rune_name_is_not_a_parameter() {
+        assert!(!is_function_parameter_in_statement(
+            "a$state => x",
+            "$state"
+        ));
+    }
+
+    #[test]
+    fn non_ascii_prefixed_rune_name_is_not_a_parameter() {
+        assert!(!is_function_parameter_in_statement(
+            "\u{540d}$state => x",
+            "$state"
+        ));
     }
 }
