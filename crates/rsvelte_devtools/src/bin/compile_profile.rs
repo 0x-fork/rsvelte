@@ -264,11 +264,15 @@ fn main() {
         ("collect_vars", ms(st.collect_vars)),
         ("line_loop", ms(st.line_loop)),
         ("  process_accum", ms(st.process_accumulated)),
+        ("    pa_prologue", ms(st.pa_prologue)),
         ("    runes_xform", ms(st.runes)),
         ("    reactive_stmt", ms(st.reactive_stmt)),
         (
             "    pa_rest",
-            residual(st.process_accumulated, &[st.runes, st.reactive_stmt]),
+            residual(
+                st.process_accumulated,
+                &[st.pa_prologue, st.runes, st.reactive_stmt],
+            ),
         ),
         (
             "  line_scan",

@@ -211,6 +211,9 @@ pub struct ScriptTextBreakdown {
     /// The part of `line_loop` spent transforming completed statements; the
     /// remainder is the loop's own per-line scanning.
     pub process_accumulated: Duration,
+    /// Text-only prologue inside [`Self::process_accumulated`].
+    pub pa_prologue: Duration,
+    pub pa_prologue_calls: u64,
     /// Completed statements handed to the processor.
     pub statements: u64,
     /// `transform_client_runes_with_skip_and_state`, the per-statement rune rewrite.
@@ -446,6 +449,8 @@ thread_local! {
     static CV_TEXT_INDEX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_BINDING_VECS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static CV_SET_MAPS: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static ST_PA_PROLOGUE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static ST_PA_PROLOGUE_CALLS: Cell<u64> = const { Cell::new(0) };
     static TEXT_CHECKED: Cell<u64> = const { Cell::new(0) };
     static TEXT_CHANGED: Cell<u64> = const { Cell::new(0) };
     static TEXT_UNEXPLAINED: Cell<u64> = const { Cell::new(0) };
@@ -764,6 +769,22 @@ impl Drop for ProcessAccumulatedGuard {
         ST_PROCESS_ACCUMULATED.with(|c| c.set(c.get() + timer_elapsed(self.0)));
         ST_STATEMENTS.with(|c| c.set(c.get() + 1));
     }
+}
+
+/// The statement processor's text-only prologue: rejoining the accumulated
+/// lines, then dispatching on `starts_with("export function ")` and friends and
+/// rebuilding the string without the `export ` keyword.
+///
+/// Timed apart from the transforms that follow it because an AST path is handed
+/// the node and its kind, so none of this work has a counterpart there -- while
+/// the transforms after it still have to happen in some form.
+#[inline]
+pub fn record_st_pa_prologue(d: Duration) {
+    if !timers_enabled() {
+        return;
+    }
+    ST_PA_PROLOGUE.with(|c| c.set(c.get() + d));
+    ST_PA_PROLOGUE_CALLS.with(|c| c.set(c.get() + 1));
 }
 
 #[inline]
@@ -1427,6 +1448,8 @@ pub fn take_script_text_breakdown() -> ScriptTextBreakdown {
         post_passes: ST_POST_PASSES.with(|c| c.replace(Duration::ZERO)),
         calls: ST_CALLS.with(|c| c.replace(0)),
         process_accumulated: ST_PROCESS_ACCUMULATED.with(|c| c.replace(Duration::ZERO)),
+        pa_prologue: ST_PA_PROLOGUE.with(|c| c.replace(Duration::ZERO)),
+        pa_prologue_calls: ST_PA_PROLOGUE_CALLS.with(|c| c.replace(0)),
         statements: ST_STATEMENTS.with(|c| c.replace(0)),
         runes: ST_RUNES.with(|c| c.replace(Duration::ZERO)),
         reactive_stmt: ST_REACTIVE_STMT.with(|c| c.replace(Duration::ZERO)),

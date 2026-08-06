@@ -5642,6 +5642,8 @@ fn transform_instance_script_for_visitors(
             .strip_prefix("export ")
             .unwrap_or(first_line_trimmed);
 
+        super::profile::record_st_pa_prologue(super::profile::timer_elapsed(_stmt_start));
+
         // Transform runes ($state, $derived, $effect, $props)
         let _runes_start = super::profile::timer_start();
         let mut transformed = transform_client_runes_with_skip_and_state(
