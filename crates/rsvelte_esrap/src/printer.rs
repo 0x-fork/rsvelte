@@ -561,15 +561,6 @@ impl<'opt> Printer<'opt> {
         anchor.map(|(l, _)| l) == Some(line)
     }
 
-    /// Whether any source comment starts within `[start, end)` — used to decide
-    /// if an unwrapped `ParenthesizedExpression` must keep its literal parens to
-    /// bracket an interior comment (`(/*c*/ x)`).
-    fn comment_in_span(&self, start: u32, end: u32) -> bool {
-        self.comments
-            .iter()
-            .any(|c| c.start >= start && c.start < end)
-    }
-
     // ----- comments ---------------------------------------------------------
 
     /// esrap's `flush_comments_until`: emit every pending comment that starts
@@ -930,10 +921,13 @@ impl<'opt> Printer<'opt> {
                     // esrap: when a comment sits between `return` and the
                     // argument, wrap the argument in parens (`return (/*c*/ x);`)
                     // so the comment can't be read as ending the statement.
+                    // Measured against the *unparenthesized* argument because
+                    // esrap's acorn elides source parens, so a comment just
+                    // inside one still counts as preceding the argument.
                     let contains_comment = self
                         .comments
                         .get(self.comment_index)
-                        .is_some_and(|c| c.start < arg.span().start);
+                        .is_some_and(|c| c.start < unparen(arg).span().start);
                     let start = s.span().start;
                     if contains_comment {
                         self.write_keyword(ctx, start, "return", " (");
@@ -2126,35 +2120,17 @@ impl<'opt> Printer<'opt> {
                 // no `ParenthesizedExpression` node, so esrap recomputes every
                 // paren purely from operator/precedence rules (`needs_parens`).
                 // oxc instead PRESERVES explicit parens as this node. To match
-                // esrap byte-for-byte we UNWRAP it and print the inner
-                // expression, letting the precedence-based parenthesisation
-                // (`child_with_parens` / `binary_needs_parens` at each parent)
-                // re-add only the parens the grammar requires.
+                // esrap byte-for-byte we UNWRAP it unconditionally and print the
+                // inner expression, letting the precedence-based
+                // parenthesisation (`child_with_parens` / `binary_needs_parens`
+                // at each parent) re-add only the parens the grammar requires.
                 //
-                // Two exceptions keep the literal parens:
-                //
-                // 1. A comment inside the paren span: dropping the parens would
-                //    leave the interior comment dangling (`return (/*c*/ x)`,
-                //    `return (// hey\n x)`). The comment is flushed as a leading
-                //    comment of the inner expression, so the parens must stay to
-                //    bracket it as in the source.
-                // 2. A sequence: `(a, b)` parses as `Paren(Sequence)`, and the
-                //    `SequenceExpression` visitor already emits its own
-                //    surrounding parens, so the paren layer is dropped to avoid
-                //    doubling. (An explicit redundant `((a, b))` is handled
-                //    recursively — the outer layer here, the inner by the
-                //    sequence visitor.)
-                if matches!(p.expression, Expression::SequenceExpression(_)) {
-                    self.print_expression(&p.expression, ctx);
-                // No `has_loc` guard needed: every comment offset is >= `loc_base`
-                // by construction, so a synthesized span never contains one.
-                } else if self.comment_in_span(p.span.start, p.span.end) {
-                    ctx.write("(");
-                    self.print_expression(&p.expression, ctx);
-                    ctx.write(")");
-                } else {
-                    self.print_expression(&p.expression, ctx);
-                }
+                // An interior comment is no reason to keep them: esrap has no
+                // node to keep, so it re-homes the comment as leading trivia of
+                // the inner expression and prints no paren. The one place a
+                // comment does produce parens is `ReturnStatement`, which brackets
+                // its argument itself when a comment precedes it.
+                self.print_expression(&p.expression, ctx);
             }
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => self.call_expression(call, ctx),
