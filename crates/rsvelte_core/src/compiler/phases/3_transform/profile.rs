@@ -643,8 +643,15 @@ thread_local! {
     // script. Recorded for both passes and for the second pass alone, so the
     // split can be read over the first pass like every other node count.
     static TO_OXC_MAPPED_PARSED_NODES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
-    // (resets, arena capacity in bytes after the latest reset).
-    static CODEGEN_ARENA: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    // (resets, capacity samples, peak arena capacity in bytes).
+    //
+    // Two counters, not one, because a negative control showed one was not
+    // enough: with every reset deleted, a capacity recorded *inside* the reset
+    // stayed at its initial 0 and the gate read "ok". The instrument could not
+    // observe the growth it exists to detect, in exactly the case it exists for.
+    // The sample count is what tells "the arena never grew" apart from "nobody
+    // ever looked".
+    static CODEGEN_ARENA: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
 }
 
 /// Split of the codegen bucket's non-printing half.
@@ -760,8 +767,14 @@ pub struct ToOxcBreakdown {
     /// the reset lives at the entries now, so a path that reaches codegen
     /// without one shows up here and nowhere else.
     pub arena_resets: u64,
-    /// The arena's capacity after the last reset. Must not grow with the corpus
-    /// -- if it does, the arena is no longer being freed between compiles.
+    /// Times the arena's capacity was sampled. Sampled once per compile, from
+    /// the borrow itself rather than from the reset, so that deleting a reset
+    /// leaves this moving -- a gate whose evidence disappears along with the
+    /// thing it is checking cannot fail.
+    pub arena_samples: u64,
+    /// The largest capacity the arena reached across those samples. Must not
+    /// grow with the corpus -- if it does, the arena is no longer being freed
+    /// between compiles.
     pub arena_capacity: u64,
     /// The part of `parsed_nodes` that came from a `RawMapped` chunk, i.e. from
     /// the instance script rather than from the module script or the template.
@@ -840,13 +853,39 @@ pub fn record_to_oxc_second_pass(d: Duration) {
 /// with it. A missing reset breaks the first; a reset that has stopped freeing
 /// breaks the second.
 #[inline]
-pub fn record_codegen_arena(capacity: u64) {
+pub fn record_codegen_arena_reset() {
     if !timers_enabled() {
         return;
     }
     CODEGEN_ARENA.with(|c| {
-        let (n, _) = c.get();
-        c.set((n + 1, capacity));
+        let (resets, samples, peak) = c.get();
+        c.set((resets + 1, samples, peak));
+    });
+}
+
+/// Read the peak arena capacity so far without draining it.
+///
+/// A reader needs this partway through a corpus, not only at the end: the
+/// invariant that matters is "the peak does not grow with the number of files",
+/// and a single final number cannot express it. A fixed byte bound was tried
+/// first and the negative control walked straight through it -- deleting every
+/// reset grew the arena 64x and still landed 17 KB under a 64 MiB ceiling that
+/// had been picked to be "deliberately loose".
+#[must_use]
+pub fn peek_codegen_arena_peak() -> u64 {
+    CODEGEN_ARENA.with(|c| c.get().2)
+}
+
+/// Sample the arena's capacity. Called from the borrow, once per compile,
+/// deliberately *not* from the reset -- see `CODEGEN_ARENA`.
+#[inline]
+pub fn record_codegen_arena_capacity(capacity: u64) {
+    if !timers_enabled() {
+        return;
+    }
+    CODEGEN_ARENA.with(|c| {
+        let (resets, samples, peak) = c.get();
+        c.set((resets, samples + 1, peak.max(capacity)));
     });
 }
 
@@ -966,7 +1005,8 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
     let sp_parsed_nodes = TO_OXC_SECOND_PARSED_NODES.with(|c| c.replace(0));
     let (mapped_parsed_nodes, sp_mapped_parsed_nodes) =
         TO_OXC_MAPPED_PARSED_NODES.with(|c| c.replace((0, 0)));
-    let (arena_resets, arena_capacity) = CODEGEN_ARENA.with(|c| c.replace((0, 0)));
+    let (arena_resets, arena_samples, arena_capacity) =
+        CODEGEN_ARENA.with(|c| c.replace((0, 0, 0)));
     ToOxcBreakdown {
         sp_parse_chunk,
         sp_parse_chunk_calls,
@@ -977,6 +1017,7 @@ pub fn take_to_oxc_breakdown() -> ToOxcBreakdown {
         mapped_parsed_nodes,
         sp_mapped_parsed_nodes,
         arena_resets,
+        arena_samples,
         arena_capacity,
         alloc_reset,
         alloc_reset_calls,

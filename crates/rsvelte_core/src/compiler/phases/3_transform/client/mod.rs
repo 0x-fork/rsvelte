@@ -2491,7 +2491,7 @@ pub(crate) fn reset_codegen_arena() {
         let mut alloc = cell.borrow_mut();
         alloc.reset();
         super::profile::record_to_oxc_alloc_reset(super::profile::timer_elapsed(_reset));
-        super::profile::record_codegen_arena(alloc.capacity() as u64);
+        super::profile::record_codegen_arena_reset();
     });
 }
 
@@ -2499,7 +2499,15 @@ pub(crate) fn reset_codegen_arena() {
 /// reset. Takes `&` rather than `&mut` so that a second reset partway through a
 /// compile does not typecheck.
 pub(crate) fn with_codegen_arena<T>(f: impl FnOnce(&oxc_allocator::Allocator) -> T) -> T {
-    CLIENT_TO_OXC_ALLOCATOR.with(|cell| f(&cell.borrow()))
+    CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
+        let alloc = cell.borrow();
+        let out = f(&alloc);
+        // After `f`, and from here rather than from the reset: this is the one
+        // place every compile passes through whether or not it was reset, which
+        // is what makes a deleted reset visible instead of silent.
+        super::profile::record_codegen_arena_capacity(alloc.capacity() as u64);
+        out
+    })
 }
 
 static CLIENT_USE_OXC: LazyLock<bool> =

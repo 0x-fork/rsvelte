@@ -95,7 +95,24 @@ fn main() {
     let _ = profile::take_esrap_breakdown();
     let _ = profile::take_breakdown();
 
-    for source in &sources {
+    // Sampled after the first timed compile, so the arena gate can ask that the
+    // peak not move for the remaining N-1. The warm-up above has already brought
+    // a working arena to its steady state, so a reset that frees leaves this
+    // flat; a reset that is missing keeps growing through the loop.
+    //
+    // Two weaker forms were tried first and both passed the negative control:
+    // a fixed 64 MiB ceiling (cleared by 17 KB while the arena grew 64x), and
+    // peak(N/2) == peak(N) -- which fails because the growth *saturates*, so
+    // "grows with N" is not true even when the reset is gone.
+    //
+    // The fragility to name: one file far larger than the warm-up's range could
+    // legitimately grow the arena once and trip this. On flowbite it does not --
+    // the peak is flat at 1,048,512 B across all 1296, 26 KB max file included.
+    let mut arena_peak_first = 0;
+    for (index, source) in sources.iter().enumerate() {
+        if index == 1 {
+            arena_peak_first = profile::peek_codegen_arena_peak();
+        }
         let _ = compile_with_external_sourcemap_content(
             source,
             CompileOptions {
@@ -417,15 +434,30 @@ fn main() {
     // what was actually wrong was the denominator.
     let compiles = sources.len() as u64;
     println!(
-        "\narena: resets {} vs compiles {} -> {} ; capacity after last reset {} B -> {}",
+        "\narena: resets {} vs compiles {} -> {} ; peak capacity {} B after 1 compile -> {} B after {} over {} samples -> {}",
         inner.arena_resets,
         compiles,
         if inner.arena_resets == compiles { "ok" } else { "RESET COUNT OFF" },
+        arena_peak_first,
         inner.arena_capacity,
+        compiles,
+        inner.arena_samples,
         // A per-compile arena keeps a warm chunk; one that is never freed grows
-        // with the corpus. The bound is deliberately loose -- it is there to
-        // separate "constant" from "linear in N", not to pin a size.
-        if inner.arena_capacity < 64 * 1024 * 1024 { "ok" } else { "GROWING" }
+        // with the corpus. Comparing the peak at N/2 with the peak at N asks
+        // that directly, with no constant to choose -- the first version of this
+        // gate used a "deliberately loose" 64 MiB ceiling and the negative
+        // control cleared it by 17 KB while growing the arena 64x.
+        //
+        // The sample count is checked first. Without it, a run in which nothing
+        // ever sampled the arena reports a peak of 0 and passes -- which is what
+        // the first negative control for this gate actually produced.
+        if inner.arena_samples != compiles {
+            "NO EVIDENCE"
+        } else if inner.arena_capacity == arena_peak_first {
+            "ok"
+        } else {
+            "GROWING"
+        }
     );
     println!(
         "\ntwo-pass rate {:.1}% of conversions; bail rate {:.1}%",
