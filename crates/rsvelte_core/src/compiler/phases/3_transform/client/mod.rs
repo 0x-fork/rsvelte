@@ -6266,7 +6266,7 @@ fn transform_instance_script_for_visitors(
         // The gate is the identity the spans depend on, checked directly rather
         // than through a hash: the comparison stops at the first differing byte,
         // and it is the same test the retained-program fast path already makes
-        // for 0.023 µs a file.
+        // for 0.023 microseconds a file.
         let gated = retained_program
             .map(|retained| retained.source() == &script_rest[..])
             .unwrap_or(false);
@@ -6276,11 +6276,16 @@ fn transform_instance_script_for_visitors(
                 statement_spans::statement_line_groups(&script_rest, retained.program())
             })
             .unwrap_or_default();
+        let len_delta = retained_program
+            .map(|retained| retained.source().len().abs_diff(script_rest.len()))
+            .unwrap_or(0);
         super::profile::record_line_split(
+            retained_program.is_some(),
             gated,
             gated && ast_groups == scan_groups,
             scan_groups.len(),
             ast_groups.len(),
+            len_delta,
         );
     }
     let _stage = super::profile::timer_start();

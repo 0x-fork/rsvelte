@@ -468,6 +468,8 @@ thread_local! {
     static AT_CANDIDATE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static AT_PROBE_CTX: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static LS_STAGED: Cell<u64> = const { Cell::new(0) };
+    static LS_RETAINED: Cell<u64> = const { Cell::new(0) };
+    static LS_LEN_DELTA: Cell<u64> = const { Cell::new(0) };
     static LS_GATED: Cell<u64> = const { Cell::new(0) };
     static LS_MATCHED: Cell<u64> = const { Cell::new(0) };
     static LS_MISMATCHED: Cell<u64> = const { Cell::new(0) };
@@ -1509,6 +1511,10 @@ pub struct AstTransformsBreakdown {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct LineSplitAgreement {
     pub staged: u64,
+    /// Files that reached here with a retained program at all. Split from
+    /// `gated` because "no program" and "program describes different text" are
+    /// different failures and a single zero cannot tell them apart.
+    pub retained: u64,
     pub gated: u64,
     pub matched: u64,
     /// Files that passed the gate but produced a different group sequence, kept
@@ -1517,6 +1523,10 @@ pub struct LineSplitAgreement {
     pub mismatched: u64,
     pub groups_scan: u64,
     pub groups_ast: u64,
+    /// Summed absolute byte-length difference between the retained source and
+    /// the text the loop sees, over files with a retained program. Zero here
+    /// with `gated == 0` would mean the two differ only in content.
+    pub len_delta: u64,
 }
 
 pub fn line_split_dual_enabled() -> bool {
@@ -1525,11 +1535,22 @@ pub fn line_split_dual_enabled() -> bool {
 }
 
 #[inline]
-pub fn record_line_split(gated: bool, matched: bool, groups_scan: usize, groups_ast: usize) {
+pub fn record_line_split(
+    retained: bool,
+    gated: bool,
+    matched: bool,
+    groups_scan: usize,
+    groups_ast: usize,
+    len_delta: usize,
+) {
     if !timers_enabled() {
         return;
     }
     LS_STAGED.with(|c| c.set(c.get() + 1));
+    if retained {
+        LS_RETAINED.with(|c| c.set(c.get() + 1));
+        LS_LEN_DELTA.with(|c| c.set(c.get() + len_delta as u64));
+    }
     if !gated {
         return;
     }
@@ -1546,11 +1567,13 @@ pub fn record_line_split(gated: bool, matched: bool, groups_scan: usize, groups_
 pub fn take_line_split_agreement() -> LineSplitAgreement {
     LineSplitAgreement {
         staged: LS_STAGED.with(|c| c.replace(0)),
+        retained: LS_RETAINED.with(|c| c.replace(0)),
         gated: LS_GATED.with(|c| c.replace(0)),
         matched: LS_MATCHED.with(|c| c.replace(0)),
         mismatched: LS_MISMATCHED.with(|c| c.replace(0)),
         groups_scan: LS_GROUPS_SCAN.with(|c| c.replace(0)),
         groups_ast: LS_GROUPS_AST.with(|c| c.replace(0)),
+        len_delta: LS_LEN_DELTA.with(|c| c.replace(0)),
     }
 }
 

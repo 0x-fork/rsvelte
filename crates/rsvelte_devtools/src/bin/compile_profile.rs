@@ -350,15 +350,17 @@ fn main() {
             }
         };
         println!(
-            "    LINE-SPLIT staged {} | gated {} ({:.1}%) | matched {} ({:.1}% of gated) | mismatched {} | groups scan {} vs ast {}",
+            "    LINE-SPLIT staged {} | retained {} | gated {} ({:.1}%) | matched {} ({:.1}% of gated) | mismatched {} | groups scan {} vs ast {} | len_delta {}",
             ls.staged,
+            ls.retained,
             ls.gated,
             share(ls.gated, ls.staged),
             ls.matched,
             share(ls.matched, ls.gated),
             ls.mismatched,
             ls.groups_scan,
-            ls.groups_ast
+            ls.groups_ast,
+            ls.len_delta
         );
     }
     // Load-independent: the question a 15x ratio asks is how many times the
