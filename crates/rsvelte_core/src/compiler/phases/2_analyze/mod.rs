@@ -746,7 +746,12 @@ pub(crate) fn analyze_prepared_component_with_retained(
                     .contains(&"export_let_unused".to_string())
                 {
                     let name = binding.name.clone();
-                    analysis.warnings.push(warnings::export_let_unused(&name));
+                    let declaration = binding.declaration_start;
+                    let mut warning = warnings::export_let_unused(&name);
+                    // Upstream warns on `binding.node`, the declaration identifier.
+                    warning.start = declaration;
+                    warning.end = declaration.map(|start| start + name.len() as u32);
+                    analysis.warnings.push(warning);
                 }
             }
         }

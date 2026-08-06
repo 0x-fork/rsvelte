@@ -121,3 +121,44 @@ fn self_closing_void_and_svg_still_do_not_warn() {
         ws.iter().map(|w| &w.code).collect::<Vec<_>>()
     );
 }
+
+// ---- export_let_unused -----------------------------------------------------
+// Upstream: `2-analyze/index.js` -> `w.export_let_unused(binding.node, name)`,
+// where `binding.node` is the declaration identifier.
+
+const EXPORT_LET_UNUSED: &str = "export_let_unused";
+
+#[test]
+fn export_let_unused_points_at_the_declared_identifier() {
+    let src = "<script>\n\texport let unused;\n</script>\n\n<p>hi</p>\n";
+    let ws = warnings(src);
+    let (line, column, text) = at(src, &ws, EXPORT_LET_UNUSED, 0);
+    assert_eq!(line, 2, "expected the line holding the declaration");
+    assert!(
+        text.starts_with("unused;"),
+        "expected the identifier, not the statement, got {line}:{column} -> {text:?}"
+    );
+}
+
+/// Two unused props declared on one line must get distinct columns.
+#[test]
+fn export_let_unused_each_declaration_gets_its_own_position() {
+    let src = "<script>\n\texport let first, second;\n</script>\n\n<p>hi</p>\n";
+    let ws = warnings(src);
+    let cols: Vec<usize> = ws
+        .iter()
+        .filter(|w| w.code == EXPORT_LET_UNUSED)
+        .map(|w| {
+            w.start
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{EXPORT_LET_UNUSED}` has no start position"))
+                .column
+        })
+        .collect();
+    assert_eq!(cols.len(), 2, "expected one warning per declarator");
+    let line = src.lines().nth(1).unwrap();
+    let mut sorted = cols.clone();
+    sorted.sort_unstable();
+    assert!(line[sorted[0]..].starts_with("first,"));
+    assert!(line[sorted[1]..].starts_with("second;"));
+}
