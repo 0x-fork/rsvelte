@@ -77,6 +77,7 @@ const RATCHETS = [
 		key: 'validator-message-known-failures.json',
 		jsons: ['validator-message-known-failures.json'],
 	},
+	{ doc: 'mutation-known-failures.md', key: 'mutation-known-failures.json', jsons: ['mutation-known-failures.json'] },
 	{ doc: 'sourcemap-known-failures.md', key: 'sourcemap-known-failures.json', jsons: ['sourcemap-known-failures.json'] },
 	{ doc: 'sourcemap-oracle-excluded.md', key: 'sourcemap-oracle-excluded.json', jsons: ['sourcemap-oracle-excluded.json'] },
 	{ doc: 'css-prune-known-failures.md', key: 'css-prune-known-failures.json', jsons: ['css-prune-known-failures.json'] },
@@ -217,6 +218,23 @@ for (const family of ['binding-position', 'comment-slot']) {
 	const actual = matrixEntries.filter((id) => id.startsWith(`${family}/`)).length;
 	if (claimed !== actual) {
 		fail(`matrix-known-failures.md says ${claimed} entries for family "${family}", but the ratchet has ${actual}`);
+	}
+}
+
+// Mutation per-verdict split (mutate-corpus.mjs, #2281 Gate 3): the same
+// forget-to-update surface the matrix families have.
+const mutationMdPath = path.join(CORPUS, 'mutation-known-failures.md');
+if (fs.existsSync(mutationMdPath)) {
+	const mutationMd = fs.readFileSync(mutationMdPath, 'utf8');
+	const mutationEntries = JSON.parse(fs.readFileSync(path.join(CORPUS, 'mutation-known-failures.json'), 'utf8'));
+	for (const verdict of ['code-mismatch', 'unparseable', 'compiler-crash', 'error-mismatch']) {
+		const vm = mutationMd.match(new RegExp('\\| `' + escape(verdict) + '` \\| (\\d+) \\|'));
+		if (!vm) continue;
+		const claimed = Number(vm[1]);
+		const actual = mutationEntries.filter((id) => id.includes(`[${verdict}]`)).length;
+		if (claimed !== actual) {
+			fail(`mutation-known-failures.md says ${claimed} "${verdict}" entries, but the ratchet has ${actual}`);
+		}
 	}
 }
 
