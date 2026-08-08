@@ -151,6 +151,10 @@ fn main() {
         (all_calls.saturating_sub(materializations)) as f64 / all_calls.max(1) as f64 * 100.0,
         (all_ns.saturating_sub(to_value_ns)) as f64 / all_ns.max(1) as f64 * 100.0
     );
+    println!("\nto_value by call site (calls, objects, map entries):");
+    for (site, calls, objects, entries) in measure_json::sites() {
+        println!("  {calls:6}  {objects:8}  {entries:8}  {site}");
+    }
     println!("\nby caller (materializations, objects):");
     for (site, count, objects) in measure_json::callers() {
         println!(

@@ -4149,9 +4149,27 @@ impl JsNode {
         }
     }
 
+    #[cfg_attr(feature = "measure-json", track_caller)]
     pub fn to_value(&self) -> Value {
         #[cfg(feature = "measure-json")]
+        let caller = std::panic::Location::caller();
+        #[cfg(feature = "measure-json")]
         let _timing = crate::ast::js::measure_json::TimeToValue::new();
+        #[cfg(feature = "measure-json")]
+        {
+            let value = self.to_value_impl();
+            if _timing.is_top() {
+                let cached = caller.file().ends_with("ast/js.rs");
+                crate::ast::js::measure_json::record_to_value_site(caller, &value, cached);
+            }
+            return value;
+        }
+        #[cfg(not(feature = "measure-json"))]
+        self.to_value_impl()
+    }
+
+    #[inline]
+    fn to_value_impl(&self) -> Value {
         use crate::ast::arena::{has_serialize_arena, with_serialize_arena};
         if has_serialize_arena() {
             serde_json::to_value(self).unwrap_or(Value::Null)

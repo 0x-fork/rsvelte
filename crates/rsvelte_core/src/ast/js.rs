@@ -179,6 +179,54 @@ pub mod measure_json {
                 t0: top.then(std::time::Instant::now),
             }
         }
+
+        /// Whether this is the outermost `to_value` on the stack — nested
+        /// entries must not be counted as their own materialization.
+        pub fn is_top(&self) -> bool {
+            self.t0.is_some()
+        }
+    }
+
+    thread_local! {
+        static SITES: RefCell<HashMap<String, (u64, u64, u64)>> = RefCell::new(HashMap::new());
+    }
+
+    /// Attributes one top-level `to_value` to the site that asked for it.
+    /// Unlike the lazy cache, a direct `to_value` has no memo, so each call here
+    /// is unconditional work that converting that one site removes outright.
+    pub fn record_to_value_site(
+        caller: &'static std::panic::Location<'static>,
+        value: &serde_json::Value,
+        cached: bool,
+    ) {
+        let (mut nodes, mut entries, mut strings) = (0, 0, 0);
+        walk(value, &mut nodes, &mut entries, &mut strings);
+        SITES.with(|c| {
+            let key = format!(
+                "{} {}:{}",
+                if cached { "cache " } else { "direct" },
+                caller.file(),
+                caller.line()
+            );
+            let mut m = c.borrow_mut();
+            let e = m.entry(key).or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += nodes;
+            e.2 += entries;
+        });
+    }
+
+    /// `(site, calls, objects, map entries)` descending by calls.
+    pub fn sites() -> Vec<(String, u64, u64, u64)> {
+        SITES.with(|c| {
+            let mut v: Vec<_> = c
+                .borrow()
+                .iter()
+                .map(|(k, (n, o, e))| (k.clone(), *n, *o, *e))
+                .collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v
+        })
     }
 
     impl Default for TimeToValue {
@@ -222,6 +270,7 @@ pub mod measure_json {
         TO_VALUE_NS.with(|c| c.set(0));
         ALL_NS.with(|c| c.set(0));
         ALL_CALLS.with(|c| c.set(0));
+        SITES.with(|c| c.borrow_mut().clear());
     }
 }
 
