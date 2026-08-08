@@ -5,7 +5,18 @@
  * key), so adding a row to one axis never renumbers the others.
  */
 
-import { BINDINGS, POSITIONS, COMMENT_KINDS, COMMENT_SEEDS, COMMENT_MODULE_SEEDS } from './axes.mjs';
+import {
+	BINDINGS,
+	POSITIONS,
+	COMMENT_KINDS,
+	COMMENT_SEEDS,
+	COMMENT_MODULE_SEEDS,
+	INVALID_BIND_TARGETS,
+	VALID_BIND_TARGETS,
+	BIND_SLOTS,
+	BIND_PREAMBLE,
+	BIND_PREAMBLE_TS,
+} from './axes.mjs';
 import { commentMutants } from './mutate.mjs';
 
 function bindingPositionCases() {
@@ -45,9 +56,34 @@ function commentSlotCases() {
 	return cases;
 }
 
+function invalidBindCases() {
+	const cases = [];
+	for (const [targetName, expression] of Object.entries(INVALID_BIND_TARGETS)) {
+		for (const [slotName, markup] of Object.entries(BIND_SLOTS)) {
+			cases.push({
+				id: `invalid-bind/${targetName}__${slotName}.svelte`,
+				source: BIND_PREAMBLE + markup.replaceAll('%s', expression) + '\n',
+			});
+		}
+	}
+	for (const [targetName, target] of Object.entries(VALID_BIND_TARGETS)) {
+		for (const [slotName, markup] of Object.entries(BIND_SLOTS)) {
+			cases.push({
+				id: `invalid-bind/valid-${targetName}__${slotName}.svelte`,
+				source:
+					(target.ts ? BIND_PREAMBLE_TS : BIND_PREAMBLE) +
+					markup.replaceAll('%s', target.expr) +
+					'\n',
+			});
+		}
+	}
+	return cases;
+}
+
 export const FAMILIES = {
 	'binding-position': bindingPositionCases,
 	'comment-slot': commentSlotCases,
+	'invalid-bind': invalidBindCases,
 };
 
 export function generate(families = Object.keys(FAMILIES)) {
