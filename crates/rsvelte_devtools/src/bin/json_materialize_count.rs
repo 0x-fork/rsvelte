@@ -54,9 +54,11 @@ fn main() {
         .join("../..")
         .join("submodules/flowbite-svelte");
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let dev = args.iter().any(|a| a == "--dev");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--dev" => {}
             "--mode" => {
                 i += 1;
                 mode = match args[i].as_str() {
@@ -81,17 +83,33 @@ fn main() {
         root.display()
     );
 
+    // Warm up so lazily-built statics are not charged to the compile clock.
+    for (_, content) in files.iter().take(100) {
+        let _ = compile(
+            content,
+            CompileOptions {
+                generate: mode,
+                dev,
+                ..Default::default()
+            },
+        );
+    }
+
     measure_json::reset();
+    let t0 = std::time::Instant::now();
     for (_, content) in &files {
         let _ = compile(
             content,
             CompileOptions {
                 generate: mode,
+                dev,
                 ..Default::default()
             },
         );
     }
+    let compile_ns = t0.elapsed().as_nanos() as u64;
     let (materializations, objects, entries, strings) = measure_json::snapshot();
+    let to_value_ns = measure_json::to_value_ns();
 
     let n = files.len() as f64;
     println!("files: {}", files.len());
@@ -111,4 +129,33 @@ fn main() {
         "strings:          {strings} total, {:.1}/file  (keys + string values)",
         strings as f64 / n
     );
+    println!("\nget_literal_value root node types:");
+    for (kind, count) in measure_json::kinds() {
+        println!("  {count:7}  {kind}");
+    }
+    let (all_ns, all_calls) = measure_json::all_to_value();
+    println!(
+        "\nto_value via the lazy cache (1 of 54 sites): {:.1}ms of {:.1}ms compile  ({:.2}%)",
+        to_value_ns as f64 / 1e6,
+        compile_ns as f64 / 1e6,
+        to_value_ns as f64 / compile_ns as f64 * 100.0
+    );
+    println!(
+        "to_value, ALL 54 sites:                      {:.1}ms of {:.1}ms compile  ({:.2}%), {all_calls} calls",
+        all_ns as f64 / 1e6,
+        compile_ns as f64 / 1e6,
+        all_ns as f64 / compile_ns as f64 * 100.0
+    );
+    println!(
+        "  → direct (cache-bypassing) share of to_value: {:.1}% of calls, {:.1}% of time",
+        (all_calls.saturating_sub(materializations)) as f64 / all_calls.max(1) as f64 * 100.0,
+        (all_ns.saturating_sub(to_value_ns)) as f64 / all_ns.max(1) as f64 * 100.0
+    );
+    println!("\nby caller (materializations, objects):");
+    for (site, count, objects) in measure_json::callers() {
+        println!(
+            "  {count:7} {:5.1}%  {objects:9}  {site}",
+            count as f64 / materializations.max(1) as f64 * 100.0
+        );
+    }
 }

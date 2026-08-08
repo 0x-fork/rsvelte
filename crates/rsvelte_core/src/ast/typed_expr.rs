@@ -4150,6 +4150,8 @@ impl JsNode {
     }
 
     pub fn to_value(&self) -> Value {
+        #[cfg(feature = "measure-json")]
+        let _timing = crate::ast::js::measure_json::TimeToValue::new();
         use crate::ast::arena::{has_serialize_arena, with_serialize_arena};
         if has_serialize_arena() {
             serde_json::to_value(self).unwrap_or(Value::Null)

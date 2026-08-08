@@ -40,11 +40,16 @@ impl<'a> TypedExpr<'a> {
     /// Get JSON value, caching for subsequent calls.
     /// First call is expensive (serde serialization), subsequent calls are O(1).
     #[inline]
+    #[cfg_attr(feature = "measure-json", track_caller)]
     pub fn as_json(&self) -> &serde_json::Value {
+        #[cfg(feature = "measure-json")]
+        let caller = std::panic::Location::caller();
         self.json_cache.get_or_init(|| {
+            #[cfg(feature = "measure-json")]
+            let t0 = std::time::Instant::now();
             let value = Box::new(self.node.to_value());
             #[cfg(feature = "measure-json")]
-            measure_json::record(&value);
+            measure_json::record(&value, caller, t0.elapsed());
             value
         })
     }
@@ -62,13 +67,15 @@ impl<'a> TypedExpr<'a> {
 /// without a sampling profiler (and so without a quiet machine).
 #[cfg(feature = "measure-json")]
 pub mod measure_json {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
 
     thread_local! {
         static MATERIALIZATIONS: Cell<u64> = const { Cell::new(0) };
         static NODES: Cell<u64> = const { Cell::new(0) };
         static MAP_ENTRIES: Cell<u64> = const { Cell::new(0) };
         static STRINGS: Cell<u64> = const { Cell::new(0) };
+        static CALLERS: RefCell<HashMap<String, (u64, u64)>> = RefCell::new(HashMap::new());
     }
 
     fn walk(value: &serde_json::Value, nodes: &mut u64, entries: &mut u64, strings: &mut u64) {
@@ -92,13 +99,107 @@ pub mod measure_json {
         }
     }
 
-    pub(super) fn record(value: &serde_json::Value) {
+    pub(super) fn record(
+        value: &serde_json::Value,
+        caller: &'static std::panic::Location<'static>,
+        elapsed: std::time::Duration,
+    ) {
+        TO_VALUE_NS.with(|c| c.set(c.get() + elapsed.as_nanos() as u64));
         let (mut nodes, mut entries, mut strings) = (0, 0, 0);
         walk(value, &mut nodes, &mut entries, &mut strings);
         MATERIALIZATIONS.with(|c| c.set(c.get() + 1));
         NODES.with(|c| c.set(c.get() + nodes));
         MAP_ENTRIES.with(|c| c.set(c.get() + entries));
         STRINGS.with(|c| c.set(c.get() + strings));
+        CALLERS.with(|c| {
+            let key = format!("{}:{}", caller.file(), caller.line());
+            let mut m = c.borrow_mut();
+            let e = m.entry(key).or_insert((0u64, 0u64));
+            e.0 += 1;
+            e.1 += nodes;
+        });
+    }
+
+    thread_local! {
+        static KINDS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+        static TO_VALUE_NS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub fn record_kind(kind: &str) {
+        KINDS.with(|c| *c.borrow_mut().entry(kind.to_string()).or_insert(0) += 1);
+    }
+
+    pub fn kinds() -> Vec<(String, u64)> {
+        KINDS.with(|c| {
+            let mut v: Vec<_> = c.borrow().iter().map(|(k, n)| (k.clone(), *n)).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v
+        })
+    }
+
+    /// `(caller, materializations, objects)` since the last reset, descending.
+    pub fn callers() -> Vec<(String, u64, u64)> {
+        CALLERS.with(|c| {
+            let mut v: Vec<_> = c
+                .borrow()
+                .iter()
+                .map(|(k, (n, o))| (k.clone(), *n, *o))
+                .collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v
+        })
+    }
+
+    /// Nanoseconds spent inside `JsNode::to_value` since the last reset.
+    pub fn to_value_ns() -> u64 {
+        TO_VALUE_NS.with(|c| c.get())
+    }
+
+    thread_local! {
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
+        static ALL_NS: Cell<u64> = const { Cell::new(0) };
+        static ALL_CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Times **every** `JsNode::to_value` entry, not only the one the lazy JSON
+    /// cache makes — 53 of the 54 call sites bypass the cache, so a timer placed
+    /// at the cache measures a subset of the function without saying so.
+    pub struct TimeToValue {
+        t0: Option<std::time::Instant>,
+    }
+
+    impl TimeToValue {
+        pub fn new() -> Self {
+            let top = DEPTH.with(|d| {
+                let was = d.get();
+                d.set(was + 1);
+                was == 0
+            });
+            Self {
+                t0: top.then(std::time::Instant::now),
+            }
+        }
+    }
+
+    impl Default for TimeToValue {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for TimeToValue {
+        fn drop(&mut self) {
+            DEPTH.with(|d| d.set(d.get() - 1));
+            if let Some(t0) = self.t0 {
+                ALL_NS.with(|c| c.set(c.get() + t0.elapsed().as_nanos() as u64));
+                ALL_CALLS.with(|c| c.set(c.get() + 1));
+            }
+        }
+    }
+
+    /// `(nanoseconds, top-level calls)` over all 54 `to_value` sites.
+    pub fn all_to_value() -> (u64, u64) {
+        (ALL_NS.with(|c| c.get()), ALL_CALLS.with(|c| c.get()))
     }
 
     /// `(materializations, objects, map_entries, strings)` since the last reset.
@@ -116,6 +217,11 @@ pub mod measure_json {
         NODES.with(|c| c.set(0));
         MAP_ENTRIES.with(|c| c.set(0));
         STRINGS.with(|c| c.set(0));
+        CALLERS.with(|c| c.borrow_mut().clear());
+        KINDS.with(|c| c.borrow_mut().clear());
+        TO_VALUE_NS.with(|c| c.set(0));
+        ALL_NS.with(|c| c.set(0));
+        ALL_CALLS.with(|c| c.set(0));
     }
 }
 
@@ -238,6 +344,7 @@ impl<'a> Expression<'a> {
     }
 
     /// Get the underlying JSON value. Cached for Typed variant.
+    #[cfg_attr(feature = "measure-json", track_caller)]
     pub fn as_json(&self) -> &serde_json::Value {
         match self {
             Expression::Typed(te) => te.as_json(),

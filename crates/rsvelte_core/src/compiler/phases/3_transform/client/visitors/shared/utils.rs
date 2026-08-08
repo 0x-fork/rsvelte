@@ -3505,7 +3505,41 @@ pub(crate) fn get_literal_value(
     expr: &crate::ast::js::Expression,
     context: &ComponentContext,
 ) -> Option<Option<String>> {
+    #[cfg(feature = "measure-json")]
+    crate::ast::js::measure_json::record_kind(expr.node_type().unwrap_or("?"));
+    if std::env::var_os("RSVELTE_TYPED_CALL_PREFILTER").is_some()
+        && let Some(node) = expr.try_as_node_ref()
+        && crate::ast::arena::try_with_current_serialize_arena(|arena| {
+            call_callee_never_folds(node, arena)
+        }) == Some(true)
+    {
+        return None;
+    }
     get_literal_value_json(expr.as_json(), context)
+}
+
+/// Whether a root `CallExpression`'s callee already fixes the answer at `None`.
+///
+/// The evaluator folds a call only for a `Math.*`, `$state.raw`, `$state` or
+/// `$derived` callee, and the `has_call` bail above it can only answer `None`
+/// too — so for every other callee the JSON tree is built to reach a verdict the
+/// callee alone settles.
+fn call_callee_never_folds(
+    node: &crate::ast::typed_expr::JsNode,
+    arena: &crate::ast::arena::ParseArena,
+) -> bool {
+    use crate::ast::typed_expr::JsNode;
+    let JsNode::CallExpression { callee, .. } = node else {
+        return false;
+    };
+    match arena.get_js_node(*callee) {
+        JsNode::Identifier { name, .. } => !matches!(name.as_str(), "$state" | "$derived"),
+        JsNode::MemberExpression { object, .. } => !matches!(
+            arena.get_js_node(*object),
+            JsNode::Identifier { name, .. } if matches!(name.as_str(), "Math" | "$state")
+        ),
+        _ => true,
+    }
 }
 
 /// Constant-folding evaluator, working on the already-materialized JSON for the
