@@ -998,10 +998,35 @@ the compiler instrumentation. Two mechanisms sharing no assumption agreeing on a
 what distinguishes this row from a heuristic that merely found no matches — the regex is
 capable of returning a real zero, and did, on the one corpus where the compiler agrees.
 
-**What is *not* established here [U].** The share of *compile time* attributable to this path.
-Two instruments tried and neither produced a defensible number (`docs/phase3-ast-refactor-plan.md`
-§ Findings 2026-08-08). This row is about which population the gates sample, not about how much
-the difference is worth.
+**[D] The population difference is expensive — measured on a different path.** A sibling
+investigation timed `process_accumulated` (`3_transform/profile.rs:115` — the part of the Phase-3
+client line loop that transforms completed statements) across the same corpora:
+
+| corpus | `process_accumulated` share |
+|---|---|
+| carbon | 30.2% |
+| open-webui | 25.7% |
+| huly/plugins | 22.5% |
+| **applications, aggregate** | **22.8%** |
+| **SMUI (negative control)** | **2.1%** |
+
+SMUI sits with the runes libraries rather than with its fellow applications — a 10.9x split on
+the same axis this row is about, from an instrument unrelated to the object counters above. This
+is what establishes that sampling the library end is *costly*, not merely unrepresentative.
+
+Two caveats, so the number is not over-read. `process_accumulated` spans **both** the rune and
+the legacy `$:` statement transforms (`compile_profile.rs:276` takes its residual against
+`st.runes` and `st.reactive_stmt`), so the SMUI/application split is *consistent with* the
+legacy branch dominating it but does not prove the whole 22.8% is legacy. And it is a **Phase-3
+script-text** path, not the Phase-2 JSON serialization the object counts above measure — the two
+are adjacent consequences of the same source population, not the same work.
+
+**What is *not* established here [U].** (a) The share of compile time attributable to the
+Phase-2 legacy `$:` path specifically: two instruments tried and neither produced a defensible
+number (`docs/phase3-ast-refactor-plan.md` § Findings 2026-08-08). (b) The legacy-vs-runes
+decomposition of the 22.8% above, which `st.reactive_stmt` could settle directly. (c) Whether
+four repositories represent application Svelte generally — the densities are 33-88%, so the
+*direction* is not in doubt, but the aggregate is four samples.
 
 ---
 
