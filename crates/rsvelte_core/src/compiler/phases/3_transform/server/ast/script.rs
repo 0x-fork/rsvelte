@@ -156,7 +156,7 @@ pub(super) fn rune_callee_name<'a>(init: &OxcExpression<'a>) -> Option<&'a str> 
 /// `/* $$async_hole */` marker in the text-based server `transform_script.rs`).
 ///
 /// We emit a bare identifier-reference expression statement (`$$async_hole;`)
-/// because it round-trips losslessly through the esrap printer — a string
+/// because it round-trips losslessly through `oxc_codegen` — a string
 /// literal would be parsed as a directive prologue (dropped from `program.body`)
 /// and a bare comment marker would risk being stripped — and the printed text
 /// carries the marker that `transform_async_body` matches on. The placeholder
@@ -316,6 +316,7 @@ fn register_comment_region(
     all: &[Comment],
     prev_end: u32,
     region_end: u32,
+    reattach: Option<(u32, u32)>,
 ) -> Option<u32> {
     if region_end <= prev_end {
         return None;
@@ -327,6 +328,10 @@ fn register_comment_region(
         .map(|c| {
             let mut c = *c;
             c.span = Span::new(c.span.start - prev_end, c.span.end - prev_end);
+            let attached_to = reattach
+                .filter(|(from, _)| c.attached_to == *from)
+                .map_or(c.attached_to, |(_, to)| to);
+            c.attached_to = attached_to.checked_sub(prev_end).unwrap_or(c.span.end);
             c
         })
         .collect();
@@ -386,6 +391,7 @@ fn place_on_region(
     prev_end: u32,
     stmt: Span,
     verbatim: Option<Span>,
+    reattach: Option<(u32, u32)>,
 ) -> Option<comments::Place> {
     let trailing_end = trailing_comment_end(src, all, stmt.end);
     let region_end = if verbatim.is_some() || trailing_end > stmt.end {
@@ -393,7 +399,7 @@ fn place_on_region(
     } else {
         stmt.start
     };
-    let base = register_comment_region(registry, src, all, prev_end, region_end)?;
+    let base = register_comment_region(registry, src, all, prev_end, region_end, reattach)?;
     Some(match verbatim {
         Some(v) => comments::Place::Shift(base + reparse_origin(src, v.start, v.end) - prev_end),
         None => comments::Place::At(base + stmt.start - prev_end),
@@ -704,8 +710,8 @@ fn transform_script<'a>(
                         //
                         // `$effect` / `$effect.pre` / `$effect.root` / `$inspect.trace`
                         // are removed by the `ExpressionStatement` visitor itself
-                        // returning `b.empty` — a *bare* `EmptyStatement` that esrap
-                        // elides (prints nothing), so those keep being dropped.
+                        // returning `b.empty` — a *bare* `EmptyStatement` that the
+                        // codegen wrapper elides, so those keep being dropped.
                         if inspect_kind(&es.expression).is_some() {
                             out.push(state.b.empty_kept(es.span.start));
                             out.push(state.b.empty_kept(es.span.start + 1));
@@ -765,6 +771,7 @@ fn transform_script<'a>(
             region_start,
             stmt_span,
             verbatim,
+            None,
         ) {
             if into_sink {
                 if let Some(sink) = import_sink.as_deref_mut()
@@ -3084,6 +3091,12 @@ fn transform_script_legacy<'a>(
             region_start,
             stmt_span,
             verbatim,
+            match stmt {
+                Statement::LabeledStatement(ls) if is_instance && ls.label.name.as_str() == "$" => {
+                    Some((ls.span.start, ls.body.span().start))
+                }
+                _ => None,
+            },
         ) {
             if into_sink {
                 if let Some(sink) = import_sink.as_deref_mut()
@@ -3822,10 +3835,7 @@ pub fn transform_instance<'a>(
     // only sync instance statements falls through unchanged. `use_async` is
     // false for every ordinary component, so this never touches sync output.
     if state.eval_inputs.use_async && !body.is_empty() {
-        use crate::compiler::phases::phase3_transform::profile;
-        let _t = profile::timer_start();
         let body_text = state.b.program(body_clone(state, &body)).pipe_print();
-        let print_elapsed = profile::timer_elapsed(_t);
         if let Some(result) =
             crate::compiler::phases::phase3_transform::shared::async_body::transform_async_body_dev(
                 body_text.trim(),
@@ -3833,14 +3843,10 @@ pub fn transform_instance<'a>(
                 state.options.dev,
             )
         {
-            let _t = profile::timer_start();
             let reparsed = state.reparse_program(result.output.trim());
-            profile::record_esrap_pipe(print_elapsed, profile::timer_elapsed(_t));
             if !reparsed.is_empty() {
                 return reparsed;
             }
-        } else {
-            profile::record_esrap_pipe(print_elapsed, std::time::Duration::ZERO);
         }
     }
 
@@ -3852,7 +3858,7 @@ pub fn transform_instance<'a>(
     // async-flagged-but-await-free component.
     //
     //   * `$$async_hole`  ($effect-family)  → `b.empty()` (a bare `EmptyStatement`,
-    //     elided by esrap → prints nothing — matches upstream's `ExpressionStatement`
+    //     elided by the codegen wrapper → prints nothing — matches upstream's `ExpressionStatement`
     //     visitor returning `b.empty`).
     //   * `$$inspect_hole` ($inspect / $inspect().with) → a `;;` pair, mirroring the
     //     sync-prelude path (upstream keeps the `ExpressionStatement`, its
@@ -3867,7 +3873,6 @@ pub fn transform_instance<'a>(
             rebuilt.push(state.b.empty_kept(start));
             rebuilt.push(state.b.empty_kept(start + 1));
         } else if is_async_hole_stmt(&stmt) {
-            rebuilt.push(state.b.empty());
         } else {
             rebuilt.push(stmt);
         }
@@ -3903,7 +3908,7 @@ fn is_async_hole_stmt(stmt: &Statement) -> bool {
     matches!(expr, Expression::Identifier(id) if id.name == "$$async_hole")
 }
 
-/// Print a slice of oxc statements to JS source text via the esrap printer
+/// Print a slice of oxc statements to JS source text via `oxc_codegen`
 /// (used to round-trip the lowered instance body through the text-based
 /// `transform_async_body`). Consumes a freshly-cloned copy so the original
 /// statements stay usable.
@@ -3912,7 +3917,7 @@ trait PipePrint {
 }
 impl<'a> PipePrint for oxc_ast::ast::Program<'a> {
     fn pipe_print(self) -> String {
-        rsvelte_esrap::print(&self, "")
+        crate::compiler::phases::phase3_transform::oxc_codegen::print(&self)
     }
 }
 

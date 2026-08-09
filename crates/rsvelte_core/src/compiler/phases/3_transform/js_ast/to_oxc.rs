@@ -1,11 +1,8 @@
 //! Convert the internal `js_ast` IR (`JsProgram`) into an oxc
-//! [`oxc_ast::ast::Program`] so it can be printed by [`rsvelte_esrap`].
+//! [`oxc_ast::ast::Program`] so it can be printed by [`oxc_codegen`].
 //!
 //! This is the foundation of the "Phase-3 Step 1+3 direct-AST" pipeline: a
-//! prior experiment proved that printing the handwritten codegen output and
-//! esrap-printing the same logical AST are byte-identical, so a faithful
-//! converter feeding `rsvelte_esrap::print` reproduces the existing output
-//! exactly.
+//! a faithful converter feeds the established logical AST to `oxc_codegen`.
 //!
 //! # Partial coverage is always safe
 //!
@@ -34,15 +31,14 @@
 //!
 //! Re-parsing **fails loudly when the text does not parse** (`chunk-parse`) and
 //! **can differ silently when it does**: [`Self::restore_legacy_pre_effect_deps`]
-//! and [`Self::restore_single_target_destructure_sequences`] exist precisely
-//! because a round-trip that parses can still print differently from the text it
-//! came from.
+//! exists precisely because a round-trip that parses can still print differently
+//! from the text it came from.
 //!
 //! # Comments and the unified coordinate space
 //!
-//! Synthesized nodes use the dummy [`oxc_span::SPAN`]: esrap formats
-//! structurally, so their spans do not affect output. Comments are the one
-//! exception — esrap places them *positionally*, and a program reassembled from
+//! Synthesized nodes use the dummy [`oxc_span::SPAN`], so their spans do not
+//! affect comment-free output. Comments are the one exception — the printer
+//! places them *positionally*, and a program reassembled from
 //! independently-parsed `Raw` chunks has no shared coordinate space to place
 //! them in.
 //!
@@ -51,8 +47,8 @@
 //! monotonically increasing region of a unified buffer above `loc_base`;
 //! container nodes get the span of the region their children consumed. Spans
 //! below `loc_base` — synthesized nodes, and the original-source spans stamped
-//! by `Spanned`/`RawMapped` — read as "no location" to the printer, mirroring
-//! esrap's `if (node.loc)` guards.
+//! by `Spanned`/`RawMapped` — read as "no original-source location" by the
+//! source-map adapter.
 
 use super::arena::{ExprId, JsArena};
 use super::nodes::*;
@@ -75,6 +71,7 @@ pub struct Converted<'a> {
     pub comment_source: Option<String>,
     pub loc_base: u32,
     pub loc_map: Vec<(u32, u32, Option<u32>)>,
+    pub source_extent: u32,
 }
 
 thread_local! {
@@ -98,7 +95,7 @@ pub fn take_fallback_reason() -> &'static str {
 ///
 /// Returns `None` if any node in the program is not handled by this converter
 /// (see the module docs). The returned program borrows `allocator`, so the
-/// allocator must outlive the program (and any `rsvelte_esrap::print` of it).
+/// allocator must outlive the program (and any `oxc_codegen` printing of it).
 ///
 /// Runs as a probe pass followed, only when a chunk turned out to carry
 /// comments, by a second pass that knows where to put the comment coordinate
@@ -165,6 +162,7 @@ fn convert_once<'a>(
         comment_source: synth.enabled.then(|| synth.source.clone()),
         loc_base: synth.loc_base,
         loc_map: synth.loc_map.clone(),
+        source_extent: synth.max_span,
     };
     Some((converted, synth))
 }
@@ -178,49 +176,6 @@ impl<'a> VisitMut<'a> for ShiftSpans {
     fn visit_span(&mut self, span: &mut Span) {
         span.start += self.0;
         span.end += self.0;
-    }
-}
-
-/// Rebuilds any `SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER(expr)` call — however
-/// deeply nested — into a one-element `SequenceExpression`. See the marker's doc
-/// comment and [`Cx::restore_single_target_destructure_sequences`].
-struct SingleTargetSequenceRebuilder<'a, 'x> {
-    ab: &'x AstBuilder<'a>,
-}
-
-impl<'a, 'x> VisitMut<'a> for SingleTargetSequenceRebuilder<'a, 'x> {
-    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        oxc_ast_visit::walk_mut::walk_expression(self, expr);
-
-        let is_marker_call = matches!(
-            expr,
-            Expression::CallExpression(call)
-                if call.arguments.len() == 1
-                    && !call.arguments[0].is_spread()
-                    && matches!(
-                        &call.callee,
-                        Expression::Identifier(id)
-                            if id.name == SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER
-                    )
-        );
-        if !is_marker_call {
-            return;
-        }
-
-        expr.replace_with(|e| {
-            let Expression::CallExpression(mut call) = e else {
-                unreachable!()
-            };
-            let arg = call.arguments.pop().unwrap();
-            // `is_spread()` was checked above, so this conversion cannot fail.
-            let inner =
-                Expression::try_from(arg).unwrap_or_else(|()| unreachable!("checked above"));
-            Expression::SequenceExpression(SequenceExpression::boxed(
-                SPAN,
-                ArenaVec::from_value_in(inner, self.ab),
-                self.ab,
-            ))
-        });
     }
 }
 
@@ -281,25 +236,6 @@ impl Synth {
     }
 }
 
-/// Marker callee wrapping a single-target destructuring-assignment collapse
-/// (`({ a } = obj)` → `a = obj.a`) so the "this must reprint as a
-/// `SequenceExpression`" decision survives the raw-text reparse. Upstream's
-/// `visit_assignment_expression` (`shared/assignments.js`) always lowers a
-/// destructuring assignment through `b.sequence(assignments)` — an ESTree
-/// `SequenceExpression` *unconditionally*, even for a single assignment — and
-/// esrap's `SequenceExpression` printer always self-parenthesizes, `(expr)`,
-/// regardless of element count. rsvelte's client transform generates this
-/// lowering as plain source text; a single-assignment collapse re-parses to a
-/// bare (non-sequence) expression, which every downstream printer correctly
-/// treats as redundantly parenthesized (matching upstream's behavior for any
-/// plain, user-written `(x = 1)`, where the parens really are dropped) and
-/// removes — silently losing upstream's parens for the destructuring case.
-/// Wrapping the single assignment in a call to this marker keeps the
-/// "force sequence" decision attached to the generated text itself;
-/// [`Cx::restore_single_target_destructure_sequences`] finds the marker call
-/// after reparse and rebuilds the real single-element `SequenceExpression`.
-pub(crate) const SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER: &str = "__rsvelte_seq1";
-
 /// Conversion context: holds the oxc [`AstBuilder`] and the IR arena used to
 /// resolve [`ExprId`] handles.
 struct Cx<'a, 'arena> {
@@ -345,8 +281,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         self.synth.borrow_mut().note_span(end);
     }
 
-    /// Attach the region the chunk just parsed occupies to its original-source
-    /// offset (for source maps). Returns the region, if any.
+    /// Attach the region the chunk just parsed to its original-source offset.
     fn take_chunk_region(&self, source_offset: Option<u32>) -> Option<(u32, u32)> {
         let mut synth = self.synth.borrow_mut();
         let region = synth.pending_region.take()?;
@@ -1201,7 +1136,6 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     fn parse_raw_statements(&self, code: &str) -> Option<Vec<Statement<'a>>> {
         let mut stmts = self.parse_chunk(code.trim())?;
         self.restore_legacy_pre_effect_deps(&mut stmts);
-        self.restore_single_target_destructure_sequences(&mut stmts);
         Some(stmts)
     }
 
@@ -1247,19 +1181,6 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                     &self.ab,
                 ))
             });
-        }
-    }
-
-    /// See [`SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER`]. Unlike
-    /// [`Cx::restore_legacy_pre_effect_deps`] (which only ever sits at the top
-    /// of its own dedicated chunk), a destructuring-assignment collapse can be
-    /// nested arbitrarily deep (inside a function body, a block, another
-    /// expression, …), so this walks the whole chunk rather than just its
-    /// top-level statements.
-    fn restore_single_target_destructure_sequences(&self, stmts: &mut [Statement<'a>]) {
-        let mut rebuilder = SingleTargetSequenceRebuilder { ab: &self.ab };
-        for stmt in stmts {
-            rebuilder.visit_statement(stmt);
         }
     }
 
@@ -1323,6 +1244,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 comment.span.start += shift;
                 comment.span.end += shift;
                 comment.attached_to += shift;
+                comment.content = CommentContent::CoverageIgnoreFile;
                 comment
             }));
         synth.pending_region = Some((base, base + text.len() as u32));
@@ -1348,7 +1270,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 let mut stmts = self.parse_raw_statements(code)?;
                 if self.take_chunk_region(Some(*source_offset)).is_some() {
                     // The chunk's own spans are its comment anchors; the source
-                    // offset is carried by the region's `loc_map` entry instead.
+                    // The chunk's source offset is carried by `loc_map`.
                     return Some(stmts);
                 }
                 // Stamp each statement with the original-source offset so esrap's

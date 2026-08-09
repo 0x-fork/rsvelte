@@ -7,14 +7,14 @@
 //! a provisional address range. Once the program is assembled, only the ranges the
 //! walk actually reaches are laid out — in encounter order — into a synthetic
 //! buffer, every span is remapped onto it, and the surviving comments go to
-//! [`rsvelte_esrap::print_split`].
+//! [`oxc_codegen::Codegen`].
 //!
 //! A region whose statement the transform dropped is never reached, so its
 //! comments are dropped with it instead of being flushed inside an unrelated
 //! node.
 
 use oxc_allocator::{Allocator, Vec as ArenaVec};
-use oxc_ast::ast::{Comment, Program, Statement};
+use oxc_ast::ast::{Comment, CommentContent, CommentPosition, Program, Statement};
 use oxc_ast_visit::{VisitMut, walk_mut};
 use oxc_span::{GetSpan, Span};
 
@@ -183,7 +183,7 @@ pub fn print_with_comments<'a>(
     allocator: &'a Allocator,
 ) -> String {
     if registry.is_empty() {
-        return rsvelte_esrap::print(program, "");
+        return crate::compiler::phases::phase3_transform::oxc_codegen::print(program);
     }
 
     let bases: Vec<(u32, u32)> = registry
@@ -224,7 +224,7 @@ pub fn print_with_comments<'a>(
         comments.extend(chunk.comments.iter().map(|c| {
             let mut c = *c;
             c.span = Span::new(c.span.start + base, c.span.end + base);
-            c.attached_to = c.span.end;
+            c.attached_to += base;
             c
         }));
     }
@@ -235,20 +235,21 @@ pub fn print_with_comments<'a>(
     };
     remap.visit_program(program);
 
+    for comment in &mut comments {
+        comment.content = CommentContent::CoverageIgnoreFile;
+        if comment.position == CommentPosition::Trailing {
+            comment.position = CommentPosition::Leading;
+            comment.attached_to = comment.span.end;
+        }
+    }
+
     if comments.is_empty() {
-        return rsvelte_esrap::print(program, "");
+        return crate::compiler::phases::phase3_transform::oxc_codegen::print(program);
     }
     comments.sort_by_key(|c| c.span.start);
     super::comment_stats::bump::EMITTED_COMMENTS(comments.len() as u64);
     program.comments = ArenaVec::from_iter_in(comments, &allocator);
+    program.source_text = allocator.alloc_str(&buf);
 
-    rsvelte_esrap::print_split(
-        program,
-        &buf,
-        PAD.len() as u32,
-        None,
-        &[],
-        &rsvelte_esrap::PrintOptions::default(),
-    )
-    .code
+    crate::compiler::phases::phase3_transform::oxc_codegen::print(program)
 }

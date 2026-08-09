@@ -38,7 +38,6 @@ use super::rune_transforms::{process_derived_destructuring_pattern, wrap_state_v
 use super::{DERIVED_TMP_COUNTER, SCRIPT_ARRAY_COUNTER, STATE_TMP_COUNTER, VAR_STATE_VARS};
 use crate::compiler::phases::phase2_analyze::ComponentAnalysis;
 use crate::compiler::phases::phase2_analyze::types::ScriptProjection;
-use crate::compiler::phases::phase3_transform::js_ast::to_oxc::SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER;
 use crate::compiler::phases::phase3_transform::shared::template::escape_js_string;
 
 thread_local! {
@@ -259,8 +258,6 @@ struct StateVarCollector<'a, 's> {
     in_shorthand_property: bool,
     /// Subtrees carrying a `svelte-ignore await_reactivity_loss`.
     await_ignore_ranges: super::await_reactivity_loss_ast::AwaitIgnoreRanges,
-    /// Comment runs the `await` wrap has to carry inside the call.
-    await_comment_runs: super::await_reactivity_loss_ast::AwaitCommentRuns,
     /// Starts of `await` expressions that are a whole statement relying on ASI.
     /// Statement start → end of the statement a `;` has to separate it from.
     await_separators: FxHashMap<u32, u32>,
@@ -393,7 +390,6 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             scoped_vars: vec![FxHashSet::default()],
             in_shorthand_property: false,
             await_ignore_ranges: Default::default(),
-            await_comment_runs: Default::default(),
             await_separators: FxHashMap::default(),
             prop_source_vars: prop_source_set,
             non_bindable_prop_vars: non_bindable_set,
@@ -2056,17 +2052,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
                     wrap(arg_text.trim())
                 ),
             ),
-            // A statement whose own start is the `await` is exactly the shape
-            // that keeps its leading comments outside, so the two never mix.
-            None => match self
-                .await_comment_runs
-                .relocatable_run(self.source, expr.span.start)
-            {
-                Some((run_start, comments)) => {
-                    (run_start, wrap(&format!("{comments}{}", arg_text.trim())))
-                }
-                None => (expr.span.start, wrap(arg_text.trim())),
-            },
+            None => (expr.span.start, wrap(arg_text.trim())),
         };
         self.add_replacement(start, expr.span.end, replacement);
         true
@@ -2115,8 +2101,6 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             self.source,
             self.is_runes,
         );
-        self.await_comment_runs =
-            super::await_reactivity_loss_ast::AwaitCommentRuns::collect(program);
     }
 
     /// Walk every argument of a `CallExpression` so inner state-var refs
@@ -3700,17 +3684,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
 
         if is_simple_ident {
             if assignments.len() == 1 {
-                // Upstream always lowers through `b.sequence(assignments)` — a real
-                // `SequenceExpression`, unconditionally, even with one element — and
-                // esrap always self-parenthesizes a `SequenceExpression`. The marker
-                // call keeps that "must be a sequence" decision alive across the
-                // eventual raw-text reparse. See
-                // `SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER`.
-                Some(format!(
-                    "{}({})",
-                    SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER,
-                    assignments.into_iter().next().unwrap()
-                ))
+                Some(assignments.into_iter().next().unwrap())
             } else {
                 Some(format!("({})", assignments.join(", ")))
             }
@@ -3797,13 +3771,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
 
         if inserts.is_empty() && is_simple_ident {
             return Some(if assignments.len() == 1 {
-                // See the sequence-marker comment on the shorthand helper above —
-                // the same "always a real SequenceExpression" rule applies here.
-                format!(
-                    "{}({})",
-                    SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER,
-                    assignments.into_iter().next().unwrap()
-                )
+                assignments.into_iter().next().unwrap()
             } else {
                 format!("({})", assignments.join(", "))
             });

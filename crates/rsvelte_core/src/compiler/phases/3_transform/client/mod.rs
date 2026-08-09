@@ -97,7 +97,7 @@ use regex::Regex;
 use super::TransformError;
 use super::js_ast::{
     builders::{self as b},
-    codegen::{CodegenResult, SourceMapping, generate, generate_with_sourcemap},
+    codegen::{CodegenResult, generate, generate_with_sourcemap},
     nodes::{
         JsBlockStatement, JsExportDefault, JsExportDefaultDeclaration, JsExpr,
         JsFunctionDeclaration, JsImportDeclaration, JsImportSpecifier, JsObjectMember, JsPattern,
@@ -388,24 +388,11 @@ pub(crate) fn print_module_program(
     let arena = super::js_ast::arena::JsArena::new();
     let alloc = oxc_allocator::Allocator::default();
     if let Some(code) =
-        super::js_ast::to_oxc::program_to_oxc(&program, &arena, &alloc).map(|converted| {
-            let print_opts = rsvelte_esrap::PrintOptions::default()
-                .with_empty_statements(true)
-                .with_unlocated_program(true);
-            match &converted.comment_source {
-                Some(cs) => {
-                    rsvelte_esrap::print_split(
-                        &converted.program,
-                        cs,
-                        converted.loc_base,
-                        None,
-                        &converted.loc_map,
-                        &print_opts,
-                    )
-                    .code
-                }
-                None => rsvelte_esrap::print_with(&converted.program, "", &print_opts),
+        super::js_ast::to_oxc::program_to_oxc(&program, &arena, &alloc).map(|mut converted| {
+            if let Some(source) = &converted.comment_source {
+                converted.program.source_text = alloc.alloc_str(source);
             }
+            super::oxc_codegen::print(&converted.program)
         })
     {
         return Ok(format!("{header}\n{code}"));
@@ -2355,53 +2342,39 @@ fn transform_client_with_visitors(
     let _codegen_start = super::profile::timer_start();
 
     // Scriptless components use the faster handwritten printer. Scripts need
-    // OXC/esrap for official formatting and coordinate-aware comment placement.
+    // OXC AST codegen for formatting and coordinate-aware comment placement.
     if *CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some() {
         let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
             let mut alloc = cell.borrow_mut();
             alloc.reset();
             super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
-                |converted| {
-                    // Keep `;` empty statements: the parsed-`Raw` `;;` are real
-                    // EmptyStatement nodes the official compiler output preserves.
-                    let print_opts =
-                        rsvelte_esrap::PrintOptions::default().with_empty_statements(true);
-                    let oxc_prog = &converted.program;
-                    match &converted.comment_source {
-                        // The program carries comments, so it prints in the
-                        // unified comment coordinate space `to_oxc` built.
-                        Some(comment_source) => {
-                            let map_source = options.enable_sourcemap.then_some(source);
-                            let _t = super::profile::timer_start();
-                            let pm = rsvelte_esrap::print_split(
-                                oxc_prog,
-                                comment_source,
-                                converted.loc_base,
-                                map_source,
-                                &converted.loc_map,
-                                &print_opts,
-                            );
-                            super::profile::record_esrap_client_split(
-                                super::profile::timer_elapsed(_t),
-                            );
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
+                |mut converted| {
+                    if options.enable_sourcemap {
+                        let printed =
+                            if let Some(comment_source) = &converted.comment_source {
+                                converted.program.source_text = alloc.alloc_str(comment_source);
+                                super::oxc_codegen::print_split_with_map(
+                                    &converted.program,
+                                    source,
+                                    converted.loc_base,
+                                    &converted.loc_map,
+                                )
+                            } else {
+                                let mut map_source = source.to_owned();
+                                if map_source.len() < converted.source_extent as usize {
+                                    map_source.push_str(&" ".repeat(
+                                        converted.source_extent as usize - map_source.len(),
+                                    ));
+                                }
+                                converted.program.source_text = alloc.alloc_str(&map_source);
+                                super::oxc_codegen::print_with_map(&converted.program, source)
+                            };
+                        (printed.code, printed.mappings)
+                    } else {
+                        if let Some(comment_source) = &converted.comment_source {
+                            converted.program.source_text = alloc.alloc_str(comment_source);
                         }
-                        None if options.enable_sourcemap => {
-                            let _t = super::profile::timer_start();
-                            let pm = rsvelte_esrap::print_with_map(oxc_prog, source, &print_opts);
-                            super::profile::record_esrap_client_map(super::profile::timer_elapsed(
-                                _t,
-                            ));
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
-                        }
-                        None => {
-                            let _t = super::profile::timer_start();
-                            let code = rsvelte_esrap::print_with(oxc_prog, "", &print_opts);
-                            super::profile::record_esrap_client_plain(
-                                super::profile::timer_elapsed(_t),
-                            );
-                            (code, Vec::new())
-                        }
+                        (super::oxc_codegen::print(&converted.program), Vec::new())
                     }
                 },
             )
@@ -2434,24 +2407,6 @@ fn transform_client_with_visitors(
             mappings: vec![],
         })
     }
-}
-
-/// Convert esrap's flat, generated-order mapping list into the
-/// [`SourceMapping`] list the downstream VLQ encoder (`encode_vlq_mappings`)
-/// consumes.
-fn esrap_mappings_to_source_mappings(mappings: &[rsvelte_esrap::Mapping]) -> Vec<SourceMapping> {
-    mappings
-        .iter()
-        .map(|m| SourceMapping {
-            gen_line: m.gen_line,
-            gen_col: m.gen_column,
-            // esrap only ever maps a single source.
-            source: 0,
-            orig_line: m.source_line,
-            orig_col: m.source_column,
-            name: None,
-        })
-        .collect()
 }
 
 // Thread-local OXC allocator for the client `to_oxc` direct-AST print path.

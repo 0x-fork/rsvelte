@@ -2379,9 +2379,12 @@ name = "rsvelte_ast_equiv"
 version = "0.0.0"
 dependencies = [
  "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
  "oxc_codegen",
  "oxc_parser",
  "oxc_span",
+ "oxc_syntax",
 ]
 
 [[package]]
@@ -2465,7 +2468,6 @@ dependencies = [
  "rayon",
  "regex",
  "rsvelte_ast_equiv",
- "rsvelte_esrap",
  "rustc-hash",
  "self_cell",
  "serde",
@@ -2497,7 +2499,6 @@ dependencies = [
  "regex",
  "rsvelte_ast_equiv",
  "rsvelte_core",
- "rsvelte_esrap",
  "rsvelte_projection",
  "rustc-hash",
  "serde",
@@ -2513,20 +2514,6 @@ name = "rsvelte_diagnostics"
 version = "0.1.0"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "rsvelte_esrap"
-version = "0.10.4"
-dependencies = [
- "compact_str 0.10.0",
- "memchr",
- "oxc_allocator",
- "oxc_ast",
- "oxc_ast_visit",
- "oxc_parser",
- "oxc_span",
- "oxc_syntax",
 ]
 
 [[package]]

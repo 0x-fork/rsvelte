@@ -47,7 +47,7 @@ pub fn transform_server(
     options: &CompileOptions,
 ) -> Result<String, TransformError> {
     // Pure-AST SSR pipeline (`server/ast/`): builds a real oxc AST and prints it
-    // once with `rsvelte_esrap` — zero text post-processing. This replaced the
+    // once with `oxc_codegen` — zero text post-processing. This replaced the
     // legacy text `ServerCodeGenerator` (deleted) after reaching byte-parity
     // across the curated runtime / `compiler_fixtures` / `ssr` suites and a net
     // corpus improvement. An internal assembly failure surfaces as an error
