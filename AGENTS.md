@@ -198,10 +198,13 @@ corpus could never have found them — the same lesson as the warning gate, one 
 
 A **generated**, not collected, differential corpus (`pnpm run corpus:matrix`, #2281 Gate 2),
 ratcheted through `compatibility/matrix-known-failures.json` with per-cluster justification in
-the paired `.md`. Five declarative axis families in `matrix/axes.mjs` — binding kind × syntactic
+the paired `.md`. Ten declarative axis families in `matrix/axes.mjs` — binding kind × syntactic
 position, comment kind × insertion slot, invalid `bind:` target × directive slot,
-string-literal escape × template expression slot, and `await`/`yield` in a formal parameter list
-× function form × entry point — expanded into ~5,250 comparisons that run in **~10 s** and need
+string-literal escape × template expression slot, `await`/`yield` in a formal parameter list
+× function form × entry point, `{#each}` collection expression × item use, the token a `/`
+follows × host, a name's slot in a binding pattern × statement context, directive kind ×
+element kind × mode, and `bind:` setter shape × element kind — expanded into ~8,900 comparisons
+at **~20 s of CPU** and need
 only `submodules/svelte` plus the NAPI binding, so it gates every PR.
 
 The `bind:` and `param-default` families are the odd ones out and the reason is worth stating:
@@ -243,6 +246,28 @@ while every bug in the #2253/#2254/#2255/#2256 batch was an **interaction**: #22
 — saturated — when all four were reported. Adding real-world repos cannot fix that; only
 generating the product can. **Corpus size is no longer the axis worth growing.** The two that are:
 what we compare (warning parity above) and how inputs are constructed (this).
+
+The `directive-element` family is the first whose motivating defect the gate's **comparison**
+could not express. Which parents a per-directive rule applies to is one `parent_type` test
+upstream and one arm per element visitor in rsvelte, so the rule drifts wherever the product is
+unenumerated — #2497 is `event_directive_deprecated` on `RegularElement` but not on
+`SvelteElement`. That is a **warning**, and `run.mjs` read `js.code` only; a warning that never
+fires has no output to diverge on. So the family landed with warning-**code** comparison, and the
+pairing is measurable rather than rhetorical: over the 4,134 accepted (case, target) pairs of the
+five older families, **both compilers emit zero warnings** — the comparison alone would have run
+on an empty population, and the population alone would have been scored on the wrong field.
+Positions stay with the collected gate, where they ratchet separately for the #2314 reason.
+Each diverging code is its own ratchet entry (`warning-missing:<code>`), because the key is
+`(id, verdict, target)`: under a flat `warning-mismatch` verdict, re-breaking #2521 left this
+gate green — the cases were already listed for a *different* missing warning. **A ratchet entry
+suppresses everything its key cannot tell apart**, so put the class in the key.
+`bind-setter` needs no new comparison — #2484's dev-mode `$.assign` divergence is in the output —
+only the element axis, because that defect was reported against `<svelte:component>` (which
+matched) and the live sites are `<svelte:body>` and `<svelte:self>`.
+
+Neither family has a skip list. A cell official rejects is compared as an error **code**, so an
+illegal combination is a comparison rather than a hole; declining to generate it would report
+coverage the family does not have.
 
 Normalization is deliberately identical to `verify.mjs`, so a divergence this gate reports is one
 the corpus gate would also report. `--update-baseline` refuses to run under `--no-fmt` or a
