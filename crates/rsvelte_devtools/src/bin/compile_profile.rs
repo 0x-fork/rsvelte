@@ -147,6 +147,7 @@ fn main() {
     let _ = profile::take_breakdown();
     let _ = profile::take_script_text_breakdown();
     let _ = profile::take_pa_breakdown();
+    let _ = profile::take_tf_breakdown();
     // A raw count rather than a share, so warmup cannot skew a percentage here
     // -- but it would leave the oracle's check count covering a population no
     // other number in the report covers, which is the same hazard one field over.
@@ -204,6 +205,7 @@ fn main() {
     let transform_breakdown = totals;
     let script_text_breakdown = profile::take_script_text_breakdown();
     let pa = profile::take_pa_breakdown();
+    let tf = profile::take_tf_breakdown();
     let sp = profile::take_state_pipeline_counters();
 
     let total = parse_time + analyze_time + transform_time;
@@ -533,6 +535,42 @@ fn main() {
         ms(template_fragment),
         pct(template_fragment)
     );
+    if tf.calls.iter().sum::<u64>() > 0 {
+        let mut rows: Vec<(usize, std::time::Duration, u64)> = profile::TF_KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, tf.time[i], tf.calls[i]))
+            .filter(|(_, t, c)| *c > 0 || !t.is_zero())
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+        let split: std::time::Duration = tf.time.iter().sum();
+        for (i, t, calls) in &rows {
+            println!(
+                "      {:<18}{:7.2}ms ({:5.1}%) calls={}",
+                profile::TF_KINDS[*i],
+                ms(*t),
+                pct(*t),
+                calls
+            );
+        }
+        let pairs: u64 = tf.calls.iter().sum();
+        let per_pair = calibrate_tf_overhead();
+        println!(
+            "      {:<18}{} pairs x {:.1}ns = {:.3}ms ({:.1}% of parent), charged to the visited node's PARENT row",
+            "TF-OVERHEAD",
+            pairs,
+            per_pair,
+            pairs as f64 * per_pair / 1e6,
+            (pairs as f64 * per_pair / 1e6) / ms(template_fragment) * 100.0
+        );
+        println!(
+            "      {:<18}{:7.2}ms ({:5.1}%)  <- Sigma self-time / parent {:.1}%",
+            "= split",
+            ms(split),
+            pct(split),
+            split.as_secs_f64() / template_fragment.as_secs_f64() * 100.0
+        );
+    }
     println!(
         "  Assembly (post-frag):{:7.2}ms ({:5.1}%)",
         ms(assembly_after),
@@ -777,6 +815,17 @@ fn report_scaling(rows: &[ScalingRow], label: &str, predictor: fn(&ScalingRow) -
 /// next to it.
 /// Cost of one instrumented stage boundary, measured in this process so a
 /// loaded machine moves the bound and the rows it applies to together.
+fn calibrate_tf_overhead() -> f64 {
+    let n = 200_000u64;
+    let t = Instant::now();
+    for _ in 0..n {
+        let _g = profile::tf_guard(0);
+    }
+    let per = t.elapsed().as_nanos() as f64 / n as f64;
+    let _ = profile::take_tf_breakdown();
+    per
+}
+
 fn calibrate_pa_overhead() -> f64 {
     let n = 200_000u64;
     let t = Instant::now();
@@ -787,6 +836,7 @@ fn calibrate_pa_overhead() -> f64 {
     let per = t.elapsed().as_nanos() as f64 / n as f64;
     // Discard the calibration's own counts.
     let _ = profile::take_pa_breakdown();
+    let _ = profile::take_tf_breakdown();
     per
 }
 

@@ -58,6 +58,11 @@ measure-pa-split = []
 # its share of `compile()` can be measured. Off by default; the build counts are
 # unconditional, only the `Instant` pair is gated.
 measure-semantic-build = []
+# Repository-local instrumentation: charge self time per template node kind
+# inside the client fragment visitor. The visitor recurses, so the guard also
+# maintains a child-time accumulator; one `Instant` pair per visited node makes
+# it far too heavy to leave on. Off by default and zero-cost when off.
+measure-tf-split = []
 # Select the JavaScript entropy backend when the compiler is embedded in wasm.
 # Binding exports live in `rsvelte_lint_bindings`, not in this library.
 wasm-target = ["dep:getrandom", "getrandom/wasm_js"]
