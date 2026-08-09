@@ -1,11 +1,8 @@
 //! Convert the internal `js_ast` IR (`JsProgram`) into an oxc
-//! [`oxc_ast::ast::Program`] so it can be printed by [`rsvelte_esrap`].
+//! [`oxc_ast::ast::Program`] so it can be printed by [`oxc_codegen`].
 //!
 //! This is the foundation of the "Phase-3 Step 1+3 direct-AST" pipeline: a
-//! prior experiment proved that printing the handwritten codegen output and
-//! esrap-printing the same logical AST are byte-identical, so a faithful
-//! converter feeding `rsvelte_esrap::print` reproduces the existing output
-//! exactly.
+//! a faithful converter feeds the established logical AST to `oxc_codegen`.
 //!
 //! # Partial coverage is always safe
 //!
@@ -23,43 +20,42 @@
 //! route:
 //!
 //!   * `JsStatement::Raw` / `JsStatement::RawMapped` — source text that
-//!     `parse_raw_statements` re-parses into real oxc statements, with
-//!     `expand_stmt` flattening a multi-statement chunk inline at
+//!     [`Self::parse_raw_statements`] re-parses into real oxc statements, with
+//!     [`Self::expand_stmt`] flattening a multi-statement chunk inline at
 //!     statement-list sites. A whole module body emitted as one `Raw` converts.
 //!   * `JsExpr::Raw` — opaque expression text, re-parsed by
-//!     `parse_raw_expression`.
+//!     [`Self::parse_raw_expression`].
 //!   * `JsExpr::Spanned` — not raw text at all: a real inner expression carrying
 //!     the original-source byte span, converted normally and then stamped so
 //!     `print_with_map` maps it back to the user's source.
 //!
 //! Re-parsing **fails loudly when the text does not parse** (`chunk-parse`) and
-//! **can differ silently when it does**: `restore_legacy_pre_effect_deps`
-//! and `restore_single_target_destructure_sequences` exist precisely
-//! because a round-trip that parses can still print differently from the text it
-//! came from.
+//! **can differ silently when it does**: [`Self::restore_legacy_pre_effect_deps`]
+//! exists precisely because a round-trip that parses can still print differently
+//! from the text it came from.
 //!
 //! # Comments and the unified coordinate space
 //!
-//! Synthesized nodes use the dummy [`oxc_span::SPAN`]: esrap formats
-//! structurally, so their spans do not affect output. Comments are the one
-//! exception — esrap places them *positionally*, and a program reassembled from
+//! Synthesized nodes use the dummy [`oxc_span::SPAN`], so their spans do not
+//! affect comment-free output. Comments are the one exception — the printer
+//! places them *positionally*, and a program reassembled from
 //! independently-parsed `Raw` chunks has no shared coordinate space to place
 //! them in.
 //!
-//! `Synth` builds one. Each comment-bearing chunk is re-parsed from a
+//! [`Synth`] builds one. Each comment-bearing chunk is re-parsed from a
 //! `pad + chunk` buffer so its spans (and its comments') land in a private,
 //! monotonically increasing region of a unified buffer above `loc_base`;
 //! container nodes get the span of the region their children consumed. Spans
 //! below `loc_base` — synthesized nodes, and the original-source spans stamped
-//! by `Spanned`/`RawMapped` — read as "no location" to the printer, mirroring
-//! esrap's `if (node.loc)` guards.
+//! by `Spanned`/`RawMapped` — read as "no original-source location" by the
+//! source-map adapter.
 
 use super::arena::{ExprId, JsArena};
 use super::nodes::*;
 use oxc_allocator::{ArenaBox, ArenaVec, GetAllocator, ReplaceWith};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
-use oxc_ast_visit::{VisitMut, walk_mut};
+use oxc_ast_visit::VisitMut;
 use oxc_span::{GetSpanMut, SPAN, Span};
 use oxc_syntax::number::{BigintBase, NumberBase};
 use oxc_syntax::operator::{
@@ -75,6 +71,7 @@ pub struct Converted<'a> {
     pub comment_source: Option<String>,
     pub loc_base: u32,
     pub loc_map: Vec<(u32, u32, Option<u32>)>,
+    pub source_extent: u32,
 }
 
 thread_local! {
@@ -98,7 +95,7 @@ pub fn take_fallback_reason() -> &'static str {
 ///
 /// Returns `None` if any node in the program is not handled by this converter
 /// (see the module docs). The returned program borrows `allocator`, so the
-/// allocator must outlive the program (and any `rsvelte_esrap::print` of it).
+/// allocator must outlive the program (and any `oxc_codegen` printing of it).
 ///
 /// Runs as a probe pass followed, only when a chunk turned out to carry
 /// comments, by a second pass that knows where to put the comment coordinate
@@ -165,6 +162,7 @@ fn convert_once<'a>(
         comment_source: synth.enabled.then(|| synth.source.clone()),
         loc_base: synth.loc_base,
         loc_map: synth.loc_map.clone(),
+        source_extent: synth.max_span,
     };
     Some((converted, synth))
 }
@@ -178,96 +176,6 @@ impl<'a> VisitMut<'a> for ShiftSpans {
     fn visit_span(&mut self, span: &mut Span) {
         span.start += self.0;
         span.end += self.0;
-    }
-}
-
-/// The client transform rebuilds effect calls but retains their callback from
-/// the source AST. Keep that split when a raw chunk is reparsed: the callback
-/// remains located for comment placement while the generated call does not.
-struct GeneratedEffectCallUnlocator;
-
-struct SpanUnlocator;
-
-impl<'a> VisitMut<'a> for SpanUnlocator {
-    fn visit_span(&mut self, span: &mut Span) {
-        *span = SPAN;
-    }
-}
-
-impl<'a> VisitMut<'a> for GeneratedEffectCallUnlocator {
-    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        walk_mut::walk_expression(self, expr);
-        let Expression::CallExpression(call) = expr else {
-            return;
-        };
-        if is_dollar_call(&call.callee, "inspect") {
-            call.span = SPAN;
-            if let Some(Argument::ArrowFunctionExpression(first)) = call.arguments.first_mut() {
-                first.span = SPAN;
-                if let Some(Expression::ArrayExpression(array)) = first.get_expression_mut() {
-                    array.span = SPAN;
-                }
-            }
-            let mut unlocator = SpanUnlocator;
-            for arg in call.arguments.iter_mut().skip(1) {
-                unlocator.visit_argument(arg);
-            }
-        } else if is_dollar_call(&call.callee, "user_effect")
-            || is_dollar_call(&call.callee, "user_pre_effect")
-            || is_dollar_call(&call.callee, "effect_root")
-        {
-            call.span = SPAN;
-        }
-    }
-}
-
-fn erase_generated_effect_call_locs(stmts: &mut [Statement<'_>]) {
-    let mut unlocator = GeneratedEffectCallUnlocator;
-    for stmt in stmts {
-        unlocator.visit_statement(stmt);
-    }
-}
-
-/// Rebuilds any `SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER(expr)` call — however
-/// deeply nested — into a one-element `SequenceExpression`. See the marker's doc
-/// comment and [`Cx::restore_single_target_destructure_sequences`].
-struct SingleTargetSequenceRebuilder<'a, 'x> {
-    ab: &'x AstBuilder<'a>,
-}
-
-impl<'a, 'x> VisitMut<'a> for SingleTargetSequenceRebuilder<'a, 'x> {
-    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        oxc_ast_visit::walk_mut::walk_expression(self, expr);
-
-        let is_marker_call = matches!(
-            expr,
-            Expression::CallExpression(call)
-                if call.arguments.len() == 1
-                    && !call.arguments[0].is_spread()
-                    && matches!(
-                        &call.callee,
-                        Expression::Identifier(id)
-                            if id.name == SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER
-                    )
-        );
-        if !is_marker_call {
-            return;
-        }
-
-        expr.replace_with(|e| {
-            let Expression::CallExpression(mut call) = e else {
-                unreachable!()
-            };
-            let arg = call.arguments.pop().unwrap();
-            // `is_spread()` was checked above, so this conversion cannot fail.
-            let inner =
-                Expression::try_from(arg).unwrap_or_else(|()| unreachable!("checked above"));
-            Expression::SequenceExpression(SequenceExpression::boxed(
-                SPAN,
-                ArenaVec::from_value_in(inner, self.ab),
-                self.ab,
-            ))
-        });
     }
 }
 
@@ -290,7 +198,6 @@ struct Synth {
     /// can tell whether it sits after those comments in the *source* (which is
     /// the order upstream compares in) and not merely after them in the buffer.
     last_region_source: Option<u32>,
-    last_region_ends_with_removed_inspect_comment: bool,
     saw_comments: bool,
     /// Upper bound on every span produced outside a chunk region.
     max_span: u32,
@@ -314,7 +221,6 @@ impl Synth {
             loc_map: Vec::new(),
             pending_region: None,
             last_region_source: None,
-            last_region_ends_with_removed_inspect_comment: false,
             saw_comments: false,
             max_span: 0,
         }
@@ -329,25 +235,6 @@ impl Synth {
         self.max_span = self.max_span.max(end);
     }
 }
-
-/// Marker callee wrapping a single-target destructuring-assignment collapse
-/// (`({ a } = obj)` → `a = obj.a`) so the "this must reprint as a
-/// `SequenceExpression`" decision survives the raw-text reparse. Upstream's
-/// `visit_assignment_expression` (`shared/assignments.js`) always lowers a
-/// destructuring assignment through `b.sequence(assignments)` — an ESTree
-/// `SequenceExpression` *unconditionally*, even for a single assignment — and
-/// esrap's `SequenceExpression` printer always self-parenthesizes, `(expr)`,
-/// regardless of element count. rsvelte's client transform generates this
-/// lowering as plain source text; a single-assignment collapse re-parses to a
-/// bare (non-sequence) expression, which every downstream printer correctly
-/// treats as redundantly parenthesized (matching upstream's behavior for any
-/// plain, user-written `(x = 1)`, where the parens really are dropped) and
-/// removes — silently losing upstream's parens for the destructuring case.
-/// Wrapping the single assignment in a call to this marker keeps the
-/// "force sequence" decision attached to the generated text itself;
-/// [`Cx::restore_single_target_destructure_sequences`] finds the marker call
-/// after reparse and rebuilds the real single-element `SequenceExpression`.
-pub(crate) const SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER: &str = "__rsvelte_seq1";
 
 /// Conversion context: holds the oxc [`AstBuilder`] and the IR arena used to
 /// resolve [`ExprId`] handles.
@@ -394,8 +281,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         self.synth.borrow_mut().note_span(end);
     }
 
-    /// Attach the region the chunk just parsed occupies to its original-source
-    /// offset (for source maps). Returns the region, if any.
+    /// Attach the region the chunk just parsed to its original-source offset.
     fn take_chunk_region(&self, source_offset: Option<u32>) -> Option<(u32, u32)> {
         let mut synth = self.synth.borrow_mut();
         let region = synth.pending_region.take()?;
@@ -417,21 +303,6 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         };
         let synth = self.synth.borrow();
         if !synth.enabled || synth.last_region_source.is_none_or(|chunk| anchor <= chunk) {
-            return SPAN;
-        }
-        let at = synth.cursor();
-        Span::new(at, at)
-    }
-
-    fn trailing_comment_anchor(&self, source_offset: Option<u32>) -> Span {
-        let Some(anchor) = source_offset else {
-            return SPAN;
-        };
-        let synth = self.synth.borrow();
-        if !synth.enabled
-            || !synth.last_region_ends_with_removed_inspect_comment
-            || synth.last_region_source.is_none_or(|chunk| anchor <= chunk)
-        {
             return SPAN;
         }
         let at = synth.cursor();
@@ -532,20 +403,15 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 )))
             }
             JsStatement::Try(t) => self.try_statement(t),
-            // Raw statements at a SINGLE-statement site (if / while / for
+            // `Raw`/`RawMapped` at a SINGLE-statement site (if / while / for
             // body): parse the text; a lone statement is returned directly, a
             // multi-statement blob is wrapped in a block. (Statement-LIST sites
             // use `expand_stmt` instead, which flattens inline.)
-            JsStatement::Raw(code) => self.raw_single_statement(code, None, false),
-            JsStatement::RawEffect(code) => self.raw_single_statement(code, None, true),
+            JsStatement::Raw(code) => self.raw_single_statement(code, None),
             JsStatement::RawMapped {
                 code,
                 source_offset,
-            } => self.raw_single_statement(code, Some(*source_offset), false),
-            JsStatement::RawMappedEffect {
-                code,
-                source_offset,
-            } => self.raw_single_statement(code, Some(*source_offset), true),
+            } => self.raw_single_statement(code, Some(*source_offset)),
         }
     }
 
@@ -555,9 +421,8 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         &self,
         code: &str,
         source_offset: Option<u32>,
-        unlocate_effect_calls: bool,
     ) -> Option<Statement<'a>> {
-        let stmts = self.parse_raw_statements(code, unlocate_effect_calls)?;
+        let stmts = self.parse_raw_statements(code)?;
         let region = self.take_chunk_region(source_offset);
         if stmts.len() == 1 {
             stmts.into_iter().next()
@@ -910,11 +775,6 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         };
 
         let mut declarators = ArenaVec::with_capacity_in(decl.declarations.len(), &self.ab);
-        let declaration_span = self.trailing_comment_anchor(
-            decl.declarations
-                .first()
-                .and_then(|declarator| declarator.comment_anchor),
-        );
         for d in &decl.declarations {
             // Identifier or destructuring binding pattern; `binding_pattern`
             // bails on anything it cannot faithfully reproduce.
@@ -923,18 +783,19 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 Some(id) => Some(self.expr_id(id)?),
                 None => None,
             };
-            let span = if declaration_span == SPAN {
-                self.comment_anchor(d.comment_anchor)
-            } else {
-                SPAN
-            };
             declarators.push(VariableDeclarator::new(
-                span, binding, None, init, false, &self.ab,
+                self.comment_anchor(d.comment_anchor),
+                kind,
+                binding,
+                None,
+                init,
+                false,
+                &self.ab,
             ));
         }
 
         Some(VariableDeclaration::boxed(
-            declaration_span,
+            SPAN,
             kind,
             declarators,
             false,
@@ -1272,17 +1133,9 @@ impl<'a, 'arena> Cx<'a, 'arena> {
 
     /// Parse a raw JS statement source string into a vec of oxc [`Statement`]s
     /// (`Raw` may hold several statements). Returns `None` on a parse error.
-    fn parse_raw_statements(
-        &self,
-        code: &str,
-        unlocate_effect_calls: bool,
-    ) -> Option<Vec<Statement<'a>>> {
+    fn parse_raw_statements(&self, code: &str) -> Option<Vec<Statement<'a>>> {
         let mut stmts = self.parse_chunk(code.trim())?;
         self.restore_legacy_pre_effect_deps(&mut stmts);
-        self.restore_single_target_destructure_sequences(&mut stmts);
-        if unlocate_effect_calls {
-            erase_generated_effect_call_locs(&mut stmts);
-        }
         Some(stmts)
     }
 
@@ -1331,27 +1184,12 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         }
     }
 
-    /// See [`SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER`]. Unlike
-    /// [`Cx::restore_legacy_pre_effect_deps`] (which only ever sits at the top
-    /// of its own dedicated chunk), a destructuring-assignment collapse can be
-    /// nested arbitrarily deep (inside a function body, a block, another
-    /// expression, …), so this walks the whole chunk rather than just its
-    /// top-level statements.
-    fn restore_single_target_destructure_sequences(&self, stmts: &mut [Statement<'a>]) {
-        let mut rebuilder = SingleTargetSequenceRebuilder { ab: &self.ab };
-        for stmt in stmts {
-            rebuilder.visit_statement(stmt);
-        }
-    }
-
     /// Parse one opaque chunk of generated JS. A comment-free chunk parses in
     /// place, exactly as before. A comment-bearing chunk is re-parsed from a
     /// `pad + text` buffer so its spans land at the chunk's own region of the
     /// unified comment buffer, and its comments are collected there.
     fn parse_chunk(&self, text: &str) -> Option<Vec<Statement<'a>>> {
-        let removed_inspect = text.contains("/* $$inspect_removed$$ */");
-        let text = text.replace("/* $$inspect_removed$$ */", "");
-        let owned = self.ab.allocator().alloc_str(&text);
+        let owned = self.ab.allocator().alloc_str(text);
         let ret = oxc_parser::Parser::new(self.ab.allocator(), owned, oxc_span::SourceType::mjs())
             .parse();
         if !ret.diagnostics.is_empty() {
@@ -1382,7 +1220,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
         // it, which is quadratic in the generated code size.
         let mut padded = String::with_capacity(1 + text.len());
         padded.push('\n');
-        padded.push_str(&text);
+        padded.push_str(text);
         let owned = self.ab.allocator().alloc_str(&padded);
         let ret = oxc_parser::Parser::new(self.ab.allocator(), owned, oxc_span::SourceType::mjs())
             .parse();
@@ -1397,7 +1235,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
             shifter.visit_statement(stmt);
         }
         let mut synth = self.synth.borrow_mut();
-        synth.source.push_str(&text);
+        synth.source.push_str(text);
         synth.source.push('\n');
         synth
             .comments
@@ -1406,15 +1244,10 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 comment.span.start += shift;
                 comment.span.end += shift;
                 comment.attached_to += shift;
+                comment.content = CommentContent::CoverageIgnoreFile;
                 comment
             }));
         synth.pending_region = Some((base, base + text.len() as u32));
-        synth.last_region_ends_with_removed_inspect_comment = removed_inspect
-            && ret
-                .program
-                .comments
-                .last()
-                .is_some_and(|comment| text[comment.span.end as usize - 1..].trim().is_empty());
         drop(synth);
         Some(stmts)
     }
@@ -1426,12 +1259,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     fn expand_stmt(&self, stmt: &JsStatement) -> Option<Vec<Statement<'a>>> {
         match stmt {
             JsStatement::Raw(code) => {
-                let stmts = self.parse_raw_statements(code, false)?;
-                self.take_chunk_region(None);
-                Some(stmts)
-            }
-            JsStatement::RawEffect(code) => {
-                let stmts = self.parse_raw_statements(code, true)?;
+                let stmts = self.parse_raw_statements(code)?;
                 self.take_chunk_region(None);
                 Some(stmts)
             }
@@ -1439,31 +1267,16 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 code,
                 source_offset,
             } => {
-                let mut stmts = self.parse_raw_statements(code, false)?;
+                let mut stmts = self.parse_raw_statements(code)?;
                 if self.take_chunk_region(Some(*source_offset)).is_some() {
                     // The chunk's own spans are its comment anchors; the source
-                    // offset is carried by the region's `loc_map` entry instead.
+                    // The chunk's source offset is carried by `loc_map`.
                     return Some(stmts);
                 }
                 // Stamp each statement with the original-source offset so esrap's
                 // `print_with_map` maps the (transformed) instance-script lines
                 // back to the user source — mirroring the text codegen's
                 // per-block `source_offset` line mapping.
-                let sp = Span::new(*source_offset, *source_offset);
-                for s in &mut stmts {
-                    *s.span_mut() = sp;
-                }
-                self.note_span(*source_offset);
-                Some(stmts)
-            }
-            JsStatement::RawMappedEffect {
-                code,
-                source_offset,
-            } => {
-                let mut stmts = self.parse_raw_statements(code, true)?;
-                if self.take_chunk_region(Some(*source_offset)).is_some() {
-                    return Some(stmts);
-                }
                 let sp = Span::new(*source_offset, *source_offset);
                 for s in &mut stmts {
                     *s.span_mut() = sp;
@@ -1567,10 +1380,8 @@ impl<'a, 'arena> Cx<'a, 'arena> {
             ArenaVec::new_in(&self.ab),
             id,
             None,
-            super_class.map(|expression| ClassHeritage {
-                expression,
-                type_arguments: None,
-            }),
+            super_class,
+            None,
             ArenaVec::new_in(&self.ab),
             body,
             false,

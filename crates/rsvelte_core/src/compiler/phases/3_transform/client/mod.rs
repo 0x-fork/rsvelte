@@ -26,7 +26,6 @@ mod inspect_rune_ast;
 mod instance_dev_tail_ast;
 mod legacy_state_member_mutate_ast;
 mod local_assign_ast;
-mod module_derived_ast;
 mod module_dev_tail_ast;
 mod module_state_runes_ast;
 mod private_class_assign_ast;
@@ -82,7 +81,6 @@ use store_transforms::*;
 
 // Explicit re-exports for functions used outside the client module.
 pub(crate) use class_transforms::transform_class_fields_client;
-use class_transforms::transform_module_class_fields_client;
 pub(crate) use expression_utils::find_matching_paren;
 pub(crate) use formatting::normalize_js_with_oxc;
 
@@ -99,7 +97,7 @@ use regex::Regex;
 use super::TransformError;
 use super::js_ast::{
     builders::{self as b},
-    codegen::{CodegenResult, SourceMapping, generate, generate_with_sourcemap},
+    codegen::{CodegenResult, generate, generate_with_sourcemap},
     nodes::{
         JsBlockStatement, JsExportDefault, JsExportDefaultDeclaration, JsExpr,
         JsFunctionDeclaration, JsImportDeclaration, JsImportSpecifier, JsObjectMember, JsPattern,
@@ -313,7 +311,7 @@ pub fn transform_client_module(
     }
 
     // Transform the module source (rune replacements, class fields, etc.)
-    let class_transformed = transform_module_class_fields_client(source);
+    let class_transformed = transform_class_fields_client(source);
 
     // Transform destructured assignments whose LHS contains state variables into
     // IIFE / sequence form (mirrors upstream `visit_assignment_expression` in
@@ -358,8 +356,6 @@ pub fn transform_client_module(
         )
     };
 
-    let has_effect_rune =
-        class_transformed.contains("$effect") || class_transformed.contains("$inspect");
     let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
 
     // The transformed source includes everything (imports + body).
@@ -379,11 +375,7 @@ pub fn transform_client_module(
     {
         let rest_trimmed = script_rest.trim();
         if !rest_trimmed.is_empty() {
-            body.push(if has_effect_rune {
-                JsStatement::RawEffect(rest_trimmed.into())
-            } else {
-                JsStatement::Raw(rest_trimmed.into())
-            });
+            body.push(JsStatement::Raw(rest_trimmed.into()));
         }
     }
 
@@ -404,30 +396,17 @@ pub(crate) fn print_module_program(
     let arena = super::js_ast::arena::JsArena::new();
     let alloc = oxc_allocator::Allocator::default();
     if let Some(code) =
-        super::js_ast::to_oxc::program_to_oxc(&program, &arena, &alloc).map(|converted| {
-            let print_opts = rsvelte_esrap::PrintOptions::default()
-                .with_empty_statements(true)
-                .with_unlocated_program(true);
-            match &converted.comment_source {
-                Some(cs) => {
-                    rsvelte_esrap::print_split(
-                        &converted.program,
-                        cs,
-                        converted.loc_base,
-                        None,
-                        &converted.loc_map,
-                        &print_opts,
-                    )
-                    .code
-                }
-                None => rsvelte_esrap::print_with(&converted.program, "", &print_opts),
+        super::js_ast::to_oxc::program_to_oxc(&program, &arena, &alloc).map(|mut converted| {
+            if let Some(source) = &converted.comment_source {
+                converted.program.source_text = alloc.alloc_str(source);
             }
+            super::oxc_codegen::print(&converted.program)
         })
     {
-        return Ok(format!("{header}\n{}", rehome_derived_jsdoc(&code)));
+        return Ok(format!("{header}\n{code}"));
     }
     generate(&program, &arena)
-        .map(|code| format!("{header}\n{}", rehome_derived_jsdoc(&code)))
+        .map(|code| format!("{header}\n{code}"))
         .map_err(TransformError::CodeGen)
 }
 
@@ -437,10 +416,9 @@ pub(crate) fn transform_module_source_for_module(
     source: &str,
     analysis: &ComponentAnalysis,
     dev: bool,
-    server: bool,
 ) -> String {
-    let class_transformed = transform_module_class_fields_client(source);
-    transform_module_script_runes_with_target(&class_transformed, analysis, dev, server)
+    let class_transformed = transform_class_fields_client(source);
+    transform_module_script_runes(&class_transformed, analysis, dev)
 }
 
 /// Extract imports from a string, returning (imports, rest).
@@ -1219,7 +1197,6 @@ fn transform_client_with_visitors(
     // Reuse the pre_transformed_script from above (already has reactive_import_names).
     if let Some(ref content) = analysis.instance_script_content {
         let mut transformed_script = pre_transformed_script.take().unwrap_or_default();
-        let has_effect_rune = content.raw.contains("$effect") || content.raw.contains("$inspect");
 
         // Post-process reactive imports: replace $.get(X)/$.mutate(X,...) with $$_import_X()
         for name in &reactive_import_names {
@@ -1290,11 +1267,10 @@ fn transform_client_with_visitors(
                 ) {
                     let cleaned_output = strip_async_noop_placeholders(async_result.output.trim());
                     let normalized = normalize_js_with_oxc(cleaned_output.trim(), script_indent);
-                    component_body.push(script_raw_statement(
-                        normalized,
-                        script_source_offset,
-                        has_effect_rune,
-                    ));
+                    component_body.push(JsStatement::RawMapped {
+                        code: normalized.into(),
+                        source_offset: script_source_offset,
+                    });
                     // Store the blocker_map for use during template generation
                     if !async_result.blocker_map.is_empty() {
                         *context.state.blocker_map.borrow_mut() = async_result.blocker_map;
@@ -1304,11 +1280,10 @@ fn transform_client_with_visitors(
                     let cleaned = strip_async_noop_placeholders(trimmed);
                     if !cleaned.trim().is_empty() {
                         let normalized = normalize_js_with_oxc(cleaned.trim(), script_indent);
-                        component_body.push(script_raw_statement(
-                            normalized,
-                            script_source_offset,
-                            has_effect_rune,
-                        ));
+                        component_body.push(JsStatement::RawMapped {
+                            code: normalized.into(),
+                            source_offset: script_source_offset,
+                        });
                     }
                 }
             } else {
@@ -1321,11 +1296,10 @@ fn transform_client_with_visitors(
                     // the official Svelte compiler's esrap output (consistent spacing,
                     // semicolons, etc.)
                     let normalized = normalize_js_with_oxc(trimmed, script_indent);
-                    component_body.push(script_raw_statement(
-                        normalized,
-                        script_source_offset,
-                        has_effect_rune,
-                    ));
+                    component_body.push(JsStatement::RawMapped {
+                        code: normalized.into(),
+                        source_offset: script_source_offset,
+                    });
                 }
             }
         }
@@ -2058,9 +2032,7 @@ fn transform_client_with_visitors(
     // Transform class fields first (before rune transforms strip the rune names)
     // Then transform remaining rune calls ($state, $derived, etc.) in module-level script
     if let Some((non_imports, retained_comment_stripped)) = module_script_non_imports {
-        let class_transformed = transform_module_class_fields_client(&non_imports);
-        let has_effect_rune =
-            class_transformed.contains("$effect") || class_transformed.contains("$inspect");
+        let class_transformed = transform_class_fields_client(&non_imports);
         let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
         // Drop module-level comments esrap's no-`loc` top-level Program omits
         // (leading JSDoc before a kept `export const`, per-field JSDoc that
@@ -2071,11 +2043,7 @@ fn transform_client_with_visitors(
         } else {
             strip_module_toplevel_comments(&transformed)
         };
-        body.push(if has_effect_rune {
-            JsStatement::RawEffect(transformed.into())
-        } else {
-            JsStatement::Raw(transformed.into())
-        });
+        body.push(JsStatement::Raw(transformed.into()));
     }
 
     // Add hoisted statements (template declarations, etc.)
@@ -2388,63 +2356,46 @@ fn transform_client_with_visitors(
     let _codegen_start = super::profile::timer_start();
 
     // Scriptless components use the faster handwritten printer. Scripts need
-    // OXC/esrap for official formatting and coordinate-aware comment placement.
+    // OXC AST codegen for formatting and coordinate-aware comment placement.
     if *CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some() {
         let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
             let mut alloc = cell.borrow_mut();
             alloc.reset();
             super::js_ast::to_oxc::program_to_oxc(&program, &context.arena, &alloc).map(
-                |converted| {
-                    // Keep `;` empty statements: the parsed-`Raw` `;;` are real
-                    // EmptyStatement nodes the official compiler output preserves.
-                    let print_opts =
-                        rsvelte_esrap::PrintOptions::default().with_empty_statements(true);
-                    let oxc_prog = &converted.program;
-                    match &converted.comment_source {
-                        // The program carries comments, so it prints in the
-                        // unified comment coordinate space `to_oxc` built.
-                        Some(comment_source) => {
-                            let map_source = options.enable_sourcemap.then_some(source);
-                            let _t = super::profile::timer_start();
-                            let pm = rsvelte_esrap::print_split(
-                                oxc_prog,
-                                comment_source,
-                                converted.loc_base,
-                                map_source,
-                                &converted.loc_map,
-                                &print_opts,
-                            );
-                            super::profile::record_esrap_client_split(
-                                super::profile::timer_elapsed(_t),
-                            );
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
+                |mut converted| {
+                    if options.enable_sourcemap {
+                        let printed =
+                            if let Some(comment_source) = &converted.comment_source {
+                                converted.program.source_text = alloc.alloc_str(comment_source);
+                                super::oxc_codegen::print_split_with_map(
+                                    &converted.program,
+                                    source,
+                                    converted.loc_base,
+                                    &converted.loc_map,
+                                )
+                            } else {
+                                let mut map_source = source.to_owned();
+                                if map_source.len() < converted.source_extent as usize {
+                                    map_source.push_str(&" ".repeat(
+                                        converted.source_extent as usize - map_source.len(),
+                                    ));
+                                }
+                                converted.program.source_text = alloc.alloc_str(&map_source);
+                                super::oxc_codegen::print_with_map(&converted.program, source)
+                            };
+                        (printed.code, printed.mappings)
+                    } else {
+                        if let Some(comment_source) = &converted.comment_source {
+                            converted.program.source_text = alloc.alloc_str(comment_source);
                         }
-                        None if options.enable_sourcemap => {
-                            let _t = super::profile::timer_start();
-                            let pm = rsvelte_esrap::print_with_map(oxc_prog, source, &print_opts);
-                            super::profile::record_esrap_client_map(super::profile::timer_elapsed(
-                                _t,
-                            ));
-                            (pm.code, esrap_mappings_to_source_mappings(&pm.mappings))
-                        }
-                        None => {
-                            let _t = super::profile::timer_start();
-                            let code = rsvelte_esrap::print_with(oxc_prog, "", &print_opts);
-                            super::profile::record_esrap_client_plain(
-                                super::profile::timer_elapsed(_t),
-                            );
-                            (code, Vec::new())
-                        }
+                        (super::oxc_codegen::print(&converted.program), Vec::new())
                     }
                 },
             )
         });
         if let Some((code, mappings)) = converted {
             super::profile::record_codegen(super::profile::timer_elapsed(_codegen_start));
-            return Ok(CodegenResult {
-                code: rehome_derived_jsdoc(&code),
-                mappings,
-            });
+            return Ok(CodegenResult { code, mappings });
         } else if *CLIENT_TO_OXC_DEBUG {
             // Corpus workers share one stderr and a multi-part write interleaves,
             // gluing records together; emit the whole line in one call.
@@ -2466,102 +2417,10 @@ fn transform_client_with_visitors(
         let code = generate(&program, &context.arena).map_err(TransformError::CodeGen)?;
         super::profile::record_codegen(super::profile::timer_elapsed(_codegen_start));
         Ok(CodegenResult {
-            code: rehome_derived_jsdoc(&code),
+            code,
             mappings: vec![],
         })
     }
-}
-
-fn rehome_derived_jsdoc(code: &str) -> String {
-    let code = rehome_tag_derived_line_comments(code);
-    let mut result = String::with_capacity(code.len());
-    let mut rest = code.as_str();
-    const PREFIX: &str = "$.derived(() => /**";
-
-    while let Some(start) = rest.find(PREFIX) {
-        result.push_str(&rest[..start]);
-        let comment_start = start + "$.derived(() => ".len();
-        let Some(comment_end) = rest[comment_start + 3..].find("*/") else {
-            result.push_str(&rest[start..]);
-            return result;
-        };
-        let comment_end = comment_start + 3 + comment_end + 2;
-        let expression = rest[comment_end..].trim_start();
-        if expression.is_empty() {
-            result.push_str(&rest[start..]);
-            return result;
-        }
-        let line_start = rest[..start].rfind('\n').map_or(0, |index| index + 1);
-        let line = &rest[line_start..start];
-        let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
-        result.push_str("$.derived((");
-        result.push_str(&rest[comment_start..comment_end]);
-        result.push('\n');
-        result.push_str(indent);
-        result.push_str(") => ");
-        rest = expression;
-    }
-    result.push_str(rest);
-    result
-}
-
-fn rehome_tag_derived_line_comments(code: &str) -> String {
-    let mut result = String::with_capacity(code.len());
-    let mut rest = code;
-    const PREFIX: &str = "$.tag(\n";
-    const DERIVED: &str = "$.derived(() => ";
-
-    while let Some(start) = rest.find(PREFIX) {
-        let comment_start = start + PREFIX.len();
-        let indent_end = rest[comment_start..]
-            .find(|c: char| !matches!(c, ' ' | '\t'))
-            .map_or(rest.len(), |index| comment_start + index);
-        let indent = &rest[comment_start..indent_end];
-        let Some(comment_end_relative) = rest[indent_end..].find('\n') else {
-            result.push_str(&rest[..start + PREFIX.len()]);
-            rest = &rest[start + PREFIX.len()..];
-            continue;
-        };
-        let comment_end = indent_end + comment_end_relative;
-        let after_comment = comment_end + 1;
-
-        if !rest[indent_end..].starts_with("//")
-            || !rest[after_comment..].starts_with(indent)
-            || !rest[after_comment + indent.len()..].starts_with(DERIVED)
-        {
-            result.push_str(&rest[..start + PREFIX.len()]);
-            rest = &rest[start + PREFIX.len()..];
-            continue;
-        }
-
-        result.push_str(&rest[..indent_end]);
-        result.push_str("$.derived((");
-        result.push_str(&rest[indent_end..comment_end]);
-        result.push('\n');
-        result.push_str(indent);
-        result.push_str(") => ");
-        rest = &rest[after_comment + indent.len() + DERIVED.len()..];
-    }
-    result.push_str(rest);
-    result
-}
-
-/// Convert esrap's flat, generated-order mapping list into the
-/// [`SourceMapping`] list the downstream VLQ encoder (`encode_vlq_mappings`)
-/// consumes.
-fn esrap_mappings_to_source_mappings(mappings: &[rsvelte_esrap::Mapping]) -> Vec<SourceMapping> {
-    mappings
-        .iter()
-        .map(|m| SourceMapping {
-            gen_line: m.gen_line,
-            gen_col: m.gen_column,
-            // esrap only ever maps a single source.
-            source: 0,
-            orig_line: m.source_line,
-            orig_col: m.source_column,
-            name: None,
-        })
-        .collect()
 }
 
 // Thread-local OXC allocator for the client `to_oxc` direct-AST print path.
@@ -2720,9 +2579,7 @@ fn is_client_template_factory(arena: &super::js_ast::JsArena, stmt: &JsStatement
             .and_then(|d| d.init)
             .is_some_and(|id| callee_is_factory(arena, arena.get_expr(id))),
         JsStatement::Raw(s) => stmt_text_has_factory(s),
-        JsStatement::RawMapped { code, .. } | JsStatement::RawMappedEffect { code, .. } => {
-            stmt_text_has_factory(code)
-        }
+        JsStatement::RawMapped { code, .. } => stmt_text_has_factory(code),
         _ => false,
     }
 }
@@ -2745,24 +2602,8 @@ fn stmt_text_has_factory(s: &str) -> bool {
 fn is_export_default_stmt(stmt: &JsStatement) -> bool {
     match stmt {
         JsStatement::ExportDefault(_) => true,
-        JsStatement::Raw(s) | JsStatement::RawEffect(s) => {
-            s.trim_start().starts_with("export default ")
-        }
+        JsStatement::Raw(s) => s.trim_start().starts_with("export default "),
         _ => false,
-    }
-}
-
-fn script_raw_statement(code: String, source_offset: u32, has_effect_rune: bool) -> JsStatement {
-    if has_effect_rune {
-        JsStatement::RawMappedEffect {
-            code: code.into(),
-            source_offset,
-        }
-    } else {
-        JsStatement::RawMapped {
-            code: code.into(),
-            source_offset,
-        }
     }
 }
 
@@ -4021,15 +3862,6 @@ pub(crate) fn transform_module_script_runes(
     analysis: &ComponentAnalysis,
     dev: bool,
 ) -> String {
-    transform_module_script_runes_with_target(script, analysis, dev, false)
-}
-
-fn transform_module_script_runes_with_target(
-    script: &str,
-    analysis: &ComponentAnalysis,
-    dev: bool,
-    server: bool,
-) -> String {
     let mut result = script.to_string();
 
     // Strip TypeScript generic parameters from $state<...>() and $derived<...>() calls.
@@ -4043,25 +3875,11 @@ fn transform_module_script_runes_with_target(
     // CallExpressions and asks "is the callee `$state`/`$derived` with type
     // arguments?". Falls back to the original `result` when the source isn't
     // TS (generics aren't legal) or fails to parse.
-    let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
     {
+        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
         if let Some(rewritten) =
             strip_rune_generics_ast::strip_rune_generic_params_ast(&result, is_ts)
         {
-            result = rewritten;
-        }
-    }
-
-    // Instrument the source await before `$derived` lowering moves it into an
-    // async-derived thunk. The tail pass recognises the generated outer await.
-    if dev {
-        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
-        if let Some(rewritten) = module_dev_tail_ast::transform_module_awaits_ast(
-            &result,
-            is_ts,
-            analysis.runes,
-            Some(analysis),
-        ) {
             result = rewritten;
         }
     }
@@ -4217,18 +4035,11 @@ fn transform_module_script_runes_with_target(
 
     // Reactive module state vars = those that need $.get()/$.set()
     // (i.e. all module state vars except non-reactive ones)
-    let mut reactive_module_state_vars: Vec<String> = module_state_vars
+    let reactive_module_state_vars: Vec<String> = module_state_vars
         .iter()
         .filter(|v| !module_non_reactive_vars.contains(v))
         .cloned()
         .collect();
-    for binding in &analysis.root.bindings {
-        if matches!(binding.kind, BindingKind::Derived)
-            && !reactive_module_state_vars.contains(&binding.name)
-        {
-            reactive_module_state_vars.push(binding.name.clone());
-        }
-    }
 
     // Lower the module script's `$state*` runes in a single batched parse:
     //   * `$state.snapshot(x)` → `$.snapshot(x)`
@@ -4347,38 +4158,6 @@ fn transform_module_script_runes_with_target(
 
     // Transform $derived() to $.derived(() => expr) or $.async_derived() for async
     // Need to wrap state variable references inside the expression with $.get()
-    let module_async_derived_locations = dev.then(|| {
-        let script_content = analysis.module_script_content.as_ref();
-        let (script_start, original_script) = script_content.map_or((0, script), |content| {
-            (
-                content.start,
-                analysis
-                    .source
-                    .get(content.start as usize..content.end as usize)
-                    .unwrap_or(script),
-            )
-        });
-        async_derived_dev::collect(
-            &analysis.source,
-            script_start,
-            original_script,
-            analysis.filename.as_str(),
-            analysis.is_typescript,
-            analysis.runes,
-        )
-    });
-    if let Some(rewritten) = module_derived_ast::transform_module_derived_destructuring_ast(
-        &result,
-        is_ts,
-        &reactive_module_state_vars,
-        &module_non_reactive_vars,
-        &module_proxy_vars,
-        dev,
-        server,
-        module_async_derived_locations.as_ref(),
-    ) {
-        result = rewritten;
-    }
     while let Some(pos) = memmem::find(result.as_bytes(), b"$derived(") {
         if result[..pos].ends_with('$') {
             // Already transformed to $.derived() - skip
@@ -4410,33 +4189,21 @@ fn transform_module_script_runes_with_target(
                 let inner_expr = strip_top_level_await_from_expr(&saved_content);
                 let inner_has_nested_await = contains_direct_await_in_expression(&inner_expr);
 
-                let var_name = extract_var_name_before_rune(&result[..pos]);
-                let dev_tail = async_derived_dev::dev_args(
-                    module_async_derived_locations.as_ref(),
-                    &var_name,
-                    &var_name,
-                );
                 let new_derived = if inner_has_nested_await {
                     let is_object = saved_content.trim().starts_with('{');
                     if is_object {
-                        format!(
-                            "await $.async_derived(async () => ({}){})",
-                            saved_content, dev_tail
-                        )
+                        format!("await $.async_derived(async () => ({}))", saved_content)
                     } else {
-                        format!(
-                            "await $.async_derived(async () => {}{})",
-                            saved_content, dev_tail
-                        )
+                        format!("await $.async_derived(async () => {})", saved_content)
                     }
                 } else {
                     let inner_trimmed = inner_expr.trim();
                     let inner_is_object = inner_trimmed.starts_with('{');
                     if inner_is_object {
-                        format!("await $.async_derived(() => ({}){})", inner_expr, dev_tail)
+                        format!("await $.async_derived(() => ({}))", inner_expr)
                     } else {
                         let thunk_arg = unthunk_string(&inner_expr);
-                        format!("await $.async_derived({}{})", thunk_arg, dev_tail)
+                        format!("await $.async_derived({})", thunk_arg)
                     }
                 };
                 result = format!(
@@ -4479,14 +4246,6 @@ fn transform_module_script_runes_with_target(
             .filter(|(_, _, is_state)| !is_state) // is_state=false means $derived
             .map(|(name, _, _)| name.clone())
             .collect();
-        for binding in &analysis.root.bindings {
-            if binding.scope_index != analysis.root.instance_scope_index
-                && matches!(binding.kind, BindingKind::Derived)
-                && !derived_vars.contains(&binding.name)
-            {
-                derived_vars.push(binding.name.clone());
-            }
-        }
         // Also add $state.raw vars from bindings — they never use the proxy flag.
         for (name, &binding_idx) in &analysis.root.scope.declarations {
             if let Some(b) = analysis.root.bindings.get(binding_idx)
@@ -7617,16 +7376,24 @@ fn apply_local_state_transforms(func_body: &str, var_name: &str, is_state: bool)
     result = state_reads_ast::transform_state_reads_ast(&result, &[var_name.to_string()], &[])
         .unwrap_or(result);
 
-    // Updates must precede sets, so `x++` becomes `$.update(x)` rather than
-    // a set around an update target. The AST pass keeps tokens in literals and
-    // comments out of this rewrite.
-    if let Some(transformed) = reactive_update_ast::transform_reactive_update_ast(
-        &result,
-        &[],
-        &[var_name.to_string()],
-        &[],
-    ) {
-        result = transformed;
+    // Apply $.update() for `var++`, `var--`, `++var`, `--var` patterns
+    // These must be applied BEFORE $.set() transforms since `x++` should become `$.update(x)`
+    // not `$.set(x, $.get(x)++, true)`
+    let update_patterns = [
+        (format!("{}++", var_name), format!("$.update({})", var_name)),
+        (
+            format!("{}--", var_name),
+            format!("$.update({}, -1)", var_name),
+        ),
+        (format!("++{}", var_name), format!("$.update({})", var_name)),
+        (
+            format!("--{}", var_name),
+            format!("$.update({}, -1)", var_name),
+        ),
+    ];
+
+    for (from, to) in &update_patterns {
+        result = replace_standalone_pattern(&result, from, to);
     }
 
     // Apply $.set() for direct assignments (only for $state, not $derived)
@@ -7634,6 +7401,37 @@ fn apply_local_state_transforms(func_body: &str, var_name: &str, is_state: bool)
         result = apply_local_set_transforms(&result, var_name);
     }
 
+    result
+}
+
+/// Replace a pattern only when it appears as a standalone expression.
+fn replace_standalone_pattern(text: &str, from: &str, to: &str) -> String {
+    let mut result = String::new();
+    let mut search_from = 0;
+
+    while let Some(pos) = text[search_from..].find(from) {
+        let abs_pos = search_from + pos;
+        let before_ok = abs_pos == 0 || {
+            let b = text.as_bytes()[abs_pos - 1];
+            !b.is_ascii_alphanumeric() && b != b'_' && b != b'$' && b != b'.'
+        };
+        let after_pos = abs_pos + from.len();
+        let after_ok = after_pos >= text.len() || {
+            let b = text.as_bytes()[after_pos];
+            !b.is_ascii_alphanumeric() && b != b'_'
+        };
+
+        if before_ok && after_ok {
+            result.push_str(&text[search_from..abs_pos]);
+            result.push_str(to);
+            search_from = after_pos;
+        } else {
+            let next = crate::compiler::utils::next_char_boundary(text, abs_pos);
+            result.push_str(&text[search_from..next]);
+            search_from = next;
+        }
+    }
+    result.push_str(&text[search_from..]);
     result
 }
 
