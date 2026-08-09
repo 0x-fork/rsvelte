@@ -68,7 +68,10 @@ impl<'a> ComponentContext<'a> {
     }
 
     /// Index into `profile::TF_KINDS`. Kept next to `visit_node`'s match so the
-    /// two arms cannot drift apart silently.
+    /// two arms cannot drift apart silently. Gated with its only call site so
+    /// the default build does not run this match per visited node and then
+    /// discard the result.
+    #[cfg(feature = "measure-tf-split")]
     #[inline]
     fn tf_kind_index_of(node: &TemplateNode<'_>) -> usize {
         match node {
@@ -113,6 +116,7 @@ impl<'a> ComponentContext<'a> {
         node: &TemplateNode<'_>,
         _state_override: Option<&ComponentClientTransformState<'a>>,
     ) -> TransformResult {
+        #[cfg(feature = "measure-tf-split")]
         let _tf = crate::compiler::phases::phase3_transform::profile::tf_guard(
             Self::tf_kind_index_of(node),
         );
