@@ -67,6 +67,41 @@ impl<'a> ComponentContext<'a> {
         self.path.last().copied()
     }
 
+    /// Index into `profile::TF_KINDS`. Kept next to `visit_node`'s match so the
+    /// two arms cannot drift apart silently.
+    #[inline]
+    fn tf_kind_index_of(node: &TemplateNode<'_>) -> usize {
+        match node {
+            TemplateNode::Component(_) => 0,
+            TemplateNode::SvelteComponent(_) => 1,
+            TemplateNode::SvelteSelf(_) => 2,
+            TemplateNode::SvelteElement(_) => 3,
+            TemplateNode::ExpressionTag(_) => 4,
+            TemplateNode::RegularElement(_) => 5,
+            TemplateNode::Text(_) => 6,
+            TemplateNode::IfBlock(_) => 7,
+            TemplateNode::EachBlock(_) => 8,
+            TemplateNode::AwaitBlock(_) => 9,
+            TemplateNode::KeyBlock(_) => 10,
+            TemplateNode::SnippetBlock(_) => 11,
+            TemplateNode::RenderTag(_) => 12,
+            TemplateNode::HtmlTag(_) => 13,
+            TemplateNode::ConstTag(_) => 14,
+            TemplateNode::DeclarationTag(_) => 15,
+            TemplateNode::DebugTag(_) => 16,
+            TemplateNode::SvelteBoundary(_) => 17,
+            TemplateNode::SvelteHead(_) => 18,
+            TemplateNode::SvelteBody(_) => 19,
+            TemplateNode::SvelteWindow(_) => 20,
+            TemplateNode::SvelteDocument(_) => 21,
+            TemplateNode::TitleElement(_) => 22,
+            TemplateNode::Comment(_) => 23,
+            TemplateNode::SvelteFragment(_) => 24,
+            TemplateNode::SlotElement(_) => 25,
+            _ => 26,
+        }
+    }
+
     /// Visit a template node and transform it.
     ///
     /// This is the main entry point for visiting nodes during transformation.
@@ -78,6 +113,9 @@ impl<'a> ComponentContext<'a> {
         node: &TemplateNode<'_>,
         _state_override: Option<&ComponentClientTransformState<'a>>,
     ) -> TransformResult {
+        let _tf = crate::compiler::phases::phase3_transform::profile::tf_guard(
+            Self::tf_kind_index_of(node),
+        );
         match node {
             TemplateNode::Component(comp) => self.visit_component(comp),
             TemplateNode::SvelteComponent(comp) => self.visit_svelte_component(comp),

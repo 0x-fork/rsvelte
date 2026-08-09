@@ -759,6 +759,115 @@ pub fn take_pa_breakdown() -> PaBreakdown {
     PaBreakdown::default()
 }
 
+pub const TF_KINDS: [&str; 27] = [
+    "component",
+    "svelte_component",
+    "svelte_self",
+    "svelte_element",
+    "expression_tag",
+    "regular_element",
+    "text",
+    "if_block",
+    "each_block",
+    "await_block",
+    "key_block",
+    "snippet_block",
+    "render_tag",
+    "html_tag",
+    "const_tag",
+    "declaration_tag",
+    "debug_tag",
+    "svelte_boundary",
+    "svelte_head",
+    "svelte_body",
+    "svelte_window",
+    "svelte_document",
+    "title_element",
+    "comment",
+    "svelte_fragment",
+    "slot_element",
+    "other",
+];
+
+/// Self time and call count per template node kind, drained together with the
+/// `template_fragment` parent they are compared against.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct TfBreakdown {
+    pub time: [Duration; TF_KINDS.len()],
+    pub calls: [u64; TF_KINDS.len()],
+}
+
+#[cfg(feature = "measure-tf-split")]
+thread_local! {
+    static TF_TIME: [Cell<u64>; TF_KINDS.len()] = Default::default();
+    static TF_CALLS: [Cell<u64>; TF_KINDS.len()] = Default::default();
+    /// Time the frames below the open one have already claimed. The visitor is
+    /// recursive, so an inclusive timer would charge an element for everything
+    /// inside it; each frame subtracts what its children took.
+    static TF_CHILD: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Charges self time to `idx` on drop.
+#[cfg(feature = "measure-tf-split")]
+pub struct TfGuard {
+    idx: usize,
+    start: TimerStart,
+    saved_child: u64,
+}
+
+#[cfg(feature = "measure-tf-split")]
+impl Drop for TfGuard {
+    fn drop(&mut self) {
+        let total = timer_elapsed(self.start).as_nanos() as u64;
+        let child = TF_CHILD.with(|c| c.get());
+        TF_TIME.with(|a| a[self.idx].set(a[self.idx].get() + total.saturating_sub(child)));
+        TF_CALLS.with(|a| a[self.idx].set(a[self.idx].get() + 1));
+        TF_CHILD.with(|c| c.set(self.saved_child + total));
+    }
+}
+
+#[cfg(feature = "measure-tf-split")]
+#[inline]
+pub fn tf_guard(idx: usize) -> TfGuard {
+    let saved_child = TF_CHILD.with(|c| c.replace(0));
+    TfGuard {
+        idx,
+        start: timer_start(),
+        saved_child,
+    }
+}
+
+#[cfg(not(feature = "measure-tf-split"))]
+pub struct TfGuard;
+
+#[cfg(not(feature = "measure-tf-split"))]
+#[inline(always)]
+pub fn tf_guard(_idx: usize) -> TfGuard {
+    TfGuard
+}
+
+#[cfg(feature = "measure-tf-split")]
+pub fn take_tf_breakdown() -> TfBreakdown {
+    let mut out = TfBreakdown::default();
+    TF_TIME.with(|a| {
+        for (i, c) in a.iter().enumerate() {
+            out.time[i] = Duration::from_nanos(c.replace(0));
+        }
+    });
+    TF_CALLS.with(|a| {
+        for (i, c) in a.iter().enumerate() {
+            out.calls[i] = c.replace(0);
+        }
+    });
+    TF_CHILD.with(|c| c.set(0));
+    out
+}
+
+#[cfg(not(feature = "measure-tf-split"))]
+pub fn take_tf_breakdown() -> TfBreakdown {
+    TfBreakdown::default()
+}
+
 /// Records the legacy `$:` branch on drop, which returns from several points.
 pub struct ReactiveStmtGuard(pub TimerStart);
 
