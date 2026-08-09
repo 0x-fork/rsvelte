@@ -198,6 +198,12 @@ const PARTITIONS = [
 		prefix: 'directive-element/',
 		label: 'verdict and host',
 	},
+	{
+		doc: 'matrix-known-failures.md',
+		key: 'matrix-known-failures.json',
+		prefix: 'async-derived/',
+		label: 'cause',
+	},
 	{ doc: 'validator-known-failures.md', key: 'validator-known-failures.json', label: 'cluster' },
 	{ doc: 'warning-known-failures.md', key: 'warning-known-failures.<target>.json', label: 'direction' },
 	{ doc: 'error-known-failures.md', key: 'error-end-known-failures.<target>.json', label: 'shape' },
