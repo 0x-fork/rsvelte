@@ -220,7 +220,7 @@ differ: the prose and span of two unrelated errors say nothing. Those pairs are
 
 ## 5. Generated shape matrix — `scripts/compat-corpus/matrix/`
 
-**Unit.** 1949 generated cases × 3 targets = 5847 comparisons. Where both compilers accept, the
+**Unit.** 2226 generated cases × 3 targets = 6678 comparisons. Where both compilers accept, the
 unit is `js.code` only (`matrix/run.mjs:134,139,166-167`), oxfmt-normalized identically to
 `verify.mjs`; where both reject it is the error **code** (`:150`), which the `invalid-bind` and
 `param-default` families exist to exercise.
@@ -339,6 +339,56 @@ It is also blind to the two axes it holds fixed: the item is always an **Identif
 (never a destructuring pattern, which takes a different transform), and the mode is always
 **legacy**, because the reassigned-item read does not exist under runes. A runes-only variant of
 this family would measure nothing, which is why the preamble is deliberately rune-free.
+
+### Blind spot 5g — the `keyword-regex` family fixes one body per host and one host per body
+
+Family `keyword-regex` (`axes.mjs` — 15 reserved words that cannot end an expression × 9 hosts,
+plus 15 × 4 regex bodies on the legacy `$:` host, plus 10 division controls × 9 hosts) exists
+because whether a `/` opens a regex literal is decided by the preceding **token** and every
+hand-written scan in the client instance-script pipeline decided it from the preceding **byte**
+(#2620). Its two polarities are regex-read-as-division and division-read-as-regex; a fix that
+only widened one direction scores green on the other half.
+
+What it does **not** generate is the product: `generate.mjs`'s `keywordRegexCases` crosses every
+keyword with every host at **one** regex body (`delimiters`), and every regex body with every
+keyword at **one** host (`legacy-reactive`). The two axes are not interchangeable, and the
+measurement says so. Only `slash-in-class` (`/[//]/` — a character class holding two slashes, so
+the body carries a `//` that a division reading exposes) discriminates the shared-helper defect
+at all: restoring the previous-byte rule turns **24** comparisons red on it and **0** on
+`delimiters`. Swapping the host cross to `slash-in-class` on the *fixed* tree turns **178**
+comparisons red across five hosts — 30 on `legacy-prop-default`, 24 on `legacy-function`, 66 on
+the two template-expression hosts (where rsvelte **rejects source official accepts**), 14 on
+`runes-class-method`, 2 on `legacy-reactive-block`. Those are previous-byte scanners the shared
+helper does not own, so this row's **[D]** evidence is that the host cross is deliberately run on
+the body that does *not* move: `/[//]/` outside the legacy `$:` host is a live divergence, not a
+gap in generation.
+
+The same is true of spelling: every generated row puts exactly one space between the keyword and
+the `/`, so `return/re/` — a different byte layout for the same token pair — is never
+produced. **[S]**
+
+This family carries the class alone: there is deliberately **no `pattern-corpus` repro** beside
+it. Every shape that pins the defect puts a `/[//]/` in a legacy `$:` statement, and Gate 3's
+comment mutant then inserts a `//` comment on the last `<script>` line, which a *different*
+pre-existing scan splices inside the emitted `$.set(…)` — unparseable output on all four
+candidate shapes tried (`typeof`, a `return` IIFE, a `case` test, and a legacy function, the last
+of which does not even reach parity unmutated). A seed that lands red would enrol a
+`mutation-known-failures` entry, and that entry suppresses every verdict about the seed —
+including the one it was added to produce. **[D]**
+
+The controls are ASCII-only, and the one that discriminates a **backwards** scan
+(`comment-ending-in-keyword`) is a block comment on one line. A `//` comment whose text ends in a
+keyword is the sharper input and is **not** generated here: rsvelte drops that comment from its
+output (blind spot 1a), so the row would diverge for a reason unrelated to the slash and a
+ratchet entry would then suppress the control it was added to be. That case is asserted directly
+instead, in `js_scan.rs`'s `a_comment_ending_in_a_keyword_does_not_open_a_regex`.
+
+Finally, the family reaches only the scanners that go through `shared::js_scan::skip_opaque`.
+`shared/class_body.rs:54` keeps a **private copy** of `slash_starts_regex` with the same
+previous-byte rule, and the Phase-1 scan that finds where a `{…}` template expression ends has a
+rule of its own — `{typeof /[//]/.exec(v)}` is rejected with "`<p>` was left open". Nothing in
+this family distinguishes which of those a case routes through; the 178-comparison measurement
+above is the evidence that they exist, not a partition of them. **[D]**
 
 **Closing 5b/5c:** the matrix runs in ~10 s on ~5,250 comparisons. Widening the markup axis (a
 second expression axis against `EXPRESSION_SLOTS`) or reading `.warnings` is cheap relative to
