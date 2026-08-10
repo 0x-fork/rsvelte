@@ -78,21 +78,19 @@ impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
         let raw = if let Some(raw) = literal.raw.filter(|raw| {
             raw.contains("\\\n")
                 || raw.contains("\\\r\n")
-                || raw.contains("\\t")
                 || raw.to_ascii_lowercase().contains("<\\/script")
         }) {
             raw.to_string()
         } else if literal
             .value
             .chars()
-            .any(|c| matches!(c, '\0' | '\u{0008}' | '\t' | '\u{000b}' | '\u{000c}'))
+            .any(|c| matches!(c, '\0' | '\u{0008}' | '\u{000b}' | '\u{000c}'))
         {
             let mut raw = String::from("'");
             for c in literal.value.chars() {
                 match c {
                     '\\' => raw.push_str("\\\\"),
                     '\'' => raw.push_str("\\'"),
-                    '\t' => raw.push_str("\\t"),
                     '\n' => raw.push_str("\\n"),
                     '\r' => raw.push_str("\\r"),
                     _ => raw.push(c),
