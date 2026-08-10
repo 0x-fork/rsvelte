@@ -1,4 +1,4 @@
-//! Comments survive a server `.svelte.(js|ts)` compile.
+//! Comment ownership in a server `.svelte.(js|ts)` compile.
 
 use rsvelte_core::compiler::ModuleCompileOptions;
 use rsvelte_core::{GenerateMode, compile_module};
@@ -26,32 +26,33 @@ fn tail(src: &str) -> String {
 }
 
 #[test]
-fn a_default_parameter_initializer_comment_survives() {
+fn a_default_parameter_initializer_comment_is_dropped() {
     let src = "export function serializeValue(value, key, dateFormats = {}, \
                codecEncoders = /* @__PURE__ */ new Map()) {\n\treturn String(value);\n}\n";
     for dev in [false, true] {
         let out = module(src, dev);
-        assert!(out.contains("@__PURE__"), "dev={dev} dropped:\n{out}");
-        assert!(out.contains("new Map())"), "dev={dev}\n{out}");
+        assert!(!out.contains("@__PURE__"), "dev={dev} survived:\n{out}");
+        assert!(
+            out.contains("codecEncoders = new Map()"),
+            "dev={dev}\n{out}"
+        );
     }
 }
 
 #[test]
-fn a_top_level_comment_survives() {
+fn a_top_level_comment_is_dropped() {
     for comment in ["/* hdr */", "/** @type {number} */", "// hdr"] {
         let out = tail(&format!("{comment}\nexport const a = 1;\n"));
-        assert!(
-            out.contains("hdr") || out.contains("@type"),
-            "{comment} was dropped:\n{out}"
-        );
+        assert!(!out.contains("hdr"), "{comment} survived:\n{out}");
+        assert!(!out.contains("@type"), "{comment} survived:\n{out}");
         assert!(out.contains("export const a = 1;"), "{out}");
     }
 }
 
 #[test]
-fn a_comment_between_top_level_statements_survives() {
+fn a_comment_between_top_level_statements_is_dropped() {
     let out = tail("export const a = 1;\n/* mid */\nexport const b = 2;\n");
-    assert!(out.contains("mid"), "{out}");
+    assert!(!out.contains("mid"), "{out}");
 }
 
 /// Negative control: the same predicate must keep every comment that upstream
@@ -73,8 +74,10 @@ fn a_comment_inside_a_located_body_survives() {
 }
 
 #[test]
-fn an_arrow_expression_body_comment_survives() {
+fn an_arrow_expression_body_comment_is_dropped() {
     let out = tail("export const f = () => (/* c */ x);\n");
-    assert!(out.contains("export const f = () => x;"), "{out}");
-    assert!(out.contains("/* c */"), "{out}");
+    assert_eq!(
+        out.trim_end().lines().last(),
+        Some("export const f = () => x;")
+    );
 }

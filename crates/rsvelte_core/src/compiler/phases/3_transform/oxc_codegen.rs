@@ -1,12 +1,13 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use oxc_allocator::{Allocator, CloneIn, Vec as ArenaVec};
 use oxc_ast::ast::{
     BlockStatement, CommentContent, CommentKind, CommentPosition, Expression, FunctionBody,
     ObjectProperty, Program, PropertyKind, Statement, StaticBlock, StringLiteral, SwitchCase,
 };
-use oxc_ast_visit::{VisitMut, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::{Codegen, CodegenOptions};
+use oxc_span::GetSpan;
 
 use super::js_ast::codegen::{CodegenResult, SourceMapping, build_line_starts, offset_to_line_col};
 
@@ -84,7 +85,7 @@ impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
         } else if literal
             .value
             .chars()
-            .any(|c| matches!(c, '\0' | '\u{0008}' | '\u{000b}' | '\u{000c}'))
+            .any(|c| matches!(c, '\0' | '\u{0008}' | '\t' | '\u{000b}' | '\u{000c}'))
         {
             let mut raw = String::from("'");
             for c in literal.value.chars() {
@@ -288,6 +289,32 @@ fn find_comment_target(code: &str, source_after: &str, before: usize) -> Option<
     None
 }
 
+fn containing_statement_start(code: &str, offset: usize) -> Option<usize> {
+    struct Statements {
+        spans: Vec<oxc_span::Span>,
+    }
+
+    impl<'a> Visit<'a> for Statements {
+        fn visit_statement(&mut self, statement: &Statement<'a>) {
+            self.spans.push(statement.span());
+            walk::walk_statement(self, statement);
+        }
+
+        fn visit_expression(&mut self, _expression: &Expression<'a>) {}
+    }
+
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    let mut statements = Statements { spans: Vec::new() };
+    statements.visit_program(&parsed.program);
+    statements
+        .spans
+        .into_iter()
+        .filter(|span| span.start as usize <= offset && offset < span.end as usize)
+        .min_by_key(|span| span.end - span.start)
+        .map(|span| span.start as usize)
+}
+
 fn relocate_late_comments(
     program: &Program<'_>,
     mut code: String,
@@ -311,8 +338,8 @@ fn relocate_late_comments(
             })
             .collect::<Vec<_>>()
     };
-    let mut comment_occurrences = HashMap::<String, usize>::new();
     let mut edits = Vec::new();
+    let mut search_from = 0;
     for comment in &program.comments {
         let span = comment.span;
         let Some(text) = program
@@ -326,14 +353,19 @@ fn relocate_late_comments(
             .filter(|(source, _)| *source >= span.end as usize)
             .min_by_key(|(source, _)| *source)
             .map(|(_, generated)| *generated);
-        let key = comment_key(text);
-        let occurrence = comment_occurrences.entry(key.clone()).or_default();
-        let actual = generated_comments
-            .iter()
-            .filter(|(candidate, _, _)| *candidate == key)
-            .nth(*occurrence)
-            .map(|(_, start, end)| (*start, end - start));
-        *occurrence += 1;
+        let actual = code[search_from..]
+            .find(text)
+            .map(|relative| (search_from + relative, text.len()))
+            .or_else(|| {
+                let key = comment_key(text);
+                generated_comments
+                    .iter()
+                    .find(|(candidate, start, _)| *start >= search_from && *candidate == key)
+                    .map(|(_, start, end)| (*start, end - start))
+            });
+        if let Some((actual_start, actual_len)) = actual {
+            search_from = actual_start + actual_len;
+        }
         let source_after = &program.source_text[span.end as usize..];
         let own_line = program.source_text[..span.start as usize]
             .rsplit_once('\n')
@@ -343,6 +375,7 @@ fn relocate_late_comments(
                 .is_some_and(|next| source_after[..next].contains('\n'));
         let source_after_trimmed = source_after.trim_start();
         let textual_target = (source_after_trimmed.starts_with('.')
+            || actual.is_none()
             || (!own_line && !matches!(comment.kind, CommentKind::Line)))
         .then(|| {
             find_comment_target(
@@ -352,16 +385,17 @@ fn relocate_late_comments(
             )
         })
         .flatten();
-        let thunk_parameter_target = (!own_line && !matches!(comment.kind, CommentKind::Line))
-            .then(|| {
-                let actual_start = actual?.0;
-                let arrow = code[..actual_start].rfind("() =>")?;
-                code[arrow + 5..actual_start]
-                    .chars()
-                    .all(|c| c.is_whitespace() || c == '(')
-                    .then_some(arrow + 1)
-            })
-            .flatten();
+        let thunk_parameter_target =
+            (!own_line && !matches!(comment.kind, CommentKind::Line) && text.starts_with("/**"))
+                .then(|| {
+                    let reference = anchor_target.or_else(|| actual.map(|(start, _)| start))?;
+                    let arrow = code[..reference].rfind("() =>")?;
+                    code[arrow + 5..reference]
+                        .chars()
+                        .all(|c| c.is_whitespace() || c == '(')
+                        .then_some(arrow + 1)
+                })
+                .flatten();
         let reactive_target = (!matches!(comment.kind, CommentKind::Line)
             && source_after.trim_start().starts_with("$:"))
         .then(|| {
@@ -370,7 +404,7 @@ fn relocate_late_comments(
                 code[label + 2..actual_start]
                     .trim()
                     .is_empty()
-                    .then_some(label + 1)
+                    .then_some(label + 2)
             })
         })
         .flatten()
@@ -380,14 +414,39 @@ fn relocate_late_comments(
                 && anchor_target
                     .and_then(|target| code.get(target..))
                     .is_some_and(|rest| rest.starts_with("$:")))
-            .then(|| anchor_target.map(|target| target + 1))
+            .then(|| anchor_target.map(|target| target + 2))
             .flatten()
         });
-        let previous_generated = anchors
-            .iter()
-            .filter(|(source, _)| *source <= span.start as usize)
-            .max_by_key(|(source, _)| *source)
-            .map_or(0, |(_, generated)| *generated);
+        let preceding =
+            actual.and_then(|(start, _)| code[..start].chars().rev().find(|c| !c.is_whitespace()));
+        let source_preceding = program.source_text[..span.start as usize]
+            .chars()
+            .rev()
+            .find(|c| !c.is_whitespace());
+        let source_following = source_after_trimmed.chars().next();
+        let crosses_closing_kind = matches!(
+            (source_preceding, source_following),
+            (Some(')'), Some('}')) | (Some('}'), Some(')'))
+        );
+        let interior_target = actual
+            .filter(|_| {
+                (!own_line && !crosses_closing_kind)
+                    && (matches!(comment.kind, CommentKind::Line) || !text.starts_with("/**"))
+                    || matches!(preceding, Some('['))
+            })
+            .and_then(|(start, _)| containing_statement_start(&code, start));
+        let missing_interior_target = actual
+            .is_none()
+            .then(|| {
+                (!own_line || matches!(source_preceding, Some('[')))
+                    .then(|| {
+                        textual_target
+                            .or(anchor_target)
+                            .and_then(|target| containing_statement_start(&code, target))
+                    })
+                    .flatten()
+            })
+            .flatten();
         let dangling_chunk = loc_map
             .and_then(|loc_map| {
                 loc_map
@@ -399,20 +458,105 @@ fn relocate_late_comments(
                     .trim()
                     .is_empty()
             });
-        let generated_var = dangling_chunk
+        let dangling_prefix_has_code = loc_map
+            .and_then(|loc_map| {
+                loc_map
+                    .iter()
+                    .find(|(start, end, _)| span.start >= *start && span.end <= *end)
+            })
+            .is_some_and(|(start, _, _)| {
+                let prefix = &program.source_text[*start as usize..span.start as usize];
+                let allocator = Allocator::default();
+                !oxc_parser::Parser::new(&allocator, prefix, oxc_span::SourceType::mjs())
+                    .parse()
+                    .program
+                    .body
+                    .is_empty()
+            });
+        let previous_generated = anchors
+            .iter()
+            .filter(|(source, _)| *source <= span.start as usize)
+            .max_by_key(|(source, _)| *source)
+            .map_or(0, |(_, generated)| *generated);
+        let generated_var = (dangling_chunk && !dangling_prefix_has_code)
             .then(|| {
-                actual.and_then(|(actual_start, _)| {
-                    code[previous_generated..actual_start]
-                        .match_indices("var ")
-                        .find(|(relative, _)| {
-                            !code[previous_generated + relative + 4..].starts_with("$$exports")
-                        })
-                        .map(|(relative, _)| previous_generated + relative + 3)
-                })
+                code[previous_generated..]
+                    .match_indices("var ")
+                    .find(|(relative, _)| {
+                        !code[previous_generated + relative + 4..].starts_with("$$exports")
+                    })
+                    .map(|(relative, _)| previous_generated + relative + 3)
             })
             .flatten();
+        let body_tail = (dangling_chunk && dangling_prefix_has_code)
+            .then(|| code.rfind("\n}").map(|target| target + 1))
+            .flatten();
+        let generated_own_line = actual.is_some_and(|(start, _)| {
+            code[..start]
+                .rsplit_once('\n')
+                .map_or(start == 0, |(_, prefix)| prefix.trim().is_empty())
+        });
+        let line_argument_range = (generated_own_line
+            && !own_line
+            && matches!(comment.kind, CommentKind::Line)
+            && matches!(source_preceding, Some('(')))
+        .then(|| {
+            let target = find_comment_target(
+                &code,
+                source_after,
+                actual.map_or(code.len(), |(start, _)| start),
+            )?;
+            let open = code[..target].rfind('(')?;
+            let close = code[target..].find(')').map(|close| target + close)?;
+            let argument = code[target..close].trim();
+            (!argument.is_empty() && !argument.contains(',')).then(|| {
+                let line_start = code[..open].rfind('\n').map_or(0, |start| start + 1);
+                let indent = &code[line_start..open]
+                    [..code[line_start..open].len() - code[line_start..open].trim_start().len()];
+                (
+                    open + 1,
+                    close,
+                    format!("\n{indent}\t{text}\n{indent}\t{argument}\n{indent}"),
+                )
+            })
+        })
+        .flatten();
+        if actual.is_some() && matches!(source_preceding, Some(';')) {
+            continue;
+        }
+        let closing_anchor_target = source_after_trimmed
+            .chars()
+            .next()
+            .filter(|char| matches!(char, ')' | '}'))
+            .is_some_and(|source_char| {
+                anchor_target
+                    .and_then(|target| code[target..].chars().next())
+                    .is_some_and(|generated_char| generated_char == source_char)
+            });
+        if generated_own_line
+            && reactive_target.is_none()
+            && body_tail.is_none()
+            && generated_var.is_none()
+            && thunk_parameter_target.is_none()
+            && line_argument_range.is_none()
+            && !source_after_trimmed.starts_with('.')
+            && !closing_anchor_target
+            && !text.starts_with("/**")
+        {
+            continue;
+        }
+        if let Some((start, end, replacement)) = line_argument_range {
+            edits.push((start, end - start, replacement));
+            if let Some((actual_start, actual_len)) = actual {
+                edits.push((actual_start, actual_len, String::new()));
+            }
+            continue;
+        }
         let Some(target) = reactive_target
+            .or(body_tail)
             .or(generated_var)
+            .or(interior_target)
+            .or(missing_interior_target)
             .or(thunk_parameter_target)
             .or(textual_target)
             .or(anchor_target)
@@ -424,12 +568,24 @@ fn relocate_late_comments(
         }
         let insertion = if reactive_target.is_some() {
             format!(" {text}")
+        } else if body_tail.is_some() {
+            match comment.kind {
+                CommentKind::Line => format!("\t{text}\n"),
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
+                    format!("\t{text}\n")
+                }
+            }
         } else if generated_var.is_some() {
             match comment.kind {
                 CommentKind::Line => format!(" {text}\n"),
                 CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
                     format!(" {text} ")
                 }
+            }
+        } else if interior_target.is_some() || missing_interior_target.is_some() {
+            match comment.kind {
+                CommentKind::Line => format!("{text}\n"),
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => format!("{text}\n"),
             }
         } else if thunk_parameter_target.is_some() {
             text.to_string()
@@ -522,7 +678,7 @@ impl<'a> VisitMut<'a> for DropBareEmptyStatements {
     }
 }
 
-pub fn print(program: &Program<'_>) -> String {
+fn print_inner(program: &Program<'_>) -> String {
     let allocator = Allocator::default();
     let (program, substitutions) = prepare_program(program, &allocator);
     let printed = Codegen::new()
@@ -538,7 +694,11 @@ pub fn print(program: &Program<'_>) -> String {
     without_final_newline(code)
 }
 
-fn print_with_raw_map(
+pub fn print(program: &Program<'_>) -> String {
+    print_inner(program)
+}
+
+fn print_with_raw_map_inner(
     program: &Program<'_>,
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
 ) -> CodegenResult {
@@ -589,6 +749,13 @@ fn print_with_raw_map(
         code: without_final_newline(code),
         mappings,
     }
+}
+
+fn print_with_raw_map(
+    program: &Program<'_>,
+    loc_map: Option<&[(u32, u32, Option<u32>)]>,
+) -> CodegenResult {
+    print_with_raw_map_inner(program, loc_map)
 }
 
 fn substitution_ranges(
