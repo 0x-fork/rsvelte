@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use oxc_allocator::{Allocator, CloneIn, Vec as ArenaVec};
-use oxc_ast::ast::{BlockStatement, FunctionBody, Program, Statement, StaticBlock, SwitchCase};
+use oxc_ast::ast::{
+    BlockStatement, CommentContent, CommentKind, CommentPosition, Expression, FunctionBody,
+    ObjectProperty, Program, PropertyKind, Statement, StaticBlock, StringLiteral, SwitchCase,
+};
 use oxc_ast_visit::{VisitMut, walk_mut};
 use oxc_codegen::{Codegen, CodegenOptions};
 
@@ -51,6 +54,340 @@ impl DropBareEmptyStatements {
     }
 }
 
+struct NormalizeObjectMethods;
+
+impl<'a> VisitMut<'a> for NormalizeObjectMethods {
+    fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
+        walk_mut::walk_object_property(self, property);
+        if !property.computed
+            && matches!(property.kind, PropertyKind::Init)
+            && matches!(property.value, Expression::FunctionExpression(_))
+        {
+            property.method = true;
+        }
+    }
+}
+
+struct PreserveRawStrings<'a> {
+    allocator: &'a Allocator,
+    substitutions: Vec<(String, String)>,
+}
+
+impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
+    fn visit_string_literal(&mut self, literal: &mut StringLiteral<'a>) {
+        let raw = if let Some(raw) = literal.raw {
+            raw.to_string()
+        } else if literal
+            .value
+            .chars()
+            .any(|c| matches!(c, '\0' | '\u{0008}' | '\u{000b}' | '\u{000c}'))
+        {
+            let mut raw = String::from("'");
+            for c in literal.value.chars() {
+                match c {
+                    '\\' => raw.push_str("\\\\"),
+                    '\'' => raw.push_str("\\'"),
+                    '\n' => raw.push_str("\\n"),
+                    '\r' => raw.push_str("\\r"),
+                    _ => raw.push(c),
+                }
+            }
+            raw.push('\'');
+            raw
+        } else {
+            return;
+        };
+        let sentinel = format!("\u{e000}rsvelte_raw_{}\u{e001}", self.substitutions.len());
+        self.substitutions.push((format!("'{sentinel}'"), raw));
+        literal.value = self.allocator.alloc_str(&sentinel).into();
+        literal.raw = None;
+        literal.lone_surrogates = false;
+    }
+}
+
+fn prepare_program<'a>(
+    program: &Program<'_>,
+    allocator: &'a Allocator,
+) -> (Program<'a>, Vec<(String, String)>) {
+    let mut program = program.clone_in(allocator);
+    DropBareEmptyStatements.visit_program(&mut program);
+    NormalizeObjectMethods.visit_program(&mut program);
+    for comment in &mut program.comments {
+        comment.content = CommentContent::CoverageIgnoreFile;
+        if comment.position == CommentPosition::Trailing {
+            comment.position = CommentPosition::Leading;
+            comment.attached_to = comment.span.end;
+        }
+    }
+    let mut preserve = PreserveRawStrings {
+        allocator,
+        substitutions: Vec::new(),
+    };
+    preserve.visit_program(&mut program);
+    (program, preserve.substitutions)
+}
+
+fn restore_raw_strings(mut code: String, substitutions: &[(String, String)]) -> String {
+    for (sentinel, raw) in substitutions {
+        code = code.replacen(sentinel, raw, 1);
+    }
+    code
+}
+
+fn separate_block_comments_from_line_continuations(
+    program: &Program<'_>,
+    mut code: String,
+) -> (String, Vec<(usize, usize, usize)>) {
+    let mut edits = Vec::new();
+    let mut search_from = 0;
+    for comment in &program.comments {
+        if matches!(comment.kind, CommentKind::Line) {
+            continue;
+        }
+        let Some(text) = program
+            .source_text
+            .get(comment.span.start as usize..comment.span.end as usize)
+        else {
+            continue;
+        };
+        let Some(relative) = code[search_from..].find(text) else {
+            continue;
+        };
+        let start = search_from + relative;
+        let end = start + text.len();
+        search_from = end;
+        let after = &code[end..];
+        let whitespace_len = after
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(after.len());
+        if after[..whitespace_len].contains('\n') {
+            continue;
+        }
+        let next = &after[whitespace_len..];
+        if matches!(next.as_bytes().first(), Some(b'\'' | b'"'))
+            && next
+                .find('\n')
+                .is_some_and(|newline| next[..newline].ends_with('\\'))
+        {
+            edits.push((end, 0, "\n".to_string()));
+        }
+    }
+    for (start, old_len, replacement) in edits.iter().rev() {
+        code.replace_range(*start..*start + *old_len, replacement);
+    }
+    let ranges = edits
+        .into_iter()
+        .map(|(start, old_len, replacement)| (start, old_len, replacement.len()))
+        .collect();
+    (code, ranges)
+}
+
+fn unescape_script_close_tags(mut code: String) -> (String, Vec<(usize, usize, usize)>) {
+    let mut edits = Vec::new();
+    let bytes = code.as_bytes();
+    for start in 0..bytes.len().saturating_sub(8) {
+        if bytes[start] == b'<'
+            && bytes[start + 1] == b'\\'
+            && bytes[start + 2] == b'/'
+            && bytes[start + 3..start + 9].eq_ignore_ascii_case(b"script")
+        {
+            edits.push((start + 1, 1, 0));
+        }
+    }
+    for &(start, old_len, _) in edits.iter().rev() {
+        code.replace_range(start..start + old_len, "");
+    }
+    (code, edits)
+}
+
+fn comment_key(text: &str) -> String {
+    let text = text
+        .strip_prefix("/*")
+        .and_then(|text| text.strip_suffix("*/"))
+        .or_else(|| text.strip_prefix("//"))
+        .unwrap_or(text);
+    text.lines()
+        .map(|line| line.trim().strip_prefix('*').unwrap_or(line.trim()).trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn relocate_late_comments(
+    program: &Program<'_>,
+    mut code: String,
+    anchors: &[(usize, usize)],
+    loc_map: Option<&[(u32, u32, Option<u32>)]>,
+) -> (String, Vec<(usize, usize, usize)>) {
+    let generated_comments = {
+        let allocator = Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, &code, oxc_span::SourceType::mjs()).parse();
+        parsed
+            .program
+            .comments
+            .iter()
+            .filter_map(|comment| {
+                let start = comment.span.start as usize;
+                let end = comment.span.end as usize;
+                code.get(start..end)
+                    .map(|text| (comment_key(text), start, end))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut edits = Vec::new();
+    let mut search_from = 0;
+    for comment in &program.comments {
+        let span = comment.span;
+        let Some(text) = program
+            .source_text
+            .get(span.start as usize..span.end as usize)
+        else {
+            continue;
+        };
+        let Some(target) = anchors
+            .iter()
+            .filter(|(source, _)| *source >= span.end as usize)
+            .min_by_key(|(source, _)| *source)
+            .map(|(_, generated)| *generated)
+        else {
+            continue;
+        };
+        let actual = code[search_from..]
+            .find(text)
+            .map(|relative| (search_from + relative, text.len()))
+            .or_else(|| {
+                let key = comment_key(text);
+                generated_comments
+                    .iter()
+                    .find(|(candidate, start, _)| *start >= search_from && *candidate == key)
+                    .map(|(_, start, end)| (*start, end - start))
+            });
+        if let Some((actual_start, actual_len)) = actual {
+            search_from = actual_start + actual_len;
+        }
+        let source_after = &program.source_text[span.end as usize..];
+        let reactive_target = (!matches!(comment.kind, CommentKind::Line)
+            && source_after.trim_start().starts_with("$:"))
+        .then(|| {
+            actual.and_then(|(actual_start, _)| {
+                let label = code[..actual_start].rfind("$:")?;
+                code[label + 2..actual_start]
+                    .trim()
+                    .is_empty()
+                    .then_some(label + 1)
+            })
+        })
+        .flatten()
+        .or_else(|| {
+            (!matches!(comment.kind, CommentKind::Line)
+                && source_after.trim_start().starts_with("$:")
+                && code
+                    .get(target..)
+                    .is_some_and(|rest| rest.starts_with("$:")))
+            .then_some(target + 1)
+        });
+        let previous_generated = anchors
+            .iter()
+            .filter(|(source, _)| *source <= span.start as usize)
+            .max_by_key(|(source, _)| *source)
+            .map_or(0, |(_, generated)| *generated);
+        let dangling_chunk = loc_map
+            .and_then(|loc_map| {
+                loc_map
+                    .iter()
+                    .find(|(start, end, _)| span.start >= *start && span.end <= *end)
+            })
+            .is_some_and(|(_, end, _)| {
+                program.source_text[span.end as usize..*end as usize]
+                    .trim()
+                    .is_empty()
+            });
+        let generated_var = dangling_chunk
+            .then(|| {
+                actual.and_then(|(actual_start, _)| {
+                    code[previous_generated..actual_start]
+                        .match_indices("var ")
+                        .find(|(relative, _)| {
+                            !code[previous_generated + relative + 4..].starts_with("$$exports")
+                        })
+                        .map(|(relative, _)| previous_generated + relative + 3)
+                })
+            })
+            .flatten();
+        let target = reactive_target.or(generated_var).unwrap_or(target);
+        let own_line = program.source_text[..span.start as usize]
+            .rsplit_once('\n')
+            .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty())
+            && source_after
+                .find(|c: char| !c.is_whitespace())
+                .is_some_and(|next| source_after[..next].contains('\n'));
+        if actual.is_some_and(|(actual_start, _)| actual_start <= target) {
+            continue;
+        }
+        let insertion = if reactive_target.is_some() {
+            format!(" {text}")
+        } else if generated_var.is_some() {
+            match comment.kind {
+                CommentKind::Line => format!(" {text}\n"),
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
+                    format!(" {text} ")
+                }
+            }
+        } else {
+            match comment.kind {
+                CommentKind::Line => format!("{text}\n"),
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock if own_line => {
+                    format!("{text}\n")
+                }
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => format!("{text} "),
+            }
+        };
+        edits.push((target, 0, insertion));
+        if let Some((actual_start, actual_len)) = actual {
+            edits.push((actual_start, actual_len, String::new()));
+        }
+    }
+    edits.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (start, old_len, replacement) in &edits {
+        code.replace_range(*start..*start + *old_len, replacement);
+    }
+    let mut ranges = edits
+        .into_iter()
+        .map(|(start, old_len, replacement)| (start, old_len, replacement.len()))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| range.0);
+    (code, ranges)
+}
+
+fn source_anchors(
+    program: &Program<'_>,
+    code: &str,
+    map: Option<&oxc_sourcemap::SourceMap>,
+) -> Vec<(usize, usize)> {
+    let source_starts = build_line_starts(program.source_text);
+    let generated_starts = build_line_starts(code);
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    map.get_tokens()
+        .filter_map(|token| {
+            token.get_source_id()?;
+            let source = line_col_to_offset(
+                &source_starts,
+                token.get_src_line() as usize,
+                token.get_src_col() as usize,
+            )?;
+            let generated = line_col_to_offset(
+                &generated_starts,
+                token.get_dst_line() as usize,
+                token.get_dst_col() as usize,
+            )?;
+            Some((source, generated))
+        })
+        .collect()
+}
+
 impl<'a> VisitMut<'a> for DropBareEmptyStatements {
     fn visit_program(&mut self, program: &mut Program<'a>) {
         walk_mut::walk_program(self, program);
@@ -80,46 +417,103 @@ impl<'a> VisitMut<'a> for DropBareEmptyStatements {
 
 pub fn print(program: &Program<'_>) -> String {
     let allocator = Allocator::default();
-    let mut program = program.clone_in(&allocator);
-    DropBareEmptyStatements.visit_program(&mut program);
-    without_final_newline(
-        Codegen::new()
-            .with_options(options(false))
-            .build(&program)
-            .code,
-    )
+    let (program, substitutions) = prepare_program(program, &allocator);
+    let printed = Codegen::new()
+        .with_options(options(
+            !program.comments.is_empty() && !program.source_text.is_empty(),
+        ))
+        .build(&program);
+    let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
+    let (code, _) = relocate_late_comments(&program, printed.code, &anchors, None);
+    let code = restore_raw_strings(code, &substitutions);
+    let (code, _) = separate_block_comments_from_line_continuations(&program, code);
+    let (code, _) = unescape_script_close_tags(code);
+    without_final_newline(code)
 }
 
-fn print_with_raw_map(program: &Program<'_>) -> CodegenResult {
+fn print_with_raw_map(
+    program: &Program<'_>,
+    loc_map: Option<&[(u32, u32, Option<u32>)]>,
+) -> CodegenResult {
     let allocator = Allocator::default();
-    let mut program = program.clone_in(&allocator);
-    DropBareEmptyStatements.visit_program(&mut program);
+    let (program, substitutions) = prepare_program(program, &allocator);
     let printed = Codegen::new().with_options(options(true)).build(&program);
+    let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
+    let (old_code, comment_replacements) =
+        relocate_late_comments(&program, printed.code, &anchors, loc_map);
+    let old_starts = build_line_starts(&old_code);
+    let restored_code = restore_raw_strings(old_code.clone(), &substitutions);
+    let (code, line_continuation_replacements) =
+        separate_block_comments_from_line_continuations(&program, restored_code);
+    let (code, script_close_replacements) = unescape_script_close_tags(code);
+    let new_starts = build_line_starts(&code);
+    let replacements = substitution_ranges(&old_code, &substitutions);
     let mappings = printed
         .map
         .map(|map| {
             map.get_tokens()
                 .filter_map(|token| {
-                    token.get_source_id().map(|_| SourceMapping {
-                        gen_line: token.get_dst_line(),
-                        gen_col: token.get_dst_col(),
-                        source: 0,
-                        orig_line: token.get_src_line(),
-                        orig_col: token.get_src_col(),
-                        name: None,
+                    token.get_source_id().and_then(|_| {
+                        let old_offset = line_col_to_offset(
+                            &old_starts,
+                            token.get_dst_line() as usize,
+                            token.get_dst_col() as usize,
+                        )?;
+                        let moved_offset = translate_offset(old_offset, &comment_replacements);
+                        let restored_offset = translate_offset(moved_offset, &replacements);
+                        let new_offset =
+                            translate_offset(restored_offset, &line_continuation_replacements);
+                        let new_offset = translate_offset(new_offset, &script_close_replacements);
+                        let (gen_line, gen_col) = offset_to_line_col(&new_starts, new_offset);
+                        Some(SourceMapping {
+                            gen_line: gen_line as u32,
+                            gen_col: gen_col as u32,
+                            source: 0,
+                            orig_line: token.get_src_line(),
+                            orig_col: token.get_src_col(),
+                            name: None,
+                        })
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
     CodegenResult {
-        code: without_final_newline(printed.code),
+        code: without_final_newline(code),
         mappings,
     }
 }
 
+fn substitution_ranges(
+    code: &str,
+    substitutions: &[(String, String)],
+) -> Vec<(usize, usize, usize)> {
+    let mut ranges = Vec::with_capacity(substitutions.len());
+    for (sentinel, raw) in substitutions {
+        if let Some(start) = code.find(sentinel) {
+            ranges.push((start, sentinel.len(), raw.len()));
+        }
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    ranges
+}
+
+fn translate_offset(offset: usize, replacements: &[(usize, usize, usize)]) -> usize {
+    let mut translated = offset;
+    for &(start, old_len, new_len) in replacements {
+        if offset < start {
+            break;
+        }
+        if old_len > 0 && offset < start + old_len {
+            return start + new_len.min(offset - start);
+        }
+        translated = translated.saturating_add_signed(new_len as isize - old_len as isize);
+    }
+    translated
+}
+
 pub fn print_with_map(program: &Program<'_>, original_source: &str) -> CodegenResult {
-    let mut printed = print_with_raw_map(program);
+    let mut printed = print_with_raw_map(program, None);
     let source_starts = build_line_starts(program.source_text);
     printed.mappings.retain(|mapping| {
         line_col_to_offset(
@@ -138,7 +532,7 @@ pub fn print_split_with_map(
     loc_base: u32,
     loc_map: &[(u32, u32, Option<u32>)],
 ) -> CodegenResult {
-    let mut printed = print_with_raw_map(program);
+    let mut printed = print_with_raw_map(program, Some(loc_map));
     let split_starts = build_line_starts(program.source_text);
     let original_starts = build_line_starts(original_source);
 
