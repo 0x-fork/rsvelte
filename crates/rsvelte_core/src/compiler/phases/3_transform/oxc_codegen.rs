@@ -385,7 +385,7 @@ fn relocate_late_comments(
                     .trim()
                     .is_empty()
             });
-        let generated_var = (dangling_chunk && !matches!(comment.kind, CommentKind::Line))
+        let generated_var = dangling_chunk
             .then(|| {
                 actual.and_then(|(actual_start, _)| {
                     code[previous_generated..actual_start]

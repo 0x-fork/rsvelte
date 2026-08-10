@@ -55,3 +55,10 @@ fn non_ascii_before_a_relocated_comment_does_not_split_utf8() {
     assert!(code.contains("// explain\n.replace"), "{code}");
     assert_parses(&code);
 }
+
+#[test]
+fn trailing_line_comment_stays_before_generated_declarations() {
+    let code = client("<script>\n// c\n</script>\n\n<button>x</button>");
+    assert!(code.contains("var // c\n button = root();"), "{code}");
+    assert_parses(&code);
+}
