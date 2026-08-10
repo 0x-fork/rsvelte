@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use oxc_allocator::{Allocator, CloneIn, Vec as ArenaVec};
 use oxc_ast::ast::{
@@ -78,19 +78,21 @@ impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
         let raw = if let Some(raw) = literal.raw.filter(|raw| {
             raw.contains("\\\n")
                 || raw.contains("\\\r\n")
+                || raw.contains("\\t")
                 || raw.to_ascii_lowercase().contains("<\\/script")
         }) {
             raw.to_string()
         } else if literal
             .value
             .chars()
-            .any(|c| matches!(c, '\0' | '\u{0008}' | '\u{000b}' | '\u{000c}'))
+            .any(|c| matches!(c, '\0' | '\u{0008}' | '\t' | '\u{000b}' | '\u{000c}'))
         {
             let mut raw = String::from("'");
             for c in literal.value.chars() {
                 match c {
                     '\\' => raw.push_str("\\\\"),
                     '\'' => raw.push_str("\\'"),
+                    '\t' => raw.push_str("\\t"),
                     '\n' => raw.push_str("\\n"),
                     '\r' => raw.push_str("\\r"),
                     _ => raw.push(c),
@@ -267,11 +269,20 @@ fn find_comment_target(code: &str, source_after: &str, before: usize) -> Option<
             .as_bytes()
             .first()
             .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'));
-        let boundary = !identifier_anchor
+        let starts_at_boundary = !identifier_anchor
             || (start == 0
                 || !code.as_bytes()[start - 1].is_ascii_alphanumeric()
                     && !matches!(code.as_bytes()[start - 1], b'_' | b'$'));
-        if boundary {
+        let ends_with_identifier = anchor
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'));
+        let end = start + anchor.len();
+        let ends_at_boundary = !ends_with_identifier
+            || end == code.len()
+            || !code.as_bytes()[end].is_ascii_alphanumeric()
+                && !matches!(code.as_bytes()[end], b'_' | b'$');
+        if starts_at_boundary && ends_at_boundary {
             return Some(start);
         }
         search_end = start;
@@ -302,8 +313,8 @@ fn relocate_late_comments(
             })
             .collect::<Vec<_>>()
     };
+    let mut comment_occurrences = HashMap::<String, usize>::new();
     let mut edits = Vec::new();
-    let mut search_from = 0;
     for comment in &program.comments {
         let span = comment.span;
         let Some(text) = program
@@ -317,19 +328,14 @@ fn relocate_late_comments(
             .filter(|(source, _)| *source >= span.end as usize)
             .min_by_key(|(source, _)| *source)
             .map(|(_, generated)| *generated);
-        let actual = code[search_from..]
-            .find(text)
-            .map(|relative| (search_from + relative, text.len()))
-            .or_else(|| {
-                let key = comment_key(text);
-                generated_comments
-                    .iter()
-                    .find(|(candidate, start, _)| *start >= search_from && *candidate == key)
-                    .map(|(_, start, end)| (*start, end - start))
-            });
-        if let Some((actual_start, actual_len)) = actual {
-            search_from = actual_start + actual_len;
-        }
+        let key = comment_key(text);
+        let occurrence = comment_occurrences.entry(key.clone()).or_default();
+        let actual = generated_comments
+            .iter()
+            .filter(|(candidate, _, _)| *candidate == key)
+            .nth(*occurrence)
+            .map(|(_, start, end)| (*start, end - start));
+        *occurrence += 1;
         let source_after = &program.source_text[span.end as usize..];
         let own_line = program.source_text[..span.start as usize]
             .rsplit_once('\n')
@@ -348,6 +354,16 @@ fn relocate_late_comments(
             )
         })
         .flatten();
+        let thunk_parameter_target = (!own_line && !matches!(comment.kind, CommentKind::Line))
+            .then(|| {
+                let actual_start = actual?.0;
+                let arrow = code[..actual_start].rfind("() =>")?;
+                code[arrow + 5..actual_start]
+                    .chars()
+                    .all(|c| c.is_whitespace() || c == '(')
+                    .then_some(arrow + 1)
+            })
+            .flatten();
         let reactive_target = (!matches!(comment.kind, CommentKind::Line)
             && source_after.trim_start().starts_with("$:"))
         .then(|| {
@@ -399,6 +415,7 @@ fn relocate_late_comments(
             .flatten();
         let Some(target) = reactive_target
             .or(generated_var)
+            .or(thunk_parameter_target)
             .or(textual_target)
             .or(anchor_target)
         else {
@@ -416,6 +433,8 @@ fn relocate_late_comments(
                     format!(" {text} ")
                 }
             }
+        } else if thunk_parameter_target.is_some() {
+            text.to_string()
         } else {
             match comment.kind {
                 CommentKind::Line => format!("{text}\n"),

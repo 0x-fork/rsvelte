@@ -1,10 +1,15 @@
 use rsvelte_core::{CompileOptions, GenerateMode, compile};
 
 fn client(source: &str) -> String {
+    compile_client(source, false)
+}
+
+fn compile_client(source: &str, dev: bool) -> String {
     compile(
         source,
         CompileOptions {
             generate: GenerateMode::Client,
+            dev,
             filename: Some("comments.svelte".into()),
             ..Default::default()
         },
@@ -60,5 +65,39 @@ fn non_ascii_before_a_relocated_comment_does_not_split_utf8() {
 fn trailing_line_comment_stays_before_generated_declarations() {
     let code = client("<script>\n// c\n</script>\n\n<button>x</button>");
     assert!(code.contains("var // c\n button = root();"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
+fn arrow_parameter_jsdoc_stays_with_the_parameter() {
+    let code = compile_client(
+        "<script>\nlet featuresToDraw = $state([]);\n$effect(() => {\nfeaturesToDraw.forEach(\n/** @param {any} feature */ feature => {}\n);\n});\n</script>",
+        true,
+    );
+    let comment = code.find("/** @param {any} feature */").expect("comment");
+    let parameter = code.find("(feature) =>").expect("parameter");
+    assert!(comment < parameter, "{code}");
+    assert!(
+        !code.contains("/** @param {any} feature */ featuresToDraw"),
+        "{code}"
+    );
+    assert_parses(&code);
+}
+
+#[test]
+fn escaped_tab_remains_escaped() {
+    let code = client("<script>const value = 'a\\tb';</script>{value}");
+    assert!(code.contains("'a\\tb'"), "{code}");
+    assert!(!code.contains("a\tb"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
+fn prop_default_jsdoc_stays_in_the_generated_thunk_parameters() {
+    let code = compile_client(
+        "<script>\n/** @typedef {Object} Props\n * @property {Object} [data]\n */\n/** @type {Props} */\nlet { data = /** @type {Object} */ ({}), slug } = $props();\n</script>",
+        true,
+    );
+    assert!(code.contains("(/** @type {Object} */) => ("), "{code}");
     assert_parses(&code);
 }
