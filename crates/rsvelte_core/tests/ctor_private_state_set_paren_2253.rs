@@ -254,7 +254,7 @@ fn constructor_literal_with_trailing_line_comment_in_last_position() {
         false,
     );
     assert!(
-        out.contains("$.set(this.#x, { a: s });"),
+        out.contains("$.set(this.#x, { a: s") && out.contains("// c\n});"),
         "the literal must remain the assignment value:\n{out}"
     );
     assert_structurally_valid(&out, "trailing comment in last position");

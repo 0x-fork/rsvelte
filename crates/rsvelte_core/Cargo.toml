@@ -127,6 +127,9 @@ lazy_static = "1.5.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
 oxc_ast_visit = "0.143"
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+stacker = "0.1.24"
+
 [dev-dependencies]
 # Testing
 rsvelte_ast_equiv = { path = "../rsvelte_ast_equiv" }

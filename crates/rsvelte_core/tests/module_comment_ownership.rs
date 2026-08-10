@@ -1,4 +1,4 @@
-//! Comments survive a client `.svelte.(js|ts)` compile.
+//! Comment ownership in a client `.svelte.(js|ts)` compile.
 
 use rsvelte_core::compiler::ModuleCompileOptions;
 use rsvelte_core::{GenerateMode, compile_module};
@@ -26,21 +26,19 @@ fn tail(src: &str) -> String {
 }
 
 #[test]
-fn a_top_level_comment_survives() {
+fn a_top_level_comment_is_dropped() {
     for comment in ["/* hdr */", "/** @type {number} */", "// hdr"] {
         let out = tail(&format!("{comment}\nexport const a = 1;\n"));
-        assert!(
-            out.contains("hdr") || out.contains("@type"),
-            "{comment} was dropped:\n{out}"
-        );
+        assert!(!out.contains("hdr"), "{comment} survived:\n{out}");
+        assert!(!out.contains("@type"), "{comment} survived:\n{out}");
         assert!(out.contains("export const a = 1;"), "{out}");
     }
 }
 
 #[test]
-fn a_comment_between_top_level_statements_survives() {
+fn a_comment_between_top_level_statements_is_dropped() {
     let out = tail("export const a = 1;\n/* mid */\nexport const b = 2;\n");
-    assert!(out.contains("mid"), "{out}");
+    assert!(!out.contains("mid"), "{out}");
 }
 
 #[test]
@@ -57,15 +55,16 @@ fn a_comment_inside_a_located_body_survives() {
 }
 
 #[test]
-fn an_arrow_expression_body_comment_survives() {
+fn an_arrow_expression_body_comment_is_dropped() {
     let out = tail("export const f = () => (/* c */ x);\n");
-    assert!(out.contains("export const f = () => x;"), "{out}");
-    assert!(out.contains("/* c */"), "{out}");
+    assert_eq!(
+        out.trim_end().lines().last(),
+        Some("export const f = () => x;")
+    );
 }
 
 #[test]
 fn a_line_comment_above_the_last_argument_survives() {
     let out = tail("export function f() {\n\tg((// c\n\t\ta));\n}\n");
-    assert!(out.contains("g(a);"), "{out}");
-    assert!(out.contains("// c"), "{out}");
+    assert!(out.contains("g(\n\t\t// c\n\t\ta\n\t);"), "{out}");
 }

@@ -85,6 +85,14 @@ fn arrow_parameter_jsdoc_stays_with_the_parameter() {
 }
 
 #[test]
+fn tab_literals_match_official_output() {
+    let code = client("<script>const value = 'a\\tb';</script>{value}");
+    assert!(code.contains("'a\tb'"), "{code}");
+    assert!(!code.contains("'a\\tb'"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
 fn prop_default_jsdoc_stays_in_the_generated_thunk_parameters() {
     let code = compile_client(
         "<script>\n/** @typedef {Object} Props\n * @property {Object} [data]\n */\n/** @type {Props} */\nlet { data = /** @type {Object} */ ({}), slug } = $props();\n</script>",
