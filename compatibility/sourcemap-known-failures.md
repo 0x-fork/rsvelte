@@ -11,8 +11,9 @@ outside `input.svelte`.
 | `anchor` | `anchor\t<sample>\t<target>\t<index>\t<str>` | an upstream `client:` / `server:` / `css:` expectation that rsvelte's map does not satisfy |
 | `out-of-range` | `out-of-range\t<sample>\t<target>\t<count>` | mappings whose original line or column lies outside the source |
 
-The current baseline contains 13 `anchor` entries and no `out-of-range`
-entries. Every mapping produced through `oxc_codegen` stays inside the source.
+The current `sourcemap-known-failures.json` baseline contains 13 entries, all
+of them `anchor` entries, and no `out-of-range` entries. Every mapping produced
+through `oxc_codegen` stays inside the source.
 The remaining client anchors reflect the chunk-granular provenance supplied to
 the printer; the server `sourcemap-empty-source` anchor is the only server
 failure.
