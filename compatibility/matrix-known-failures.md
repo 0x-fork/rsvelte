@@ -147,19 +147,19 @@ on `client` and `client-dev`. `server` has no dependency list and matches everyw
 
 Partition of `matrix-known-failures.json` entries under `param-pattern/` by shape: `12 + 12 + 12 + 12 + 12`
 
-### `directive-element` — 422 entries
+### `directive-element` — 398 entries
 
 19 directive kinds × 13 element kinds × 2 modes (runes / legacy), 1482 comparisons. Every one
-of these 422 entries is a **live rsvelte defect**, not accepted behaviour; none was known before
+of these 398 entries is a **live rsvelte defect**, not accepted behaviour; none was known before
 the family existed. They are listed so the ratchet can hold the line while they are burned down.
 
 The single most useful fact about the set is where it is **not**: zero entries on
-`regular-element`, `regular-input`, `component` and `each-keyed-element`. All 422 sit on a
+`regular-element`, `regular-input`, `component` and `each-keyed-element`. All 398 sit on a
 `<svelte:*>` special element. Directive handling on ordinary elements and components agrees with
 official across every kind and both modes; the special elements are where per-parent handling has
 drifted from upstream's one predicate per directive.
 
-Partition of `matrix-known-failures.json` entries under `directive-element/` by verdict and host: `114 + 102 + 60 + 24 + 24 + 22 + 20 + 20 + 12 + 12 + 6 + 6`
+Partition of `matrix-known-failures.json` entries under `directive-element/` by verdict and host: `114 + 102 + 60 + 24 + 22 + 20 + 20 + 12 + 12 + 6 + 6`
 
 | verdict | host | entries | cause |
 |---|---|---:|---|
@@ -167,7 +167,6 @@ Partition of `matrix-known-failures.json` entries under `directive-element/` by 
 | `error-mismatch` | `svelte-fragment` | 102 | every attribute is accepted; official raises `svelte_fragment_invalid_attribute` for everything but a `slot` attribute and `let:`. 17 kinds (`let:` and a plain `onclick=` attribute are legal upstream, and both match). |
 | `error-mismatch` | `svelte-self` | 60 | the component directive check does not run: 54 are `component_invalid_directive` (`use:` `transition:` `in:` `out:` `animate:` `class:` `style:`), 6 are `event_handler_invalid_component_modifier`. |
 | `error-mismatch` | `svelte-body` | 24 | 12 `bind_invalid_target` (`bind:value` accepted), 6 `let_directive_invalid_placement`, 6 `svelte_body_illegal_attribute` (a spread attribute). |
-| `warning-missing:a11y_no_static_element_interactions` | `svelte-element` | 24 | the warning never fires. 4 handler spellings × 2 modes × 3 targets. |
 | `js-mismatch` | `svelte-body` | 22 | 20 are `transition:` / `in:` / `out:` / `animate:` emitting nothing where official emits `$.transition` / `$.animation`; 2 are legacy-mode `bind:this` failing to make the target a `mutable_source`. |
 | `js-mismatch` | `svelte-document` | 20 | same transition/animation cause. |
 | `js-mismatch` | `svelte-window` | 20 | same transition/animation cause. |
@@ -179,20 +178,23 @@ Partition of `matrix-known-failures.json` entries under `directive-element/` by 
 The `js-mismatch` rows are `client` and `client-dev` only — the server target emits nothing for a
 transition on either compiler, so it agrees by construction and is not evidence of anything.
 
-The warning row is the same defect class as #2497, one code over:
-rsvelte emits **no a11y warning at all** for `<svelte:element>`, on any rule, so the four rows
-that reach it (`on:click`, `on:click|once`, `on:click|preventDefault`, `onclick=`) are one cause,
-not four. It is also the row that justifies the warning comparison this family shipped with:
-a warning that never fires leaves the output byte-identical, so `js.code` cannot report it.
+**The `warning-missing:a11y_no_static_element_interactions` row — 24 entries on `svelte-element`
+— is fixed by #2523 and no longer listed.** It read as one missing warning on four handler
+spellings; it was the whole a11y pass, which had no call site in `svelte_element.rs`, so
+`<svelte:element>` reached **none** of upstream's ~40 element rules. This family saw one of them
+because `on:click` is the only a11y-relevant shape its axes construct. It is still the row that
+justifies the warning comparison the family shipped with: a warning that never fires leaves the
+output byte-identical, so `js.code` cannot report it.
 
-Its verdict carries the **code**, and that is not cosmetic. With a flat `warning-mismatch`
-verdict these 24 entries share their ratchet key with every other warning on the same case and
-target — and re-breaking #2521 (so `event_directive_deprecated` stops firing on
-`<svelte:element>`) was measured to leave the gate **green**, because three of the four rows
-were already listed. Keying on `warning-missing:<code>` / `warning-extra:<code>` makes that
-revert produce 9 new ids instead.
+Its verdict carried the **code**, and that was not cosmetic. With a flat `warning-mismatch`
+verdict those 24 entries would have shared their ratchet key with every other warning on the same
+case and target — and re-breaking #2521 (so `event_directive_deprecated` stops firing on
+`<svelte:element>`) was measured to leave the gate **green**, because three of the four rows were
+already listed. Keying on `warning-missing:<code>` / `warning-extra:<code>` makes that revert
+produce 9 new ids instead, and is also what let #2523's fix be read off this gate as a clean
+24 → 0 rather than as a change in a flat count.
 
-The split by mode is `212` legacy / `210` runes — near-even, which is the evidence that the mode
+The split by mode is `200` legacy / `198` runes — near-even, which is the evidence that the mode
 axis is not decoration. The two extra legacy entries are the `bind:this` on `<svelte:body>` row,
 which has no runes counterpart.
 
@@ -213,6 +215,40 @@ while the live sites are `<svelte:body>` and `<svelte:self>`. The shapes the iss
 (`setter-through-call`, `sequence-bodied-setter`) all pass on the element and component hosts
 now; what survives is the same predicate reached through a special element. A repro file cannot
 find that, because the reporter picks the element.
+### `removed-statement-comment` — 324 entries
+
+The family crosses statements the SERVER transform removes (`$effect`, `$effect.pre`,
+`$effect.root`, `$inspect`) with the comment slot (leading / interior / trailing), 6 comment
+kinds, 3 hosts (`compileModule`, the instance script's top level, one function deep) and
+whether a statement survives after the removed one. 396 cases, 1188 comparisons; the fix that
+landed with it cleared 79 of them (403 → 324, all on `server`).
+
+Every remaining entry falls in one of **four** clusters, each with its own issue. The clusters
+are disjoint and exhaustive — the partition below sums to 324.
+
+| entries | target | cluster | issue |
+|---|---|---|---|
+| 66 | `server` | `instance-top` × `succ-none` only: the removed statement is the last one in the script, so the orphaned comments have no anchor region to be re-homed onto. Upstream flushes them at the end of the enclosing function body; rsvelte's synthesized component-fn body is location-less, so esrap's closing `flush_comments_until` is a no-op | [#2716](https://github.com/baseballyama/rsvelte/issues/2716) |
+| 108 | `client` | the `trailing` slot on `$effect` / `$effect.pre` / `$effect.root` (36 each, all 3 hosts × both successor states × 6 comment kinds): a comment trailing the call attaches to the effect's **callback argument** upstream, forcing esrap's wrapped one-argument-per-line layout; rsvelte attaches it after the call statement and keeps the call on one line. The comment survives — layout, not loss | [#2718](https://github.com/baseballyama/rsvelte/issues/2718) |
+| 144 | `client-dev` | the same three statement kinds (36 each) **plus all 36 `$inspect` rows**. `$inspect` is the whole client/client-dev difference in this cluster: prod removes it, leaving only the 6 instance-top/no-successor rows below, while dev lowers it to a `console.log(…)` call and every trailing row then meets the same argument-wrapping rule | [#2718](https://github.com/baseballyama/rsvelte/issues/2718) |
+| 6 | `client` | `inspect` × every comment kind in the `trailing` slot at instance top level with no successor: the orphaned comment is attached to the generated root declaration instead of the removed inspect statement's position | [#2737](https://github.com/baseballyama/rsvelte/issues/2737) |
+
+Partition of `matrix-known-failures.json` entries under `removed-statement-comment/` by
+cluster: `66 + 108 + 144 + 6`
+
+**[D] for all four.** Each was reduced to a hand-written repro outside the family and measured
+against the pinned official compiler. The `oxc_codegen` migration cleared #2736's four leading
+block-comment rows; the six trailing rows now form one placement cluster.
+
+**[S] on the pre-existing claim for the 258 client / client-dev entries.** They are argued
+pre-existing structurally, not by an A/B: the fix that shipped with this family touches only
+`3_transform/server/mod.rs` and `3_transform/server/ast/script.rs`, and the client target never
+enters either. The server cluster *was* measured both ways — 145 entries with the fix reverted,
+66 with it applied, on the same tree.
+
+Note the enrolment cost, because it is real: a ratchet entry suppresses everything about the
+entry it lists, so these 324 ids are now blind to any *further* regression on the same shapes
+until their issues are fixed.
 
 ---
 
