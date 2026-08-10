@@ -320,6 +320,7 @@ fn relocate_late_comments(
     mut code: String,
     anchors: &[(usize, usize)],
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
+    original_source: Option<&str>,
 ) -> (String, Vec<(usize, usize, usize)>) {
     let original_code = code.clone();
     let generated_comments = {
@@ -478,7 +479,18 @@ fn relocate_late_comments(
             .filter(|(source, _)| *source <= span.start as usize)
             .max_by_key(|(source, _)| *source)
             .map_or(0, |(_, generated)| *generated);
-        let generated_var = (dangling_chunk && !dangling_prefix_has_code)
+        let source_continues_after_script = loc_map
+            .and_then(|loc_map| {
+                loc_map
+                    .iter()
+                    .find(|(start, end, _)| span.start >= *start && span.end <= *end)
+            })
+            .and_then(|(_, _, source_offset)| *source_offset)
+            .and_then(|source_offset| original_source?.get(source_offset as usize..))
+            .and_then(|source| source.find("</script>").map(|end| &source[end + 9..]))
+            .is_some_and(|source| !source.trim().is_empty());
+        let generated_var = (dangling_chunk
+            && (!dangling_prefix_has_code || source_continues_after_script))
             .then(|| {
                 code[previous_generated..]
                     .match_indices("var ")
@@ -521,7 +533,7 @@ fn relocate_late_comments(
             })
         })
         .flatten();
-        if actual.is_some() && matches!(source_preceding, Some(';')) {
+        if actual.is_some() && matches!(source_preceding, Some(';')) && !dangling_chunk {
             continue;
         }
         let closing_anchor_target = source_after_trimmed
@@ -553,8 +565,8 @@ fn relocate_late_comments(
             continue;
         }
         let Some(target) = reactive_target
-            .or(body_tail)
             .or(generated_var)
+            .or(body_tail)
             .or(interior_target)
             .or(missing_interior_target)
             .or(thunk_parameter_target)
@@ -568,18 +580,18 @@ fn relocate_late_comments(
         }
         let insertion = if reactive_target.is_some() {
             format!(" {text}")
-        } else if body_tail.is_some() {
-            match comment.kind {
-                CommentKind::Line => format!("\t{text}\n"),
-                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
-                    format!("\t{text}\n")
-                }
-            }
         } else if generated_var.is_some() {
             match comment.kind {
                 CommentKind::Line => format!(" {text}\n"),
                 CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
                     format!(" {text} ")
+                }
+            }
+        } else if body_tail.is_some() {
+            match comment.kind {
+                CommentKind::Line => format!("\t{text}\n"),
+                CommentKind::SingleLineBlock | CommentKind::MultiLineBlock => {
+                    format!("\t{text}\n")
                 }
             }
         } else if interior_target.is_some() || missing_interior_target.is_some() {
@@ -687,7 +699,7 @@ fn print_inner(program: &Program<'_>) -> String {
         ))
         .build(&program);
     let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
-    let (code, _) = relocate_late_comments(&program, printed.code, &anchors, None);
+    let (code, _) = relocate_late_comments(&program, printed.code, &anchors, None, None);
     let code = restore_raw_strings(code, &substitutions);
     let (code, _) = separate_block_comments_from_line_continuations(&program, code);
     let (code, _) = unescape_script_close_tags(code);
@@ -701,13 +713,14 @@ pub fn print(program: &Program<'_>) -> String {
 fn print_with_raw_map_inner(
     program: &Program<'_>,
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
+    original_source: Option<&str>,
 ) -> CodegenResult {
     let allocator = Allocator::default();
     let (program, substitutions) = prepare_program(program, &allocator);
     let printed = Codegen::new().with_options(options(true)).build(&program);
     let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
     let (old_code, comment_replacements) =
-        relocate_late_comments(&program, printed.code, &anchors, loc_map);
+        relocate_late_comments(&program, printed.code, &anchors, loc_map, original_source);
     let old_starts = build_line_starts(&old_code);
     let restored_code = restore_raw_strings(old_code.clone(), &substitutions);
     let (code, line_continuation_replacements) =
@@ -754,8 +767,9 @@ fn print_with_raw_map_inner(
 fn print_with_raw_map(
     program: &Program<'_>,
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
+    original_source: Option<&str>,
 ) -> CodegenResult {
-    print_with_raw_map_inner(program, loc_map)
+    print_with_raw_map_inner(program, loc_map, original_source)
 }
 
 fn substitution_ranges(
@@ -787,7 +801,7 @@ fn translate_offset(offset: usize, replacements: &[(usize, usize, usize)]) -> us
 }
 
 pub fn print_with_map(program: &Program<'_>, original_source: &str) -> CodegenResult {
-    let mut printed = print_with_raw_map(program, None);
+    let mut printed = print_with_raw_map(program, None, Some(original_source));
     let source_starts = build_line_starts(program.source_text);
     printed.mappings.retain(|mapping| {
         line_col_to_offset(
@@ -806,7 +820,7 @@ pub fn print_split_with_map(
     loc_base: u32,
     loc_map: &[(u32, u32, Option<u32>)],
 ) -> CodegenResult {
-    let mut printed = print_with_raw_map(program, Some(loc_map));
+    let mut printed = print_with_raw_map(program, Some(loc_map), Some(original_source));
     let split_starts = build_line_starts(program.source_text);
     let original_starts = build_line_starts(original_source);
 

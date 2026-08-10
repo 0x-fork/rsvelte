@@ -69,6 +69,13 @@ fn trailing_line_comment_stays_before_generated_declarations() {
 }
 
 #[test]
+fn trailing_line_comment_after_script_code_stays_before_generated_declarations() {
+    let code = client("<script>\nlet n = 1;\n// c\n</script>\n\n<button>{n}</button>");
+    assert!(code.contains("var // c\n button = root();"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
 fn arrow_parameter_jsdoc_stays_with_the_parameter() {
     let code = compile_client(
         "<script>\nlet featuresToDraw = $state([]);\n$effect(() => {\nfeaturesToDraw.forEach(\n/** @param {any} feature */ feature => {}\n);\n});\n</script>",
