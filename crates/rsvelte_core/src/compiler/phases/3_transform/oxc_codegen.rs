@@ -75,7 +75,11 @@ struct PreserveRawStrings<'a> {
 
 impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
     fn visit_string_literal(&mut self, literal: &mut StringLiteral<'a>) {
-        let raw = if let Some(raw) = literal.raw {
+        let raw = if let Some(raw) = literal.raw.filter(|raw| {
+            raw.contains("\\\n")
+                || raw.contains("\\\r\n")
+                || raw.to_ascii_lowercase().contains("<\\/script")
+        }) {
             raw.to_string()
         } else if literal
             .value
@@ -213,12 +217,75 @@ fn comment_key(text: &str) -> String {
         .join(" ")
 }
 
+fn following_anchor(source_after: &str) -> Option<String> {
+    let source_after = source_after.trim_start();
+    if source_after.starts_with("$:") {
+        return Some("$:".into());
+    }
+    if let Some(rest) = source_after.strip_prefix('.') {
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+            .map_or(source_after.len(), |end| end + 1);
+        let mut anchor = source_after[..end].to_string();
+        if source_after[end..].trim_start().starts_with('(') {
+            anchor.push('(');
+        }
+        return Some(anchor);
+    }
+    let end = source_after
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+        .unwrap_or(source_after.len());
+    if end == 0 {
+        return None;
+    }
+    let identifier = &source_after[..end];
+    let rest = source_after[end..].trim_start();
+    if matches!(identifier, "let" | "const" | "var" | "class" | "function") {
+        let name_end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+            .unwrap_or(rest.len());
+        if name_end > 0 {
+            return Some(format!("{identifier} {}", &rest[..name_end]));
+        }
+    }
+    if rest.starts_with(')')
+        && rest
+            .find('\n')
+            .is_none_or(|newline| rest[..newline].contains("=>"))
+    {
+        return Some(format!("{identifier}) =>"));
+    }
+    Some(identifier.to_string())
+}
+
+fn find_comment_target(code: &str, source_after: &str, before: usize) -> Option<usize> {
+    let anchor = following_anchor(source_after)?;
+    let code = code.get(..before)?;
+    let mut search_end = code.len();
+    while let Some(start) = code[..search_end].rfind(&anchor) {
+        let identifier_anchor = anchor
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'));
+        let boundary = !identifier_anchor
+            || (start == 0
+                || !code.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    && !matches!(code.as_bytes()[start - 1], b'_' | b'$'));
+        if boundary {
+            return Some(start);
+        }
+        search_end = start;
+    }
+    None
+}
+
 fn relocate_late_comments(
     program: &Program<'_>,
     mut code: String,
     anchors: &[(usize, usize)],
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
 ) -> (String, Vec<(usize, usize, usize)>) {
+    let original_code = code.clone();
     let generated_comments = {
         let allocator = Allocator::default();
         let parsed =
@@ -245,14 +312,11 @@ fn relocate_late_comments(
         else {
             continue;
         };
-        let Some(target) = anchors
+        let anchor_target = anchors
             .iter()
             .filter(|(source, _)| *source >= span.end as usize)
             .min_by_key(|(source, _)| *source)
-            .map(|(_, generated)| *generated)
-        else {
-            continue;
-        };
+            .map(|(_, generated)| *generated);
         let actual = code[search_from..]
             .find(text)
             .map(|relative| (search_from + relative, text.len()))
@@ -267,6 +331,23 @@ fn relocate_late_comments(
             search_from = actual_start + actual_len;
         }
         let source_after = &program.source_text[span.end as usize..];
+        let own_line = program.source_text[..span.start as usize]
+            .rsplit_once('\n')
+            .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty())
+            && source_after
+                .find(|c: char| !c.is_whitespace())
+                .is_some_and(|next| source_after[..next].contains('\n'));
+        let source_after_trimmed = source_after.trim_start();
+        let textual_target = (source_after_trimmed.starts_with('.')
+            || (!own_line && !matches!(comment.kind, CommentKind::Line)))
+        .then(|| {
+            find_comment_target(
+                &code,
+                source_after,
+                actual.map_or(code.len(), |(start, _)| start),
+            )
+        })
+        .flatten();
         let reactive_target = (!matches!(comment.kind, CommentKind::Line)
             && source_after.trim_start().starts_with("$:"))
         .then(|| {
@@ -282,10 +363,11 @@ fn relocate_late_comments(
         .or_else(|| {
             (!matches!(comment.kind, CommentKind::Line)
                 && source_after.trim_start().starts_with("$:")
-                && code
-                    .get(target..)
+                && anchor_target
+                    .and_then(|target| code.get(target..))
                     .is_some_and(|rest| rest.starts_with("$:")))
-            .then_some(target + 1)
+            .then(|| anchor_target.map(|target| target + 1))
+            .flatten()
         });
         let previous_generated = anchors
             .iter()
@@ -303,7 +385,7 @@ fn relocate_late_comments(
                     .trim()
                     .is_empty()
             });
-        let generated_var = dangling_chunk
+        let generated_var = (dangling_chunk && !matches!(comment.kind, CommentKind::Line))
             .then(|| {
                 actual.and_then(|(actual_start, _)| {
                     code[previous_generated..actual_start]
@@ -315,13 +397,13 @@ fn relocate_late_comments(
                 })
             })
             .flatten();
-        let target = reactive_target.or(generated_var).unwrap_or(target);
-        let own_line = program.source_text[..span.start as usize]
-            .rsplit_once('\n')
-            .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty())
-            && source_after
-                .find(|c: char| !c.is_whitespace())
-                .is_some_and(|next| source_after[..next].contains('\n'));
+        let Some(target) = reactive_target
+            .or(generated_var)
+            .or(textual_target)
+            .or(anchor_target)
+        else {
+            continue;
+        };
         if actual.is_some_and(|(actual_start, _)| actual_start <= target) {
             continue;
         }
@@ -348,9 +430,17 @@ fn relocate_late_comments(
             edits.push((actual_start, actual_len, String::new()));
         }
     }
+    edits.retain(|(start, old_len, _)| {
+        code.is_char_boundary(*start) && code.is_char_boundary(*start + *old_len)
+    });
     edits.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     for (start, old_len, replacement) in &edits {
         code.replace_range(*start..*start + *old_len, replacement);
+    }
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &code, oxc_span::SourceType::mjs()).parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return (original_code, Vec::new());
     }
     let mut ranges = edits
         .into_iter()
