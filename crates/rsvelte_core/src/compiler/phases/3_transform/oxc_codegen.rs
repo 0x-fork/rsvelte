@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use oxc_allocator::{Allocator, CloneIn, Vec as ArenaVec};
 use oxc_ast::ast::{
-    BlockStatement, CommentContent, CommentKind, CommentPosition, Expression, FunctionBody,
-    ObjectProperty, Program, PropertyKind, Statement, StaticBlock, StringLiteral, SwitchCase,
+    BlockStatement, CommentContent, CommentKind, CommentPosition, ComputedMemberExpression,
+    Expression, FunctionBody, ObjectProperty, Program, PropertyKind, Statement, StaticBlock,
+    StringLiteral, SwitchCase,
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::{Codegen, CodegenOptions};
@@ -74,13 +75,27 @@ struct PreserveRawStrings<'a> {
     substitutions: Vec<(String, String)>,
 }
 
+fn raw_string_needs_preserving(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.windows(2).any(|pair| {
+        pair[0] == b'\\'
+            && matches!(
+                pair[1],
+                b'0' | b'b' | b'f' | b't' | b'v' | b'x' | b'u' | b'\n' | b'\r'
+            )
+    }) || raw.to_ascii_lowercase().contains("<\\/script")
+}
+
 impl<'a> VisitMut<'a> for PreserveRawStrings<'a> {
+    fn visit_computed_member_expression(&mut self, member: &mut ComputedMemberExpression<'a>) {
+        if let Expression::StringLiteral(literal) = &mut member.expression {
+            literal.raw = None;
+        }
+        walk_mut::walk_computed_member_expression(self, member);
+    }
+
     fn visit_string_literal(&mut self, literal: &mut StringLiteral<'a>) {
-        let raw = if let Some(raw) = literal.raw.filter(|raw| {
-            raw.contains("\\\n")
-                || raw.contains("\\\r\n")
-                || raw.to_ascii_lowercase().contains("<\\/script")
-        }) {
+        let raw = if let Some(raw) = literal.raw.filter(|raw| raw_string_needs_preserving(raw)) {
             raw.to_string()
         } else if literal
             .value
@@ -315,10 +330,53 @@ fn containing_statement_start(code: &str, offset: usize) -> Option<usize> {
         .map(|span| span.start as usize)
 }
 
+fn nearest_statement_division_target(
+    code: &str,
+    actual_start: usize,
+    actual_end: usize,
+) -> Option<usize> {
+    struct Statements {
+        spans: Vec<oxc_span::Span>,
+    }
+
+    impl<'a> Visit<'a> for Statements {
+        fn visit_statement(&mut self, statement: &Statement<'a>) {
+            self.spans.push(statement.span());
+            walk::walk_statement(self, statement);
+        }
+
+        fn visit_expression(&mut self, _expression: &Expression<'a>) {}
+    }
+
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    let mut statements = Statements { spans: Vec::new() };
+    statements.visit_program(&parsed.program);
+    statements
+        .spans
+        .into_iter()
+        .filter_map(|span| {
+            let start = span.start as usize;
+            let end = span.end as usize;
+            let slash = code[start..end]
+                .find(" / ")
+                .map(|relative| start + relative + 3)?;
+            let distance = if end <= actual_start {
+                actual_start - end
+            } else {
+                start.saturating_sub(actual_end)
+            };
+            Some((distance, span.end - span.start, slash))
+        })
+        .min()
+        .map(|(_, _, slash)| slash)
+}
+
 fn relocate_late_comments(
     program: &Program<'_>,
     mut code: String,
     anchors: &[(usize, usize)],
+    substitutions: &[(String, String)],
     loc_map: Option<&[(u32, u32, Option<u32>)]>,
     original_source: Option<&str>,
 ) -> (String, Vec<(usize, usize, usize)>) {
@@ -479,16 +537,26 @@ fn relocate_late_comments(
             .filter(|(source, _)| *source <= span.start as usize)
             .max_by_key(|(source, _)| *source)
             .map_or(0, |(_, generated)| *generated);
-        let source_continues_after_script = loc_map
+        let original_source_after_comment = loc_map
             .and_then(|loc_map| {
                 loc_map
                     .iter()
                     .find(|(start, end, _)| span.start >= *start && span.end <= *end)
             })
-            .and_then(|(_, _, source_offset)| *source_offset)
-            .and_then(|source_offset| original_source?.get(source_offset as usize..))
-            .and_then(|source| source.find("</script>").map(|end| &source[end + 9..]))
-            .is_some_and(|source| !source.trim().is_empty());
+            .and_then(|(start, _, source_offset)| {
+                let comment_end = (*source_offset)? as usize + (span.end - *start) as usize;
+                original_source?.get(comment_end..)
+            });
+        let trailing_script_comment = original_source_after_comment.is_some_and(|source| {
+            source
+                .find("</script>")
+                .is_some_and(|close| source[..close].trim().is_empty())
+        });
+        let source_continues_after_script = original_source_after_comment.is_some_and(|source| {
+            source.find("</script>").is_some_and(|close| {
+                source[..close].trim().is_empty() && !source[close + 9..].trim().is_empty()
+            })
+        });
         let generated_var = (dangling_chunk
             && (!dangling_prefix_has_code || source_continues_after_script))
             .then(|| {
@@ -500,7 +568,7 @@ fn relocate_late_comments(
                     .map(|(relative, _)| previous_generated + relative + 3)
             })
             .flatten();
-        let body_tail = (dangling_chunk && dangling_prefix_has_code)
+        let body_tail = (dangling_chunk && dangling_prefix_has_code && trailing_script_comment)
             .then(|| code.rfind("\n}").map(|target| target + 1))
             .flatten();
         let generated_own_line = actual.is_some_and(|(start, _)| {
@@ -508,6 +576,26 @@ fn relocate_late_comments(
                 .rsplit_once('\n')
                 .map_or(start == 0, |(_, prefix)| prefix.trim().is_empty())
         });
+        let division_target = ((actual.is_none() || generated_own_line)
+            && !own_line
+            && !matches!(comment.kind, CommentKind::Line)
+            && (matches!(source_following, Some('/')) || matches!(source_preceding, Some('/'))))
+        .then(|| {
+            let (start, end) = actual
+                .map(|(start, len)| (start, start + len))
+                .or_else(|| anchor_target.map(|target| (target, target)))?;
+            nearest_statement_division_target(&code, start, end)
+        })
+        .flatten();
+        let raw_string_target = matches!(source_following, Some('\'' | '"'))
+            .then(|| {
+                let index = substitutions
+                    .iter()
+                    .position(|(_, raw)| source_after_trimmed.starts_with(raw))?;
+                let before = actual.map_or(code.len(), |(start, _)| start);
+                code[..before].rfind(&format!("'\u{e000}rsvelte_raw_{index}\u{e001}"))
+            })
+            .flatten();
         let line_argument_range = (generated_own_line
             && !own_line
             && matches!(comment.kind, CommentKind::Line)
@@ -533,7 +621,10 @@ fn relocate_late_comments(
             })
         })
         .flatten();
-        if actual.is_some() && matches!(source_preceding, Some(';')) && !dangling_chunk {
+        if actual.is_some()
+            && matches!(source_preceding, Some(';'))
+            && !source_continues_after_script
+        {
             continue;
         }
         let closing_anchor_target = source_after_trimmed
@@ -547,6 +638,8 @@ fn relocate_late_comments(
             });
         if generated_own_line
             && reactive_target.is_none()
+            && division_target.is_none()
+            && raw_string_target.is_none()
             && body_tail.is_none()
             && generated_var.is_none()
             && thunk_parameter_target.is_none()
@@ -554,6 +647,7 @@ fn relocate_late_comments(
             && !source_after_trimmed.starts_with('.')
             && !closing_anchor_target
             && !text.starts_with("/**")
+            && (!dangling_chunk || trailing_script_comment)
         {
             continue;
         }
@@ -565,6 +659,8 @@ fn relocate_late_comments(
             continue;
         }
         let Some(target) = reactive_target
+            .or(division_target)
+            .or(raw_string_target)
             .or(generated_var)
             .or(body_tail)
             .or(interior_target)
@@ -580,6 +676,8 @@ fn relocate_late_comments(
         }
         let insertion = if reactive_target.is_some() {
             format!(" {text}")
+        } else if division_target.is_some() {
+            format!("{text} ")
         } else if generated_var.is_some() {
             match comment.kind {
                 CommentKind::Line => format!(" {text}\n"),
@@ -699,7 +797,8 @@ fn print_inner(program: &Program<'_>) -> String {
         ))
         .build(&program);
     let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
-    let (code, _) = relocate_late_comments(&program, printed.code, &anchors, None, None);
+    let (code, _) =
+        relocate_late_comments(&program, printed.code, &anchors, &substitutions, None, None);
     let code = restore_raw_strings(code, &substitutions);
     let (code, _) = separate_block_comments_from_line_continuations(&program, code);
     let (code, _) = unescape_script_close_tags(code);
@@ -719,8 +818,14 @@ fn print_with_raw_map_inner(
     let (program, substitutions) = prepare_program(program, &allocator);
     let printed = Codegen::new().with_options(options(true)).build(&program);
     let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
-    let (old_code, comment_replacements) =
-        relocate_late_comments(&program, printed.code, &anchors, loc_map, original_source);
+    let (old_code, comment_replacements) = relocate_late_comments(
+        &program,
+        printed.code,
+        &anchors,
+        &substitutions,
+        loc_map,
+        original_source,
+    );
     let old_starts = build_line_starts(&old_code);
     let restored_code = restore_raw_strings(old_code.clone(), &substitutions);
     let (code, line_continuation_replacements) =

@@ -4,6 +4,20 @@ fn client(source: &str) -> String {
     compile_client(source, false)
 }
 
+fn server(source: &str) -> String {
+    compile(
+        source,
+        CompileOptions {
+            generate: GenerateMode::Server,
+            filename: Some("comments.svelte".into()),
+            ..Default::default()
+        },
+    )
+    .expect("compile")
+    .js
+    .code
+}
+
 fn compile_client(source: &str, dev: bool) -> String {
     compile(
         source,
@@ -94,8 +108,51 @@ fn arrow_parameter_jsdoc_stays_with_the_parameter() {
 #[test]
 fn tab_literals_match_official_output() {
     let code = client("<script>const value = 'a\\tb';</script>{value}");
-    assert!(code.contains("'a\tb'"), "{code}");
-    assert!(!code.contains("'a\\tb'"), "{code}");
+    assert!(code.contains("const value = 'a\\tb'"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
+fn escaped_literal_spellings_are_preserved() {
+    let source = "{#if true}{@const a = 'a\\x41b'}{@const b = 'a\\u{1F600}b'}<p>{a}{b}</p>{/if}";
+    for code in [client(source), server(source)] {
+        assert!(code.contains("'a\\x41b'"), "{code}");
+        assert!(code.contains("'a\\u{1F600}b'"), "{code}");
+        assert_parses(&code);
+    }
+}
+
+#[test]
+fn inline_division_comment_stays_after_the_operator() {
+    let source = "<script>\nexport let v;\nlet k;\nfunction f() {\nreturn (v /* return */ / 2 / 4);\n}\n$: k = f();\n</script><p>{k}{v}</p>";
+    for code in [client(source), server(source)] {
+        assert!(
+            code.contains("v() / /* return */ 2 / 4") || code.contains("v / /* return */ 2 / 4"),
+            "{code}"
+        );
+        assert_parses(&code);
+    }
+}
+
+#[test]
+fn reactive_division_comment_stays_after_the_operator() {
+    let source =
+        "<script>\nexport let v;\nlet k;\n$: k = v /* return */ / 2 / 4;\n</script><p>{k}{v}</p>";
+    let code = server(source);
+    assert!(code.contains("$: k = v / /* return */ 2 / 4"), "{code}");
+    assert_parses(&code);
+}
+
+#[test]
+fn line_continuation_comment_is_not_moved_to_generated_markup() {
+    let code = client(
+        "<script>\nlet n = $state(0);\nconst cont =\n\t/* c */\n\t\"a\\\n\t\tb\";\n</script>\n<p>{cont}{n}</p>",
+    );
+    let declaration = code.find("const cont =").expect("declaration");
+    let comment = code.find("/* c */").expect("comment");
+    let literal = code.find("\"a\\\n").expect("literal");
+    assert!(declaration < comment && comment < literal, "{code}");
+    assert!(!code.contains("var /* c */"), "{code}");
     assert_parses(&code);
 }
 
