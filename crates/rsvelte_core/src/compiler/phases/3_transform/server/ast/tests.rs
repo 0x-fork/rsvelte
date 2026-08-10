@@ -3298,6 +3298,19 @@ fn module_script_at_module_scope() {
     assert!(out.contains("let c = 0;"), "missing instance decl:\n{out}");
 }
 
+#[test]
+fn module_script_drops_toplevel_comments_but_keeps_nested_comments() {
+    for options in ["", "<svelte:options runes={true} />"] {
+        let out = run(&format!(
+            "{options}<script module>\n// top level\nexport function value() {{\n\t// nested\n\treturn 1;\n}}\n/* trailing */\n</script><p>x</p>"
+        ));
+
+        assert!(!out.contains("top level"), "{out}");
+        assert!(!out.contains("trailing"), "{out}");
+        assert!(out.contains("// nested"), "{out}");
+    }
+}
+
 /// TypeScript instance scripts: the script slice is `strip_typescript`-ed
 /// before parsing, then lowered as JS. Output must match the oracle
 /// (which strips TS from its final output) structurally.

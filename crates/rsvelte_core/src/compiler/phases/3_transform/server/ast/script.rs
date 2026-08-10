@@ -54,7 +54,7 @@ use crate::ast::template::Script;
 use crate::compiler::phases::phase2_analyze::scope::BindingKind;
 use crate::compiler::phases::phase3_transform::builders::B;
 use oxc_ast::ast::{Comment, Expression as OxcExpression, Statement, VariableDeclarationKind};
-use oxc_ast_visit::VisitMut;
+use oxc_ast_visit::{Visit, VisitMut, walk};
 use oxc_span::{GetSpan, Span};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -433,6 +433,40 @@ fn classify_comments(body: &[Statement<'_>], all: &[Comment]) {
     }
 }
 
+fn module_body_comments(program: &oxc_ast::ast::Program<'_>) -> Vec<Comment> {
+    use oxc_ast::ast::{ClassBody, FunctionBody};
+
+    struct BodyCollector {
+        spans: Vec<Span>,
+    }
+
+    impl<'a> Visit<'a> for BodyCollector {
+        fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
+            self.spans.push(body.span);
+            walk::walk_function_body(self, body);
+        }
+
+        fn visit_class_body(&mut self, body: &ClassBody<'a>) {
+            self.spans.push(body.span);
+            walk::walk_class_body(self, body);
+        }
+    }
+
+    let mut collector = BodyCollector { spans: Vec::new() };
+    collector.visit_program(program);
+    program
+        .comments
+        .iter()
+        .copied()
+        .filter(|comment| {
+            collector
+                .spans
+                .iter()
+                .any(|body| comment.span.start >= body.start && comment.span.end <= body.end)
+        })
+        .collect()
+}
+
 /// Comments fully inside `[lo, hi]`, for attributing an INTERIOR subset to the
 /// site that drops it.
 fn comments_in(all: &[Comment], lo: u32, hi: u32) -> u64 {
@@ -508,7 +542,14 @@ fn transform_script<'a>(
         return Vec::new();
     }
 
-    classify_comments(&ret.program.body, &ret.program.comments);
+    let module_comments;
+    let script_comments = if is_instance {
+        ret.program.comments.as_slice()
+    } else {
+        module_comments = module_body_comments(&ret.program);
+        module_comments.as_slice()
+    };
+    classify_comments(&ret.program.body, script_comments);
 
     let mut out: Vec<Statement<'a>> = Vec::new();
     // Start of the region the next EMITTED statement carries. A statement the
@@ -544,7 +585,7 @@ fn transform_script<'a>(
                     let lowered =
                         lower_variable_declaration(vd, src, is_instance, state, &mut verbatim);
                     if verbatim.is_none() {
-                        count_non_reparse(&ret.program.comments, vd.span);
+                        count_non_reparse(script_comments, vd.span);
                     }
                     out.extend(lowered);
                 }
@@ -565,11 +606,7 @@ fn transform_script<'a>(
                 Statement::ExportDeclaration(exp) if is_instance => {
                     match &exp.declaration {
                         oxc_ast::ast::Declaration::VariableDeclaration(vd) => {
-                            count_export_keyword(
-                                &ret.program.comments,
-                                exp.span.start,
-                                vd.span.start,
-                            );
+                            count_export_keyword(script_comments, exp.span.start, vd.span.start);
                             let lowered = lower_variable_declaration(
                                 vd,
                                 src,
@@ -578,7 +615,7 @@ fn transform_script<'a>(
                                 &mut verbatim,
                             );
                             if verbatim.is_none() {
-                                count_non_reparse(&ret.program.comments, vd.span);
+                                count_non_reparse(script_comments, vd.span);
                             }
                             out.extend(lowered);
                         }
@@ -587,7 +624,7 @@ fn transform_script<'a>(
                             // declaration verbatim (re-parsed from its source span)
                             // with the same read-wrap every re-homed statement gets.
                             let span = decl.span();
-                            count_export_keyword(&ret.program.comments, exp.span.start, span.start);
+                            count_export_keyword(script_comments, exp.span.start, span.start);
                             let slice = &src[span.start as usize..span.end as usize];
                             if let Some(mut rehomed) = state.reparse_statement(slice) {
                                 verbatim = Some(span);
@@ -767,7 +804,7 @@ fn transform_script<'a>(
         if let Some(mut place) = place_on_region(
             &mut state.comments,
             src,
-            &ret.program.comments,
+            script_comments,
             region_start,
             stmt_span,
             verbatim,
@@ -2840,7 +2877,14 @@ fn transform_script_legacy<'a>(
         return Vec::new();
     }
 
-    classify_comments(&ret.program.body, &ret.program.comments);
+    let module_comments;
+    let script_comments = if is_instance {
+        ret.program.comments.as_slice()
+    } else {
+        module_comments = module_body_comments(&ret.program);
+        module_comments.as_slice()
+    };
+    classify_comments(&ret.program.body, script_comments);
 
     let mut out: Vec<Statement<'a>> = Vec::new();
     // Reactive `$:` statements are appended AFTER all other statements (mirrors
@@ -2916,11 +2960,7 @@ fn transform_script_legacy<'a>(
                     // `VariableDeclaration` branch).
                     match &exp.declaration {
                         oxc_ast::ast::Declaration::VariableDeclaration(vd) => {
-                            count_export_keyword(
-                                &ret.program.comments,
-                                exp.span.start,
-                                vd.span.start,
-                            );
+                            count_export_keyword(script_comments, exp.span.start, vd.span.start);
                             let lowered = lower_legacy_var_decl(
                                 vd,
                                 src,
@@ -2930,7 +2970,7 @@ fn transform_script_legacy<'a>(
                                 &mut verbatim,
                             );
                             if verbatim.is_none() {
-                                count_non_reparse(&ret.program.comments, vd.span);
+                                count_non_reparse(script_comments, vd.span);
                             }
                             out.extend(lowered);
                         }
@@ -2943,7 +2983,7 @@ fn transform_script_legacy<'a>(
                             let is_fn =
                                 matches!(other, oxc_ast::ast::Declaration::FunctionDeclaration(_));
                             let span = other.span();
-                            count_export_keyword(&ret.program.comments, exp.span.start, span.start);
+                            count_export_keyword(script_comments, exp.span.start, span.start);
                             let slice = &src[span.start as usize..span.end as usize];
                             if let Some(mut rehomed) = state.reparse_statement(slice) {
                                 verbatim = Some(span);
@@ -2971,7 +3011,7 @@ fn transform_script_legacy<'a>(
                         &mut verbatim,
                     );
                     if verbatim.is_none() {
-                        count_non_reparse(&ret.program.comments, vd.span);
+                        count_non_reparse(script_comments, vd.span);
                     }
                     out.extend(lowered);
                 }
@@ -3087,7 +3127,7 @@ fn transform_script_legacy<'a>(
         if let Some(mut place) = place_on_region(
             &mut state.comments,
             src,
-            &ret.program.comments,
+            script_comments,
             region_start,
             stmt_span,
             verbatim,

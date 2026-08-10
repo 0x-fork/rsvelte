@@ -1904,6 +1904,39 @@ export function useInterval(callback, delay) {
     );
 }
 
+#[test]
+fn compile_module_drops_toplevel_comments_but_keeps_nested_comments() {
+    let source = r#"
+// top level
+export function value() {
+	// nested
+	return 1;
+}
+/* trailing */
+"#;
+
+    for generate in [
+        crate::compiler::GenerateMode::Client,
+        crate::compiler::GenerateMode::Server,
+    ] {
+        let code = crate::compiler::compile_module(
+            source,
+            crate::compiler::ModuleCompileOptions {
+                generate,
+                filename: Some("comments.svelte.js".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .js
+        .code;
+
+        assert!(!code.contains("top level"), "{code}");
+        assert!(!code.contains("trailing"), "{code}");
+        assert!(code.contains("// nested"), "{code}");
+    }
+}
+
 /// Discriminating. `replace_standalone_pattern` is called with needles like
 /// `format!("{var}++")`, whose first character is the identifier — so a rejected
 /// match advanced the cursor one *byte* into a multi-byte name and the next

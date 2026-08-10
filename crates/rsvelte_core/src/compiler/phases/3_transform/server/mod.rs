@@ -148,6 +148,7 @@ pub fn transform_server_module(
     // variable-declarator init, where it is redundant and strips to the bare arg
     // (e.g. melt-ui Popover / selection-state `const prev = $state.snapshot(this.x)`).
     let transformed = transform_script::strip_snapshot_declarator_init_module(&transformed);
+    let transformed = super::client::strip_module_toplevel_comments(&transformed);
 
     // Split imports from body
     let (script_imports, script_rest) = super::client::extract_imports_str(&transformed);

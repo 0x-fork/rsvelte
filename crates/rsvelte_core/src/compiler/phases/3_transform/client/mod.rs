@@ -349,6 +349,7 @@ pub fn transform_client_module(
     };
 
     let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
+    let transformed = strip_module_toplevel_comments(&transformed);
 
     // The transformed source includes everything (imports + body).
     // We need to split imports from body to avoid duplicate svelte import.
