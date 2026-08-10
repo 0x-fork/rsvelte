@@ -1937,6 +1937,20 @@ export function value() {
     }
 }
 
+#[test]
+fn compile_module_keeps_comment_between_class_and_export() {
+    let source = r#"
+export class Counter {
+	value = $state(0);
+}
+/* between */
+export const shared = new Counter();
+"#;
+    let stripped = strip_module_toplevel_comments(source);
+
+    assert!(stripped.contains("/* between */"), "{stripped}");
+}
+
 /// Discriminating. `replace_standalone_pattern` is called with needles like
 /// `format!("{var}++")`, whose first character is the identifier — so a rejected
 /// match advanced the cursor one *byte* into a multi-byte name and the next

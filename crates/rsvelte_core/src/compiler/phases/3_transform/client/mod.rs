@@ -2608,24 +2608,7 @@ fn is_export_default_stmt(stmt: &JsStatement) -> bool {
 ///   bar,
 /// } from './module';
 /// ```
-/// Drop module-`<script>`-level comments that the official compiler's esrap
-/// output omits.
-///
-/// The client program's top-level `Program` node is synthetic (no `loc`), so
-/// esrap's `reset_comment_index` fast-forwards the comment cursor past every
-/// comment before the module body is printed. A module comment is therefore
-/// only re-emitted if it is nested inside a `loc`-bearing block that esrap
-/// re-enters via `body()` — i.e. a function or class body. Every other module
-/// comment is dropped: a leading JSDoc before a surviving `export const`, and
-/// the per-field JSDoc that `strip_typescript` re-emits when it removes an
-/// `export type` / `interface` body (that re-emission is correct for the
-/// instance script, whose statements keep their `loc` inside the component
-/// block, but wrong for the module).
-///
-/// Mirror that here for the module non-import content: keep only comments that
-/// fall inside a function/class body span; splice the rest out. Leftover blank
-/// lines are absorbed by downstream normalization. Returns the input unchanged
-/// on a parse failure or when there is nothing to drop.
+/// Drop leading and trailing module comments omitted by the official compiler.
 pub(crate) fn strip_module_toplevel_comments(src: &str) -> String {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
@@ -2656,6 +2639,7 @@ fn strip_module_toplevel_comments_from_program(
 ) -> String {
     use oxc_ast::ast::{ClassBody, FunctionBody};
     use oxc_ast_visit::{Visit, walk};
+    use oxc_span::GetSpan;
 
     struct BodyCollector {
         spans: Vec<(u32, u32)>,
@@ -2678,7 +2662,6 @@ fn strip_module_toplevel_comments_from_program(
 
     let mut collector = BodyCollector { spans: Vec::new() };
     collector.visit_program(program);
-
     let mut removals: Vec<(usize, usize)> = Vec::new();
     for c in &program.comments {
         let (cs, ce) = (c.span.start, c.span.end);
@@ -2686,7 +2669,27 @@ fn strip_module_toplevel_comments_from_program(
             .spans
             .iter()
             .any(|(bs, be)| cs >= *bs && ce <= *be);
-        if !inside {
+        let previous = program
+            .body
+            .iter()
+            .filter(|statement| statement.span().end <= cs)
+            .max_by_key(|statement| statement.span().end);
+        let follows_class = previous.is_some_and(|statement| match statement {
+            oxc_ast::ast::Statement::ClassDeclaration(_) => true,
+            oxc_ast::ast::Statement::ExportDeclaration(export) => matches!(
+                export.declaration,
+                oxc_ast::ast::Declaration::ClassDeclaration(_)
+            ),
+            oxc_ast::ast::Statement::ExportDefaultDeclaration(export) => matches!(
+                export.declaration,
+                oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(_)
+            ),
+            _ => false,
+        }) && program
+            .body
+            .iter()
+            .any(|statement| statement.span().start >= ce);
+        if !inside && !follows_class {
             removals.push((cs as usize, ce as usize));
         }
     }

@@ -91,6 +91,7 @@ oxc_ast = { version = "0.143", features = ["serialize"] }
 oxc_span = "0.143"
 oxc_diagnostics = "0.143"
 oxc_codegen = "0.143"
+oxc_sourcemap = "8.1"
 oxc_syntax = "0.143"
 oxc_semantic = "0.143"
 
