@@ -543,9 +543,11 @@ fn relocate_late_comments(
                     .iter()
                     .find(|(start, end, _)| span.start >= *start && span.end <= *end)
             })
-            .and_then(|(start, _, source_offset)| {
-                let comment_end = (*source_offset)? as usize + (span.end - *start) as usize;
-                original_source?.get(comment_end..)
+            .and_then(|(_, _, source_offset)| {
+                let source = original_source?.get((*source_offset)? as usize..)?;
+                let script_end = source.find("</script>")?;
+                let relative = source[..script_end].rfind(text)?;
+                source.get(relative + text.len()..)
             });
         let trailing_script_comment = original_source_after_comment.is_some_and(|source| {
             source
