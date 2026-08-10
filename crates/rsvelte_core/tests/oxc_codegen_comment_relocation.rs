@@ -157,6 +157,18 @@ fn line_continuation_comment_is_not_moved_to_generated_markup() {
 }
 
 #[test]
+fn trailing_comment_after_transformed_class_stays_on_generated_var() {
+    let code = client(
+        "<script>\nclass Counter {\n#n = $state(0);\nget n() { return this.#n; }\n}\nconst c = new Counter();\n/* c */\n</script>\n<button onclick={() => c.n}>x</button>",
+    );
+    let comment = code.find("/* c */").expect("comment");
+    let generated = code[..comment].rfind("var ").expect("generated var");
+    let button = code[comment..].find("button =").expect("button") + comment;
+    assert!(generated < comment && comment < button, "{code}");
+    assert_parses(&code);
+}
+
+#[test]
 fn prop_default_jsdoc_stays_in_the_generated_thunk_parameters() {
     let code = compile_client(
         "<script>\n/** @typedef {Object} Props\n * @property {Object} [data]\n */\n/** @type {Props} */\nlet { data = /** @type {Object} */ ({}), slug } = $props();\n</script>",
