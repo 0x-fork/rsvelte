@@ -5568,24 +5568,17 @@ fn transform_instance_script_for_visitors(
         if !analysis.runes && first_line_trimmed.starts_with("$:") {
             let _reactive_start = super::profile::timer_start();
             let _reactive_guard = super::profile::ReactiveStmtGuard(_reactive_start);
-            // AST-derived ordered dependency names for THIS top-level `$:` statement
-            // (Phase 2, source-ordinal aligned). Both phases count top-level `$:`
-            // in source order, so the ordinal stays in sync.
-            let dep_names: &[String] = analysis
-                .reactive_statement_dependencies
-                .get(*reactive_ordinal)
-                .map(|v| v.as_slice())
+            // Phase 2 owns the `$:` facts. The text path below only lowers its
+            // body; it must not rescan that body to reconstruct the graph.
+            let reactive_metadata = analysis.legacy_reactive_statements.get(*reactive_ordinal);
+            let dep_names: &[String] = reactive_metadata
+                .map(|statement| statement.dependencies.as_slice())
                 .unwrap_or(&[]);
+            let assigned_vars = reactive_metadata
+                .map(|statement| statement.assignments.clone())
+                .unwrap_or_default();
             *reactive_ordinal += 1;
-            // Assignment targets still decide the topological graph, but its
-            // dependency side was already collected by Phase 2 from the typed AST.
             let _rs_deps_start = super::profile::timer_start();
-            let assigned_vars = extract_reactive_statement_assignments(
-                &statement,
-                state_vars,
-                prop_assignment_transform_vars,
-                store_sub_vars,
-            );
             let dep_vars = dep_names.to_vec();
             super::profile::record_rs_deps(super::profile::timer_elapsed(_rs_deps_start));
             let _rs_body_start = super::profile::timer_start();
