@@ -155,12 +155,18 @@ function parseConfigText(configPath) {
     // Propagate `compileOptions: { hmr: true }` so HMR-specific fixtures are
     // generated with HMR-aware official output. The test runner
     // (rsvelte_devtools/tests/compatibility_report.rs) already passes `hmr` based on the same
-    // marker. We deliberately do NOT propagate `dev: true` here — the dev-mode
-    // SSR codegen still has small divergences from the official compiler that
-    // would cause many cross-suite regressions.
+    // marker.
     const hmrMatch = text.match(/compileOptions\s*:\s*\{[^}]*\bhmr\s*:\s*(true|false)\b/);
     if (hmrMatch) {
       config.compileOptions = { hmr: hmrMatch[1] === 'true' };
+    }
+
+    const devMatch = text.match(/compileOptions\s*:\s*\{[^}]*\bdev\s*:\s*(true|false)\b/);
+    if (devMatch) {
+      config.compileOptions = {
+        ...(config.compileOptions ?? {}),
+        dev: devMatch[1] === 'true',
+      };
     }
 
     // Propagate `compileOptions.experimental.async`. New snapshot fixtures
@@ -270,6 +276,7 @@ async function generateSnapshotFixture(sampleDir, outputDir, config) {
   try {
     const serverResult = compile(source, {
       ...compileOptions,
+      dev: false,
       generate: 'server',
       // Use sample_name/index.svelte to match official Svelte test expectations
       filename: `${sampleName}/index.svelte`,
@@ -559,6 +566,7 @@ async function generateRuntimeFixture(sampleDir, outputDir, config) {
   try {
     const serverResult = compile(source, {
       ...compileOptions,
+      dev: false,
       generate: 'server',
       filename: 'main.svelte',
     });
@@ -656,6 +664,7 @@ async function generateSsrFixture(sampleDir, outputDir, config) {
   try {
     const result = compile(source, {
       ...compileOptions,
+      dev: false,
       generate: 'server',
       filename: 'main.svelte',
     });

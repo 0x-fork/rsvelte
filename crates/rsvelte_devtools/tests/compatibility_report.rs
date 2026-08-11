@@ -1100,6 +1100,7 @@ fn run_runtime_category_tests(category: &str) -> CategoryResult {
                 generate: GenerateMode::Client,
                 filename: Some(input_filename.clone()),
                 css: CssMode::External,
+                dev: fixture_options.dev,
                 experimental: ExperimentalOptions {
                     r#async: fixture_options.r#async,
                 },
