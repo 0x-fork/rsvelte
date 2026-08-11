@@ -84,6 +84,41 @@ fn is_unused_branch_keeps_its_source_position() {
 }
 
 #[test]
+fn functional_pseudo_compound_gets_an_outer_scope_class() {
+    let result = crate::compiler::compile(
+        "<div class=\"a b\"></div><style>:is(.a):is(.b) { color: red; }</style>",
+        crate::compiler::CompileOptions {
+            filename: Some("functional-pseudo.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        result.css.unwrap().code.starts_with(".svelte-"),
+        "a compound of functional pseudo-classes must receive an outer scope class"
+    );
+}
+
+#[test]
+fn root_has_compound_scopes_its_matching_element() {
+    let result = crate::compiler::compile(
+        "<div class=\"a\"></div><style>:root.x:has(.a) { color: red; }</style>",
+        crate::compiler::CompileOptions {
+            filename: Some("root-has.svelte".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        result.js.code.contains("a svelte-"),
+        "the :has() argument element must receive the scope class:\n{}",
+        result.js.code
+    );
+}
+
+#[test]
 fn nonreactive_each_collection_does_not_invalidate_inner_signals() {
     let result = crate::compiler::compile(
         "{#each [1, 2] as item}<input bind:value={item}>{/each}",
