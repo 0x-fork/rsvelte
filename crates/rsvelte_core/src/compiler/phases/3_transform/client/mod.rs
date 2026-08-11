@@ -2346,7 +2346,13 @@ fn transform_client_with_visitors(
 
     // Scriptless components use the faster handwritten printer. Scripts need
     // OXC AST codegen for formatting and coordinate-aware comment placement.
-    if *CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some() {
+    let has_async_derived_ignore = analysis
+        .instance_script_content
+        .as_ref()
+        .is_some_and(|script| script.raw.contains("svelte-ignore await_waterfall"));
+    if !has_async_derived_ignore
+        && (*CLIENT_USE_OXC || ast.instance.is_some() || ast.module.is_some())
+    {
         let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
             let mut alloc = cell.borrow_mut();
             alloc.reset();
