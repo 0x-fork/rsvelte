@@ -7149,7 +7149,6 @@ fn transform_instance_script_for_visitors(
             if let Some(ast_result) = ast_result {
                 result = ast_result;
             }
-            result = restore_async_derived_ignore_comments(original_script, result);
             // Apply store_unsub wrapping after AST transform (searches for $.set patterns)
             if !store_sub_vars.is_empty()
                 && let Some(wrapped) = rewritten(wrap_store_unsub_for_state_sets(
@@ -7213,6 +7212,8 @@ fn transform_instance_script_for_visitors(
     {
         result = instrumented;
     }
+
+    result = restore_async_derived_ignore_comments(original_script, result);
 
     super::profile::record_st_post_passes(super::profile::timer_elapsed(_stage));
 
