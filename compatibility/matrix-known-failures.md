@@ -74,18 +74,11 @@ Partition of `matrix-known-failures.json` entries under `comment-slot/` by what 
 
 Partition of `matrix-known-failures.json` entries under `comment-slot/` by seed: `32 + 28 + 24 + 8 + 8 + 8 + 8`
 
-### `each-collection` — 90 entries
+### `each-collection` — 0 entries
 
-All 90 have one cause, and it is **not** the parenthesisation the family was added for. Five of
-the twenty collection expressions have no reactive dependency at all — `getList()`, `[1, 2]`,
-`` `ab` ``, `new Array(1)`, `(() => list)`. For those, official emits no
-`$.invalidate_inner_signals(…)` in the item's setter; rsvelte's each visitor falls back to
-invalidating the collection expression itself whenever `transitive_deps` is empty
-(`3_transform/client/visitors/each_block.rs`), and so emits one. It appears on every slot that
-writes the item (9 of the 10) and on both client targets — the server builds no accessor — so
-5 × 9 × 2 = 90.
+Every collection shape now matches across all targets.
 
-Partition of `matrix-known-failures.json` entries under `each-collection/` by collection: `18 + 18 + 18 + 18 + 18`
+Partition of `matrix-known-failures.json` entries under `each-collection/` by collection: `0`
 
 The axis this family exists for is at **zero**: every loose-binding collection (`??`, `||`,
 `&&`, a ternary, `!x`, `typeof x`, `x + y`, a sequence, an assignment, `o?.list`) matches on all
@@ -147,36 +140,12 @@ on `client` and `client-dev`. `server` has no dependency list and matches everyw
 
 Partition of `matrix-known-failures.json` entries under `param-pattern/` by shape: `12 + 12 + 12 + 12 + 12`
 
-### `directive-element` — 398 entries
+### `directive-element` — 62 entries
 
-19 directive kinds × 13 element kinds × 2 modes (runes / legacy), 1482 comparisons. Every one
-of these 398 entries is a **live rsvelte defect**, not accepted behaviour; none was known before
-the family existed. They are listed so the ratchet can hold the line while they are burned down.
+The remaining differences are limited to `bind:` validation on `<svelte:body>`,
+`<svelte:document>`, and `<svelte:window>`, plus the two client-only `bind:this` outputs.
 
-The single most useful fact about the set is where it is **not**: zero entries on
-`regular-element`, `regular-input`, `component` and `each-keyed-element`. All 398 sit on a
-`<svelte:*>` special element. Directive handling on ordinary elements and components agrees with
-official across every kind and both modes; the special elements are where per-parent handling has
-drifted from upstream's one predicate per directive.
-
-Partition of `matrix-known-failures.json` entries under `directive-element/` by verdict and host: `114 + 102 + 60 + 24 + 22 + 20 + 20 + 12 + 12 + 6 + 6`
-
-| verdict | host | entries | cause |
-|---|---|---:|---|
-| `error-mismatch` | `svelte-boundary` | 114 | every attribute is accepted; official raises `svelte_boundary_invalid_attribute` for all but `onerror` / `failed` / `pending`. All 19 directive kinds, both modes. |
-| `error-mismatch` | `svelte-fragment` | 102 | every attribute is accepted; official raises `svelte_fragment_invalid_attribute` for everything but a `slot` attribute and `let:`. 17 kinds (`let:` and a plain `onclick=` attribute are legal upstream, and both match). |
-| `error-mismatch` | `svelte-self` | 60 | the component directive check does not run: 54 are `component_invalid_directive` (`use:` `transition:` `in:` `out:` `animate:` `class:` `style:`), 6 are `event_handler_invalid_component_modifier`. |
-| `error-mismatch` | `svelte-body` | 24 | 12 `bind_invalid_target` (`bind:value` accepted), 6 `let_directive_invalid_placement`, 6 `svelte_body_illegal_attribute` (a spread attribute). |
-| `js-mismatch` | `svelte-body` | 22 | 20 are `transition:` / `in:` / `out:` / `animate:` emitting nothing where official emits `$.transition` / `$.animation`; 2 are legacy-mode `bind:this` failing to make the target a `mutable_source`. |
-| `js-mismatch` | `svelte-document` | 20 | same transition/animation cause. |
-| `js-mismatch` | `svelte-window` | 20 | same transition/animation cause. |
-| `error-code-mismatch` | `svelte-document` | 12 | `bind:value` rejected as `bind_invalid_name`; official says `bind_invalid_target`. |
-| `error-code-mismatch` | `svelte-window` | 12 | same. |
-| `error-mismatch` | `svelte-element` | 6 | `animate:` outside a keyed `{#each}` is accepted (`animation_invalid_placement`). |
-| `error-mismatch` | `svelte-component` | 6 | `on:click\|preventDefault` is accepted (`event_handler_invalid_component_modifier`). |
-
-The `js-mismatch` rows are `client` and `client-dev` only — the server target emits nothing for a
-transition on either compiler, so it agrees by construction and is not evidence of anything.
+Partition of `matrix-known-failures.json` entries under `directive-element/` by verdict and host: `62`
 
 **The `warning-missing:a11y_no_static_element_interactions` row — 24 entries on `svelte-element`
 — is fixed by #2523 and no longer listed.** It read as one missing warning on four handler
@@ -193,10 +162,6 @@ case and target — and re-breaking #2521 (so `event_directive_deprecated` stops
 already listed. Keying on `warning-missing:<code>` / `warning-extra:<code>` makes that revert
 produce 9 new ids instead, and is also what let #2523's fix be read off this gate as a clean
 24 → 0 rather than as a change in a flat count.
-
-The split by mode is `200` legacy / `198` runes — near-even, which is the evidence that the mode
-axis is not decoration. The two extra legacy entries are the `bind:this` on `<svelte:body>` row,
-which has no runes counterpart.
 
 ### `bind-setter` — 3 entries
 
