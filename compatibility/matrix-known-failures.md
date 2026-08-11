@@ -232,7 +232,7 @@ in dev — is *not* in this list; the rows that isolate it (`instance__identifie
 `instance__multi-declarator__none`, all three targets) pass. What remains are five independent
 defects the family exposed on the way, all of them older than the family:
 
-Partition of `matrix-known-failures.json` entries under `async-derived/` by cause: `128 + 39 + 18 + 14 + 13 + 13 + 2`
+Partition of `matrix-known-failures.json` entries under `async-derived/` by cause: `130 + 39 + 18 + 12 + 13 + 13 + 2`
 
 | # | cause | entries |
 |---|---|---|
