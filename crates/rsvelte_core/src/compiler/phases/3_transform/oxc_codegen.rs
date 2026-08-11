@@ -373,6 +373,20 @@ fn trailing_declaration_target(source_before: &str, code: &str) -> Option<usize>
     })?
 }
 
+fn inside_source_top_level_statement(source: &str, offset: u32) -> bool {
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::mjs()).parse();
+    parsed
+        .program
+        .body
+        .iter()
+        .any(|statement| statement.span().start <= offset && offset < statement.span().end)
+}
+
+fn trailing_generated_var_target(code: &str) -> Option<usize> {
+    code.rfind("var ").map(|start| start + "var ".len())
+}
+
 fn nearest_statement_division_target(
     code: &str,
     actual_start: usize,
@@ -476,17 +490,25 @@ fn relocate_late_comments(
             && source_after
                 .find(|c: char| !c.is_whitespace())
                 .is_some_and(|next| source_after[..next].contains('\n'));
+        let starts_on_own_line = program.source_text[..span.start as usize]
+            .rsplit_once('\n')
+            .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty());
         let source_after_trimmed = source_after.trim_start();
-        let trailing_target = (source_after.trim().is_empty()
-            || source_after.trim_start().starts_with("//"))
+        let trailing_target = (!inside_source_top_level_statement(program.source_text, span.start)
+            && (source_after.trim().is_empty() || source_after.trim_start().starts_with("//")))
         .then(|| {
-            anchors
-                .iter()
-                .filter(|(source, _)| *source <= span.start as usize)
-                .max_by_key(|(source, _)| *source)
-                .and_then(|(_, generated)| containing_statement_end(&code, *generated))
-                .map(|end| end + usize::from(code.as_bytes().get(end) == Some(&b';')))
-                .or_else(|| trailing_declaration_target(source_before, &code))
+            starts_on_own_line
+                .then(|| trailing_generated_var_target(&code))
+                .flatten()
+                .or_else(|| {
+                    anchors
+                        .iter()
+                        .filter(|(source, _)| *source <= span.start as usize)
+                        .max_by_key(|(source, _)| *source)
+                        .and_then(|(_, generated)| containing_statement_end(&code, *generated))
+                        .map(|end| end + usize::from(code.as_bytes().get(end) == Some(&b';')))
+                        .or_else(|| trailing_declaration_target(source_before, &code))
+                })
         })
         .flatten();
         let textual_target = (source_after_trimmed.starts_with('.')
@@ -682,6 +704,7 @@ fn relocate_late_comments(
         if actual.is_some()
             && matches!(source_preceding, Some(';'))
             && !source_continues_after_script
+            && trailing_target.is_none()
         {
             continue;
         }
@@ -702,6 +725,7 @@ fn relocate_late_comments(
             && generated_var.is_none()
             && thunk_parameter_target.is_none()
             && line_argument_range.is_none()
+            && trailing_target.is_none()
             && !source_after_trimmed.starts_with('.')
             && !closing_anchor_target
             && !text.starts_with("/**")
@@ -733,8 +757,14 @@ fn relocate_late_comments(
         if actual.is_some_and(|(actual_start, _)| actual_start <= target) {
             continue;
         }
-        let insertion = if reactive_target.is_some() || trailing_target.is_some() {
+        let insertion = if reactive_target.is_some() {
             format!(" {text}")
+        } else if trailing_target.is_some() {
+            if starts_on_own_line {
+                format!("{text}\n ")
+            } else {
+                format!(" {text}")
+            }
         } else if division_target.is_some() {
             format!("{text} ")
         } else if generated_var.is_some() {
