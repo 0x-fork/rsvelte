@@ -7135,6 +7135,7 @@ fn transform_instance_script_for_visitors(
             if let Some(ast_result) = ast_result {
                 result = ast_result;
             }
+            result = restore_async_derived_ignore_comments(original_script, result);
             // Apply store_unsub wrapping after AST transform (searches for $.set patterns)
             if !store_sub_vars.is_empty()
                 && let Some(wrapped) = rewritten(wrap_store_unsub_for_state_sets(
@@ -7202,6 +7203,55 @@ fn transform_instance_script_for_visitors(
     super::profile::record_st_post_passes(super::profile::timer_elapsed(_stage));
 
     result
+}
+
+fn restore_async_derived_ignore_comments(source: &str, mut transformed: String) -> String {
+    if transformed.contains("svelte-ignore await_waterfall") {
+        return transformed;
+    }
+
+    let mut search_from = 0;
+    while let Some(relative) = source[search_from..].find("svelte-ignore await_waterfall") {
+        let ignore = search_from + relative;
+        let comment_start = source[..ignore]
+            .rfind("/*")
+            .or_else(|| source[..ignore].rfind("//"));
+        let Some(comment_start) = comment_start else {
+            search_from = ignore + "svelte-ignore await_waterfall".len();
+            continue;
+        };
+        let comment_end = if source[comment_start..].starts_with("/*") {
+            source[comment_start..]
+                .find("*/")
+                .map(|end| comment_start + end + 2)
+        } else {
+            source[comment_start..]
+                .find('\n')
+                .map(|end| comment_start + end)
+                .or(Some(source.len()))
+        };
+        let Some(comment_end) = comment_end else {
+            break;
+        };
+        let rest = source[comment_end..].trim_start();
+        let Some((kind, rest)) = ["const ", "let ", "var "]
+            .iter()
+            .find_map(|kind| rest.strip_prefix(kind).map(|rest| (*kind, rest)))
+        else {
+            search_from = comment_end;
+            continue;
+        };
+        let name_end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let needle = format!("{kind}{name} = await $.async_derived");
+        if let Some(pos) = transformed.find(&needle) {
+            transformed.insert_str(pos, &format!("{}\n", &source[comment_start..comment_end]));
+        }
+        search_from = comment_end;
+    }
+    transformed
 }
 
 /// Transform shadowed local reactive variables within their enclosing function bodies.
