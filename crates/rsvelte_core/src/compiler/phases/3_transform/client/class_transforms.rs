@@ -446,12 +446,27 @@ pub(super) struct ClassStateField {
     /// just the bare `#x;` declaration — identical to the kept member — with no
     /// accessor). Defaults to `false`.
     pub(super) had_class_body_decl: bool,
-    /// An inline trailing comment (e.g. `// TODO …`) that preceded this field
-    /// on its own line in the source.  When present, it is appended after the
-    /// private backing field declaration instead of being emitted as a
-    /// separate comment member — matching the official Svelte compiler's
-    /// behaviour of attaching leading comments to the field line.
+    /// A leading comment that belongs in the synthesized backing field value.
     pub(super) trailing_comment: Option<String>,
+}
+
+fn take_leading_comment(pending: &mut Vec<String>) -> Option<String> {
+    let last = pending.last()?.trim();
+    if last.starts_with("//") {
+        let first = pending
+            .iter()
+            .rposition(|line| !line.trim().starts_with("//"))
+            .map_or(0, |index| index + 1);
+        return Some(pending.drain(first..).collect::<Vec<_>>().join("\n"));
+    }
+
+    if !last.ends_with("*/") {
+        return None;
+    }
+    let first = pending
+        .iter()
+        .rposition(|line| line.trim_start().starts_with("/*"))?;
+    Some(pending.drain(first..).collect::<Vec<_>>().join("\n"))
 }
 
 /// Emit a transformed class field definition with optional getter/setter.
@@ -564,15 +579,23 @@ pub(super) fn emit_class_field(
                     replace_field_ref_word_boundary(&derived_expr, &private_ref, &getter);
             }
         }
+        let jsdoc = field
+            .trailing_comment
+            .as_deref()
+            .filter(|comment| !field.is_private && comment.trim_start().starts_with("/**"));
+        let (derived_infix, arrow_prefix) = match jsdoc {
+            Some(comment) => ("", format!("({comment}\n{indent}) => ")),
+            None => (comment_infix.as_str(), "() => ".to_string()),
+        };
         let wrapped_value = if derived_expr.trim_start().starts_with('{') {
-            format!("() => ({})", derived_expr)
+            format!("{arrow_prefix}({})", derived_expr)
         } else {
-            format!("() => {}", derived_expr)
+            format!("{arrow_prefix}{derived_expr}")
         };
         let _ = writeln!(
             output,
             "{}{} = {}$.derived({});",
-            indent, private_name, comment_infix, wrapped_value
+            indent, private_name, derived_infix, wrapped_value
         );
         if !field.is_private {
             let getter_name = format_getter_name(&field.name);
@@ -1053,15 +1076,6 @@ pub(crate) fn transform_class_fields_client(script: &str) -> String {
                     {
                         continue;
                     }
-
-                    // Helper: extract a leading `//` comment from pending_non_rune
-                    // and return it so it can be attached inline to the rune field,
-                    // matching the official Svelte compiler's behaviour.
-                    let take_leading_comment = |pending: &mut Vec<String>| -> Option<String> {
-                        // If the last pending line is a `//` comment AND there are
-                        // no non-comment lines after it, pop it and return it.
-                        pending.pop_if(|last| last.trim().starts_with("//"))
-                    };
 
                     // Try single-line parse
                     if let Some(mut field) = parse_state_field(trimmed, rune_type) {
@@ -2564,6 +2578,24 @@ export class Counter {
         assert!(
             !out.contains("count = $state(0)"),
             "raw field remained:\n{out}"
+        );
+    }
+
+    #[test]
+    fn public_rune_field_moves_a_leading_block_comment_to_its_value() {
+        let out = transform_class_fields_client("class C {\n\t/* c */\n\tn = $state(0);\n}");
+        assert!(
+            out.contains("#n = /* c */\n\t$.state(0);"),
+            "leading block comment should be attached to the generated backing field value:\n{out}"
+        );
+    }
+
+    #[test]
+    fn public_rune_field_moves_leading_line_comments_to_its_value() {
+        let out = transform_class_fields_client("class C {\n\t// c\n\tn = $state(0);\n}");
+        assert!(
+            out.contains("#n = // c\n\t$.state(0);"),
+            "leading line comments should be attached to the generated backing field value:\n{out}"
         );
     }
 
