@@ -1267,9 +1267,9 @@ fn transform_client_with_visitors(
                     options.dev,
                 ) {
                     let cleaned_output = strip_async_noop_placeholders(async_result.output.trim());
-                    let cleaned_output =
-                        restore_async_derived_ignore_comments(&content.raw, cleaned_output);
                     let normalized = normalize_js_with_oxc(cleaned_output.trim(), script_indent);
+                    let normalized =
+                        restore_async_derived_ignore_comments(&content.raw, normalized);
                     component_body.push(JsStatement::RawMapped {
                         code: normalized.into(),
                         source_offset: script_source_offset,
