@@ -6632,6 +6632,34 @@ fn transform_complex_selector(
                 }
             });
 
+        let complex_bumps_specificity = children.iter().any(|relative_selector| {
+            if is_global_like(relative_selector) {
+                return false;
+            }
+            let scoped = relative_selector
+                .get("metadata")
+                .and_then(|metadata| metadata.get("scoped"))
+                .and_then(|scoped| scoped.as_bool())
+                .unwrap_or(true);
+            scoped
+                && relative_selector
+                    .get("selectors")
+                    .and_then(|selectors| selectors.as_array())
+                    .is_some_and(|selectors| {
+                        selectors.iter().any(|selector| {
+                            let ty = selector.get("type").and_then(|ty| ty.as_str());
+                            !matches!(
+                                ty,
+                                Some(
+                                    "PseudoClassSelector"
+                                        | "PseudoElementSelector"
+                                        | "NestingSelector"
+                                )
+                            )
+                        })
+                    })
+        });
+
         // Track if the next relative selector should be treated as global
         // (after a bare :global modifier)
         let mut next_is_global = false;
@@ -7077,7 +7105,8 @@ fn transform_complex_selector(
                             });
                         let compound_bumps =
                             needs_scoping && !has_nesting_selector && !is_standalone_is_where;
-                        let outer_bumped_for_recursion = local_specificity_bumped || compound_bumps;
+                        let outer_bumped_for_recursion =
+                            local_specificity_bumped || compound_bumps || complex_bumps_specificity;
 
                         selector_parts.push_str(&format_simple_selector_with_scope(
                             sel,
@@ -7440,8 +7469,7 @@ fn transform_is_not_args(
 
     // args should be a SelectorList
     if let Some(children) = args.get("children").and_then(|c| c.as_array()) {
-        let mut used_selectors = Vec::new();
-        let mut unused_selectors = Vec::new();
+        let mut selectors = Vec::new();
 
         for complex_selector in children.iter() {
             // For :not(), never mark inner selectors as unused
@@ -7458,41 +7486,40 @@ fn transform_is_not_args(
             };
 
             if is_unused {
-                // Collect the raw selector text for unused selectors
-                unused_selectors.push(get_selector_text(complex_selector));
+                selectors.push((true, get_selector_text(complex_selector)));
             } else {
-                // Transform and collect used selectors
-                used_selectors.push(transform_is_not_complex_selector(
-                    complex_selector,
-                    selector,
-                    css_source,
-                    pseudo_name,
-                    ctx,
-                    use_direct_class,
-                    outer_specificity_bumped,
+                selectors.push((
+                    false,
+                    transform_is_not_complex_selector(
+                        complex_selector,
+                        selector,
+                        css_source,
+                        pseudo_name,
+                        ctx,
+                        use_direct_class,
+                        outer_specificity_bumped,
+                    ),
                 ));
             }
         }
 
-        // Build the result: used selectors first, then unused comment
-        for (i, sel) in used_selectors.iter().enumerate() {
+        for (i, (is_unused, selector)) in selectors.iter().enumerate() {
             if i > 0 {
-                result.push_str(", ");
+                result.push(' ');
             }
-            result.push_str(sel);
-        }
-
-        // Add unused selectors as a comment if any
-        if !unused_selectors.is_empty() {
-            if !used_selectors.is_empty() {
-                result.push_str(" /* (unused) ");
-            } else {
-                // All selectors are unused - this case should be handled by the caller
-                // by marking the entire rule as unused
+            if *is_unused {
                 result.push_str("/* (unused) ");
+                result.push_str(selector);
+                if i + 1 < selectors.len() {
+                    result.push(',');
+                }
+                result.push_str("*/");
+            } else {
+                result.push_str(selector);
+                if i + 1 < selectors.len() && !selectors[i + 1].0 {
+                    result.push(',');
+                }
             }
-            result.push_str(&unused_selectors.join(", "));
-            result.push_str("*/");
         }
     } else {
         // Fallback to raw text
