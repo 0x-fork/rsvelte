@@ -330,6 +330,49 @@ fn containing_statement_start(code: &str, offset: usize) -> Option<usize> {
         .map(|span| span.start as usize)
 }
 
+fn containing_statement_end(code: &str, offset: usize) -> Option<usize> {
+    struct Statements {
+        spans: Vec<oxc_span::Span>,
+    }
+
+    impl<'a> Visit<'a> for Statements {
+        fn visit_statement(&mut self, statement: &Statement<'a>) {
+            self.spans.push(statement.span());
+            walk::walk_statement(self, statement);
+        }
+
+        fn visit_expression(&mut self, _expression: &Expression<'a>) {}
+    }
+
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    let mut statements = Statements { spans: Vec::new() };
+    statements.visit_program(&parsed.program);
+    statements
+        .spans
+        .into_iter()
+        .filter(|span| span.start as usize <= offset && offset < span.end as usize)
+        .min_by_key(|span| span.end - span.start)
+        .map(|span| span.end as usize)
+}
+
+fn trailing_declaration_target(source_before: &str, code: &str) -> Option<usize> {
+    let line = source_before
+        .rsplit_once('\n')
+        .map_or(source_before, |(_, line)| line);
+    let declaration = line.rfind("let ").or_else(|| line.rfind("const "))?;
+    let name = line[declaration..]
+        .split_whitespace()
+        .nth(1)?
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$');
+    (!name.is_empty()).then(|| {
+        let needle = format!(" {name}");
+        let start = code.rfind(&needle)? + 1;
+        let end = containing_statement_end(code, start)?;
+        Some(end + usize::from(code.as_bytes().get(end) == Some(&b';')))
+    })?
+}
+
 fn nearest_statement_division_target(
     code: &str,
     actual_start: usize,
@@ -426,6 +469,7 @@ fn relocate_late_comments(
             search_from = actual_start + actual_len;
         }
         let source_after = &program.source_text[span.end as usize..];
+        let source_before = &program.source_text[..span.start as usize];
         let own_line = program.source_text[..span.start as usize]
             .rsplit_once('\n')
             .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty())
@@ -433,6 +477,18 @@ fn relocate_late_comments(
                 .find(|c: char| !c.is_whitespace())
                 .is_some_and(|next| source_after[..next].contains('\n'));
         let source_after_trimmed = source_after.trim_start();
+        let trailing_target = (source_after.trim().is_empty()
+            || source_after.trim_start().starts_with("//"))
+        .then(|| {
+            anchors
+                .iter()
+                .filter(|(source, _)| *source <= span.start as usize)
+                .max_by_key(|(source, _)| *source)
+                .and_then(|(_, generated)| containing_statement_end(&code, *generated))
+                .map(|end| end + usize::from(code.as_bytes().get(end) == Some(&b';')))
+                .or_else(|| trailing_declaration_target(source_before, &code))
+        })
+        .flatten();
         let textual_target = (source_after_trimmed.starts_with('.')
             || actual.is_none()
             || (!own_line && !matches!(comment.kind, CommentKind::Line)))
@@ -661,6 +717,7 @@ fn relocate_late_comments(
             continue;
         }
         let Some(target) = reactive_target
+            .or(trailing_target)
             .or(division_target)
             .or(raw_string_target)
             .or(generated_var)
@@ -676,7 +733,7 @@ fn relocate_late_comments(
         if actual.is_some_and(|(actual_start, _)| actual_start <= target) {
             continue;
         }
-        let insertion = if reactive_target.is_some() {
+        let insertion = if reactive_target.is_some() || trailing_target.is_some() {
             format!(" {text}")
         } else if division_target.is_some() {
             format!("{text} ")
@@ -718,7 +775,11 @@ fn relocate_late_comments(
     edits.retain(|(start, old_len, _)| {
         code.is_char_boundary(*start) && code.is_char_boundary(*start + *old_len)
     });
-    edits.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    edits.sort_unstable_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.starts_with(" //").cmp(&a.2.starts_with(" //")))
+    });
     for (start, old_len, replacement) in &edits {
         code.replace_range(*start..*start + *old_len, replacement);
     }
