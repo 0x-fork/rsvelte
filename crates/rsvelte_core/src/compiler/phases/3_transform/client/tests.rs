@@ -1727,6 +1727,145 @@ export function useStore() {
 }
 
 #[test]
+fn module_async_derived_instruments_its_thunk_in_dev() {
+    let mut options = crate::compiler::ModuleCompileOptions {
+        dev: true,
+        filename: Some("test.svelte.js".to_string()),
+        ..Default::default()
+    };
+    options.experimental.r#async = true;
+    let result =
+        crate::compiler::compile_module("const value = $derived(await load());", options).unwrap();
+    let code = &result.js.code;
+
+    assert!(
+        code.contains("$.async_derived(async () => (await $.track_reactivity_loss(load()))(), 'value', 'test.svelte.js:1:14')"),
+        "await instrumentation must stay inside the async-derived thunk: {code}"
+    );
+    assert!(
+        !code.contains("await $.track_reactivity_loss($.async_derived"),
+        "the outer async-derived await must not be instrumented: {code}"
+    );
+}
+
+#[test]
+fn module_class_derived_only_rehomes_the_first_public_field_jsdoc() {
+    let source = "let wc_state = $state.raw({ base: '', error: null });\nexport const adapter_state = new (class {\n\t/** URL to the web container instance. */\n\tbase = $derived(wc_state.base);\n\t/** Errors from within the web container instance. */\n\terror = $derived(wc_state.error);\n})();\nexport function update(module) { wc_state = module.state; }";
+    for dev in [false, true] {
+        let result = crate::compiler::compile(
+            &format!("<script module>\n{source}\n</script>"),
+            crate::compiler::CompileOptions {
+                filename: Some("adapter.svelte.ts".to_string()),
+                dev,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result
+                .js
+                .code
+                .contains("$.derived((/** URL to the web container instance. */"),
+            "the first public field JSDoc must stay on its derived arrow (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            !result
+                .js
+                .code
+                .contains("Errors from within the web container instance."),
+            "later public field JSDoc has no generated source anchor (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            result.js.code.contains("$.set(wc_state, module.state)"),
+            "raw state setters must not request proxying (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            !result
+                .js
+                .code
+                .contains("$.set(wc_state, module.state, true)"),
+            "raw state setters must not request proxying (dev={dev}):\n{}",
+            result.js.code
+        );
+    }
+}
+
+#[test]
+fn compile_module_class_derived_only_rehomes_the_first_public_field_jsdoc() {
+    let source = "let wc_state = $state.raw({ base: '', error: null });\nexport const adapter_state = new (class {\n\t/** URL to the web container instance. */\n\tbase = $derived(wc_state.base);\n\t/** Errors from within the web container instance. */\n\terror = $derived(wc_state.error);\n})();\nexport function update(module) { wc_state = module.state; }";
+    for dev in [false, true] {
+        let result = crate::compiler::compile_module(
+            source,
+            crate::compiler::ModuleCompileOptions {
+                filename: Some("adapter.svelte.ts".to_string()),
+                dev,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result
+                .js
+                .code
+                .contains("$.derived((/** URL to the web container instance. */"),
+            "the first public field JSDoc must stay on its derived arrow (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            !result
+                .js
+                .code
+                .contains("Errors from within the web container instance."),
+            "later public field JSDoc has no generated source anchor (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            result.js.code.contains("$.set(wc_state, module.state)"),
+            "raw state setters must not request proxying (dev={dev}):\n{}",
+            result.js.code
+        );
+        assert!(
+            !result
+                .js
+                .code
+                .contains("$.set(wc_state, module.state, true)"),
+            "raw state setters must not request proxying (dev={dev}):\n{}",
+            result.js.code
+        );
+    }
+}
+
+#[test]
+fn module_async_derived_prelude_does_not_reorder_console_analysis() {
+    let mut options = crate::compiler::ModuleCompileOptions {
+        dev: true,
+        filename: Some("test.svelte.js".to_string()),
+        ..Default::default()
+    };
+    options.experimental.r#async = true;
+    let result = crate::compiler::compile_module(
+        "const state = $state(0);\nconst value = $derived(await load());\nconsole.log(state);",
+        options,
+    )
+    .unwrap();
+    assert!(
+        result.js.code.contains("console.log(state);"),
+        "console instrumentation must retain its normal module analysis order: {}",
+        result.js.code
+    );
+    assert!(
+        !result.js.code.contains("log_if_contains_state"),
+        "console instrumentation must not run before module state lowering: {}",
+        result.js.code
+    );
+}
+
+#[test]
 fn test_module_derived_with_ts_annotation_gets_get() {
     // Bug: TypeScript type annotations on $derived declarations (e.g.,
     // `const contentStyle: string = $derived.by(...)`) prevented the

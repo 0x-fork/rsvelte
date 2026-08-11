@@ -26,6 +26,7 @@ mod inspect_rune_ast;
 mod instance_dev_tail_ast;
 mod legacy_state_member_mutate_ast;
 mod local_assign_ast;
+mod module_derived_ast;
 mod module_dev_tail_ast;
 mod module_state_runes_ast;
 mod private_class_assign_ast;
@@ -81,6 +82,7 @@ use store_transforms::*;
 
 // Explicit re-exports for functions used outside the client module.
 pub(crate) use class_transforms::transform_class_fields_client;
+use class_transforms::transform_module_class_fields_client;
 pub(crate) use expression_utils::find_matching_paren;
 pub(crate) use formatting::normalize_js_with_oxc;
 
@@ -303,7 +305,7 @@ pub fn transform_client_module(
     }
 
     // Transform the module source (rune replacements, class fields, etc.)
-    let class_transformed = transform_class_fields_client(source);
+    let class_transformed = transform_module_class_fields_client(source);
 
     // Transform destructured assignments whose LHS contains state variables into
     // IIFE / sequence form (mirrors upstream `visit_assignment_expression` in
@@ -408,10 +410,10 @@ pub(crate) fn print_module_program(
             }
         })
     {
-        return Ok(format!("{header}\n{code}"));
+        return Ok(format!("{header}\n{}", rehome_derived_jsdoc(&code)));
     }
     generate(&program, &arena)
-        .map(|code| format!("{header}\n{code}"))
+        .map(|code| format!("{header}\n{}", rehome_derived_jsdoc(&code)))
         .map_err(TransformError::CodeGen)
 }
 
@@ -422,7 +424,7 @@ pub(crate) fn transform_module_source_for_module(
     analysis: &ComponentAnalysis,
     dev: bool,
 ) -> String {
-    let class_transformed = transform_class_fields_client(source);
+    let class_transformed = transform_module_class_fields_client(source);
     transform_module_script_runes(&class_transformed, analysis, dev)
 }
 
@@ -2034,7 +2036,7 @@ fn transform_client_with_visitors(
     // Transform class fields first (before rune transforms strip the rune names)
     // Then transform remaining rune calls ($state, $derived, etc.) in module-level script
     if let Some((non_imports, retained_comment_stripped)) = module_script_non_imports {
-        let class_transformed = transform_class_fields_client(&non_imports);
+        let class_transformed = transform_module_class_fields_client(&non_imports);
         let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
         // Drop module-level comments esrap's no-`loc` top-level Program omits
         // (leading JSDoc before a kept `export const`, per-field JSDoc that
@@ -3941,11 +3943,25 @@ pub(crate) fn transform_module_script_runes(
     // CallExpressions and asks "is the callee `$state`/`$derived` with type
     // arguments?". Falls back to the original `result` when the source isn't
     // TS (generics aren't legal) or fails to parse.
+    let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
     {
-        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
         if let Some(rewritten) =
             strip_rune_generics_ast::strip_rune_generic_params_ast(&result, is_ts)
         {
+            result = rewritten;
+        }
+    }
+
+    // Instrument the source await before `$derived` lowering moves it into an
+    // async-derived thunk. The tail pass recognises the generated outer await.
+    if dev {
+        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
+        if let Some(rewritten) = module_dev_tail_ast::transform_module_awaits_ast(
+            &result,
+            is_ts,
+            analysis.runes,
+            Some(analysis),
+        ) {
             result = rewritten;
         }
     }
@@ -4101,11 +4117,18 @@ pub(crate) fn transform_module_script_runes(
 
     // Reactive module state vars = those that need $.get()/$.set()
     // (i.e. all module state vars except non-reactive ones)
-    let reactive_module_state_vars: Vec<String> = module_state_vars
+    let mut reactive_module_state_vars: Vec<String> = module_state_vars
         .iter()
         .filter(|v| !module_non_reactive_vars.contains(v))
         .cloned()
         .collect();
+    for binding in &analysis.root.bindings {
+        if matches!(binding.kind, BindingKind::Derived)
+            && !reactive_module_state_vars.contains(&binding.name)
+        {
+            reactive_module_state_vars.push(binding.name.clone());
+        }
+    }
 
     // Lower the module script's `$state*` runes in a single batched parse:
     //   * `$state.snapshot(x)` → `$.snapshot(x)`
@@ -4224,6 +4247,37 @@ pub(crate) fn transform_module_script_runes(
 
     // Transform $derived() to $.derived(() => expr) or $.async_derived() for async
     // Need to wrap state variable references inside the expression with $.get()
+    let module_async_derived_locations = dev.then(|| {
+        let script_content = analysis.module_script_content.as_ref();
+        let (script_start, original_script) = script_content.map_or((0, script), |content| {
+            (
+                content.start,
+                analysis
+                    .source
+                    .get(content.start as usize..content.end as usize)
+                    .unwrap_or(script),
+            )
+        });
+        async_derived_dev::collect(
+            &analysis.source,
+            script_start,
+            original_script,
+            analysis.filename.as_str(),
+            analysis.is_typescript,
+            analysis.runes,
+        )
+    });
+    if let Some(rewritten) = module_derived_ast::transform_module_derived_destructuring_ast(
+        &result,
+        is_ts,
+        &reactive_module_state_vars,
+        &module_non_reactive_vars,
+        &module_proxy_vars,
+        dev,
+        module_async_derived_locations.as_ref(),
+    ) {
+        result = rewritten;
+    }
     while let Some(pos) = memmem::find(result.as_bytes(), b"$derived(") {
         if result[..pos].ends_with('$') {
             // Already transformed to $.derived() - skip
@@ -4255,21 +4309,33 @@ pub(crate) fn transform_module_script_runes(
                 let inner_expr = strip_top_level_await_from_expr(&saved_content);
                 let inner_has_nested_await = contains_direct_await_in_expression(&inner_expr);
 
+                let var_name = extract_var_name_before_rune(&result[..pos]);
+                let dev_tail = async_derived_dev::dev_args(
+                    module_async_derived_locations.as_ref(),
+                    &var_name,
+                    &var_name,
+                );
                 let new_derived = if inner_has_nested_await {
                     let is_object = saved_content.trim().starts_with('{');
                     if is_object {
-                        format!("await $.async_derived(async () => ({}))", saved_content)
+                        format!(
+                            "await $.async_derived(async () => ({}){})",
+                            saved_content, dev_tail
+                        )
                     } else {
-                        format!("await $.async_derived(async () => {})", saved_content)
+                        format!(
+                            "await $.async_derived(async () => {}{})",
+                            saved_content, dev_tail
+                        )
                     }
                 } else {
                     let inner_trimmed = inner_expr.trim();
                     let inner_is_object = inner_trimmed.starts_with('{');
                     if inner_is_object {
-                        format!("await $.async_derived(() => ({}))", inner_expr)
+                        format!("await $.async_derived(() => ({}){})", inner_expr, dev_tail)
                     } else {
                         let thunk_arg = unthunk_string(&inner_expr);
-                        format!("await $.async_derived({})", thunk_arg)
+                        format!("await $.async_derived({}{})", thunk_arg, dev_tail)
                     }
                 };
                 result = format!(
@@ -4312,6 +4378,14 @@ pub(crate) fn transform_module_script_runes(
             .filter(|(_, _, is_state)| !is_state) // is_state=false means $derived
             .map(|(name, _, _)| name.clone())
             .collect();
+        for binding in &analysis.root.bindings {
+            if binding.scope_index != analysis.root.instance_scope_index
+                && matches!(binding.kind, BindingKind::Derived)
+                && !derived_vars.contains(&binding.name)
+            {
+                derived_vars.push(binding.name.clone());
+            }
+        }
         // Also add $state.raw vars from bindings — they never use the proxy flag.
         for (name, &binding_idx) in &analysis.root.scope.declarations {
             if let Some(b) = analysis.root.bindings.get(binding_idx)

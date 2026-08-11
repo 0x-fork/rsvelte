@@ -43,7 +43,7 @@ pub(super) fn extract_var_name_before_rune(before_rune: &str) -> String {
     // object literals from previously transformed code.
     let current_line_start = before_eq.rfind('\n').map_or(0, |p| p + 1);
     let current_line = &before_eq[current_line_start..];
-    let before_type = if let Some(colon_offset) = current_line.rfind(':') {
+    let before_type = if let Some(colon_offset) = rfind_unquoted_colon(current_line) {
         let colon_pos = current_line_start + colon_offset;
         let candidate = before_eq[..colon_pos].trim_end();
         if candidate
@@ -78,6 +78,29 @@ pub(super) fn extract_var_name_before_rune(before_rune: &str) -> String {
     } else {
         String::new()
     }
+}
+
+fn rfind_unquoted_colon(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut found = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'\"' | b'`') {
+            quote = Some(byte);
+        } else if byte == b':' {
+            found = Some(index);
+        }
+    }
+    found
 }
 
 ///
@@ -3041,6 +3064,21 @@ pub(super) fn wrap_await_with_save_in_async_derived(expr: &str) -> String {
 
                 while j < len {
                     match chars[j] {
+                        '\'' | '"' | '`' => {
+                            let quote = chars[j];
+                            j += 1;
+                            while j < len {
+                                if chars[j] == '\\' {
+                                    j += 2;
+                                } else if chars[j] == quote {
+                                    j += 1;
+                                    break;
+                                } else {
+                                    j += 1;
+                                }
+                            }
+                            continue;
+                        }
                         '(' => paren_depth += 1,
                         ')' => {
                             if paren_depth == 0 {
@@ -3083,10 +3121,12 @@ pub(super) fn wrap_await_with_save_in_async_derived(expr: &str) -> String {
                 // Check if there's more expression after this await+arg
                 let remaining: String = chars[j..].iter().collect();
                 let remaining_trimmed = remaining.trim();
-                let has_more_after = !remaining_trimmed.is_empty()
+                let has_more_after = !await_arg_trimmed.starts_with("$.track_reactivity_loss(")
+                    && !remaining_trimmed.is_empty()
                     && remaining_trimmed != ")"
                     && remaining_trimmed != "))"
-                    && remaining_trimmed != ";";
+                    && remaining_trimmed != ";"
+                    && !remaining_trimmed.starts_with(':');
 
                 if has_more_after {
                     // Wrap with $.save: `await expr` -> `(await $.save(expr))()`
@@ -3111,7 +3151,36 @@ pub(super) fn wrap_await_with_save_in_async_derived(expr: &str) -> String {
 
 #[cfg(test)]
 mod proxy_detection_tests {
-    use super::{expression_needs_proxy, is_top_level_binary_expression, strip_leading_comments};
+    use super::{
+        expression_needs_proxy, is_top_level_binary_expression, strip_leading_comments,
+        wrap_await_with_save_in_async_derived,
+    };
+
+    #[test]
+    fn save_wrapping_leaves_dev_await_tracking_intact() {
+        let input = "(await $.track_reactivity_loss(p))()";
+        assert_eq!(wrap_await_with_save_in_async_derived(input), input);
+    }
+
+    #[test]
+    fn save_wrapping_keeps_literal_punctuation_inside_await_argument() {
+        assert_eq!(
+            wrap_await_with_save_in_async_derived("(await 'https://svelte.dev') + suffix"),
+            "((await $.save('https://svelte.dev'))()) + suffix"
+        );
+        assert_eq!(
+            wrap_await_with_save_in_async_derived("(await `Hello, ${name}!`) + suffix"),
+            "((await $.save(`Hello, ${name}!`))()) + suffix"
+        );
+    }
+
+    #[test]
+    fn save_wrapping_does_not_wrap_a_conditional_consequent() {
+        assert_eq!(
+            wrap_await_with_save_in_async_derived("selected ? await selected : null"),
+            "selected ? await selected: null"
+        );
+    }
 
     #[test]
     fn strips_leading_block_and_line_comments() {
@@ -3193,7 +3262,7 @@ mod proxy_detection_tests {
 
 #[cfg(test)]
 mod await_scan_tests {
-    use super::contains_direct_await_in_expression;
+    use super::{contains_direct_await_in_expression, extract_var_name_before_rune};
 
     #[test]
     fn ignores_await_owned_by_nested_functions() {
@@ -3207,5 +3276,11 @@ mod await_scan_tests {
             assert!(!contains_direct_await_in_expression(expr), "{expr:?}");
         }
         assert!(contains_direct_await_in_expression("await x"));
+    }
+
+    #[test]
+    fn extracts_later_declarator_after_dev_location() {
+        let before = "const a = await $.async_derived(fn, 'a', 'x.svelte.js:3:10'), b = ";
+        assert_eq!(extract_var_name_before_rune(before), "b");
     }
 }
