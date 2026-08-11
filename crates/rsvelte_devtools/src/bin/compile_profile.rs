@@ -244,12 +244,61 @@ fn main() {
     // harness, not of the compiler. Drain that reading and re-take it through the
     // real entry point.
     let _ = rsvelte_core::compiler::phases::phase2_analyze::profile::take_store_subs();
+    // Same reason, one phase over: the statement-boundary reuse reads the
+    // program Phase 1 retained, which only `compile()` threads through.
+    let _ = profile::take_script_text_breakdown();
     let compile_start = Instant::now();
     for (_, content) in files.iter() {
         let _ = rsvelte_core::compile(content, compile_opts.clone());
     }
     let compile_total = compile_start.elapsed();
     let ss = rsvelte_core::compiler::phases::phase2_analyze::profile::take_store_subs();
+    let st_compile = profile::take_script_text_breakdown();
+    let compile_boundary_total = st_compile.boundary_ast + st_compile.boundary_scan;
+    println!(
+        "  [boundaries measured through compile(): from-parser {} / {} ({:.2}%) | scanner {}]",
+        st_compile.boundary_ast,
+        compile_boundary_total,
+        if compile_boundary_total == 0 {
+            0.0
+        } else {
+            st_compile.boundary_ast as f64 / compile_boundary_total as f64 * 100.0
+        },
+        st_compile.boundary_scan
+    );
+    println!(
+        "  [  of those, reused Phase-1's parse {} / {} ({:.2}%) | added a parse {}]",
+        st_compile.boundary_retained,
+        st_compile.boundary_ast,
+        if st_compile.boundary_ast == 0 {
+            0.0
+        } else {
+            st_compile.boundary_retained as f64 / st_compile.boundary_ast as f64 * 100.0
+        },
+        st_compile
+            .boundary_ast
+            .saturating_sub(st_compile.boundary_retained)
+    );
+    {
+        let bailed: u64 = st_compile.boundary_bail.iter().sum();
+        let mut kinds: Vec<(usize, u64)> = st_compile
+            .boundary_bail
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i, *n))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        kinds.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        for (i, n) in kinds {
+            println!(
+                "  [    bail: {:<28} {:6}  ({:5.1}% of {} bails)]",
+                profile::BOUNDARY_BAIL_NAMES[i],
+                n,
+                n as f64 / bailed.max(1) as f64 * 100.0,
+                bailed
+            );
+        }
+    }
     println!(
         "  [store_subs measured through compile(), total {:7.2}ms]",
         ms(compile_total)
@@ -369,6 +418,23 @@ fn main() {
         );
     }
     println!("    (statements processed: {})", st.statements);
+    let boundary_total = st.boundary_ast + st.boundary_scan;
+    println!(
+        "    BOUNDARY from-parser {} / {} ({:.2}%) | fell back to the scanner {}",
+        st.boundary_ast,
+        boundary_total,
+        if boundary_total == 0 {
+            0.0
+        } else {
+            st.boundary_ast as f64 / boundary_total as f64 * 100.0
+        },
+        st.boundary_scan
+    );
+    // The reuse rate is deliberately NOT printed here: `transform_component`
+    // hard-codes `retained_scripts: None` (3_transform/mod.rs:88), so on this
+    // path it is 0 by construction — a property of the harness, exactly as the
+    // store_subs note below records for one field over. It is reported from the
+    // `compile()` pass instead.
     println!(
         "    COUNTERS loop_lines {} | fastpath_stmts {} | ctrl_header {} calls / {} bytes | collect_scan {} passes / {} bytes",
         st.loop_lines,
@@ -526,6 +592,17 @@ fn main() {
         oracle.mismatches,
         if oracle.checks == 0 {
             " (set RSVELTE_INDEX_ORACLE to run it)"
+        } else {
+            ""
+        }
+    );
+    let boundary_oracle = profile::take_boundary_oracle();
+    println!(
+        "  boundary oracle: {} checks, {} mismatches{}",
+        boundary_oracle.checks,
+        boundary_oracle.mismatches,
+        if boundary_oracle.checks == 0 {
+            " (set RSVELTE_BOUNDARY_ORACLE to run it)"
         } else {
             ""
         }
