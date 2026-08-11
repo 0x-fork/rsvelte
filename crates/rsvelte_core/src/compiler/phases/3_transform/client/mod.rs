@@ -7206,10 +7206,6 @@ fn transform_instance_script_for_visitors(
 }
 
 fn restore_async_derived_ignore_comments(source: &str, mut transformed: String) -> String {
-    if transformed.contains("svelte-ignore await_waterfall") {
-        return transformed;
-    }
-
     let mut search_from = 0;
     while let Some(relative) = source[search_from..].find("svelte-ignore await_waterfall") {
         let ignore = search_from + relative;
@@ -7247,12 +7243,16 @@ fn restore_async_derived_ignore_comments(source: &str, mut transformed: String) 
         let name = &rest[..name_end];
         let needle = format!("{name} = await $.async_derived");
         if let Some(name_pos) = transformed.find(&needle) {
-            if let Some(pos) = ["const ", "let ", "var "]
+            if let Some((pos, kind)) = ["const ", "let ", "var "]
                 .iter()
-                .filter_map(|kind| transformed[..name_pos].rfind(kind))
-                .max()
+                .filter_map(|kind| transformed[..name_pos].rfind(kind).map(|pos| (pos, *kind)))
+                .max_by_key(|(pos, _)| *pos)
             {
-                transformed.insert_str(pos, &format!("{}\n", &source[comment_start..comment_end]));
+                let comment_pos = pos + kind.len();
+                let comment = &source[comment_start..comment_end];
+                if !transformed[comment_pos..].starts_with(comment) {
+                    transformed.insert_str(comment_pos, &format!("{comment} "));
+                }
             }
         }
         search_from = comment_end;
