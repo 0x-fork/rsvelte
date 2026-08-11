@@ -7234,7 +7234,7 @@ fn restore_async_derived_ignore_comments(source: &str, mut transformed: String) 
             break;
         };
         let rest = source[comment_end..].trim_start();
-        let Some((kind, rest)) = ["const ", "let ", "var "]
+        let Some((_, rest)) = ["const ", "let ", "var "]
             .iter()
             .find_map(|kind| rest.strip_prefix(kind).map(|rest| (*kind, rest)))
         else {
@@ -7245,9 +7245,15 @@ fn restore_async_derived_ignore_comments(source: &str, mut transformed: String) 
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
             .unwrap_or(rest.len());
         let name = &rest[..name_end];
-        let needle = format!("{kind}{name} = await $.async_derived");
-        if let Some(pos) = transformed.find(&needle) {
-            transformed.insert_str(pos, &format!("{}\n", &source[comment_start..comment_end]));
+        let needle = format!("{name} = await $.async_derived");
+        if let Some(name_pos) = transformed.find(&needle) {
+            if let Some(pos) = ["const ", "let ", "var "]
+                .iter()
+                .filter_map(|kind| transformed[..name_pos].rfind(kind))
+                .max()
+            {
+                transformed.insert_str(pos, &format!("{}\n", &source[comment_start..comment_end]));
+            }
         }
         search_from = comment_end;
     }
