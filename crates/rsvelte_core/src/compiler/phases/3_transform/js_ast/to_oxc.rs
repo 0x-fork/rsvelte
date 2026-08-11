@@ -179,6 +179,45 @@ impl<'a> VisitMut<'a> for ShiftSpans {
     }
 }
 
+struct SingleTargetSequenceRebuilder<'a, 'x> {
+    ab: &'x AstBuilder<'a>,
+}
+
+impl<'a, 'x> VisitMut<'a> for SingleTargetSequenceRebuilder<'a, 'x> {
+    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
+        oxc_ast_visit::walk_mut::walk_expression(self, expr);
+
+        let is_marker_call = matches!(
+            expr,
+            Expression::CallExpression(call)
+                if call.arguments.len() == 1
+                    && !call.arguments[0].is_spread()
+                    && matches!(
+                        &call.callee,
+                        Expression::Identifier(id)
+                            if id.name == SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER
+                    )
+        );
+        if !is_marker_call {
+            return;
+        }
+
+        expr.replace_with(|e| {
+            let Expression::CallExpression(mut call) = e else {
+                unreachable!()
+            };
+            let arg = call.arguments.pop().unwrap();
+            let inner =
+                Expression::try_from(arg).unwrap_or_else(|()| unreachable!("checked above"));
+            Expression::SequenceExpression(SequenceExpression::boxed(
+                SPAN,
+                ArenaVec::from_value_in(inner, self.ab),
+                self.ab,
+            ))
+        });
+    }
+}
+
 /// The unified comment coordinate space for a reassembled program.
 struct Synth {
     /// Whether this pass places comments (`false` for the probe pass).
@@ -202,6 +241,8 @@ struct Synth {
     /// Upper bound on every span produced outside a chunk region.
     max_span: u32,
 }
+
+pub(crate) const SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER: &str = "__rsvelte_seq1";
 
 impl Synth {
     fn new(loc_base: Option<u32>) -> Self {
@@ -1136,6 +1177,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
     fn parse_raw_statements(&self, code: &str) -> Option<Vec<Statement<'a>>> {
         let mut stmts = self.parse_chunk(code.trim())?;
         self.restore_legacy_pre_effect_deps(&mut stmts);
+        self.restore_single_target_destructure_sequences(&mut stmts);
         Some(stmts)
     }
 
@@ -1181,6 +1223,13 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                     &self.ab,
                 ))
             });
+        }
+    }
+
+    fn restore_single_target_destructure_sequences(&self, stmts: &mut [Statement<'a>]) {
+        let mut rebuilder = SingleTargetSequenceRebuilder { ab: &self.ab };
+        for stmt in stmts {
+            rebuilder.visit_statement(stmt);
         }
     }
 
