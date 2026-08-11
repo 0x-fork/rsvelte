@@ -1256,6 +1256,8 @@ fn transform_client_with_visitors(
                     options.dev,
                 ) {
                     let cleaned_output = strip_async_noop_placeholders(async_result.output.trim());
+                    let cleaned_output =
+                        restore_async_derived_ignore_comments(&content.raw, cleaned_output);
                     let normalized = normalize_js_with_oxc(cleaned_output.trim(), script_indent);
                     component_body.push(JsStatement::RawMapped {
                         code: normalized.into(),
@@ -7198,8 +7200,6 @@ fn transform_instance_script_for_visitors(
     {
         result = instrumented;
     }
-
-    result = restore_async_derived_ignore_comments(original_script, result);
 
     super::profile::record_st_post_passes(super::profile::timer_elapsed(_stage));
 
