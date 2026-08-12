@@ -71,7 +71,7 @@ const ROOT = path.resolve(__dirname, '../..');
 // been shown to fail on anything.
 const CORPUS = process.env.KNOWN_FAILURES_DIR || path.join(ROOT, 'compatibility');
 
-const TARGETS = ['client', 'server', 'client-dev'];
+const TARGETS = ['client', 'server', 'client-dev', 'server-dev'];
 const perTarget = (stem) => TARGETS.map((t) => `${stem}.${t}.json`);
 
 /**
