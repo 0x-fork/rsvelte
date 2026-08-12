@@ -50,7 +50,8 @@ pub struct View<'a> {
 }
 
 impl<'a> View<'a> {
-    pub fn span(&self) -> Span {
+    #[must_use]
+    pub const fn span(&self) -> Span {
         (self.start, self.end)
     }
 
@@ -64,10 +65,12 @@ impl<'a> View<'a> {
 
     /// Whether the node can hold other nodes, and so is worth folding and
     /// outlining even when nothing is nested in it yet.
-    pub fn is_container(&self) -> bool {
+    #[must_use]
+    pub const fn is_container(&self) -> bool {
         matches!(self.kind, Kind::Element(_) | Kind::Block(_))
     }
 
+    #[must_use]
     pub fn contains(&self, offset: usize) -> bool {
         (self.start as usize..=self.end as usize).contains(&offset)
     }
@@ -219,7 +222,9 @@ fn element<'a>(
     fragment: &'a Fragment<'a>,
 ) -> View<'a> {
     // The tag name always follows the `<` the node starts at.
-    let name_end = start + 1 + name.len() as u32;
+    let name_end = start
+        .saturating_add(1)
+        .saturating_add(u32::try_from(name.len()).unwrap_or(u32::MAX));
     View {
         start,
         end,
@@ -231,7 +236,7 @@ fn element<'a>(
     }
 }
 
-fn block<'a>(start: u32, end: u32, block: Block) -> View<'a> {
+const fn block<'a>(start: u32, end: u32, block: Block) -> View<'a> {
     View {
         start,
         end,
@@ -243,7 +248,7 @@ fn block<'a>(start: u32, end: u32, block: Block) -> View<'a> {
     }
 }
 
-fn leaf<'a>(start: u32, end: u32, kind: Kind<'a>) -> View<'a> {
+const fn leaf(start: u32, end: u32, kind: Kind<'_>) -> View<'_> {
     View {
         start,
         end,
@@ -255,6 +260,7 @@ fn leaf<'a>(start: u32, end: u32, kind: Kind<'a>) -> View<'a> {
     }
 }
 
+#[must_use]
 pub fn span_of(expression: &Expression<'_>) -> Option<Span> {
     Some((expression.start()?, expression.end()?))
 }
@@ -269,6 +275,7 @@ pub enum Top<'a> {
 }
 
 impl Top<'_> {
+    #[must_use]
     pub fn span(&self) -> Span {
         match self {
             Top::Node(node) => view(node).span(),

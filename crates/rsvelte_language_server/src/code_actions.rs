@@ -14,7 +14,7 @@ use rsvelte_core::ParseOptions;
 use rsvelte_core::ast::template::{Fragment, Root, TemplateNode};
 
 use crate::diagnostics::{COMPILER_SOURCE, is_compiler_code};
-use crate::text::LineIndex;
+use crate::text::{LineIndex, source_offset};
 
 /// Warnings a `svelte-ignore` comment cannot suppress, in both the spelling the
 /// official server lists and the one Svelte 5 emits.
@@ -61,8 +61,8 @@ fn for_diagnostic(
     let Some(code) = code_of(diagnostic).filter(|code| is_ignorable(diagnostic, code)) else {
         return;
     };
-    let start = index.offset(source, diagnostic.range.start) as u32;
-    let end = (index.offset(source, diagnostic.range.end) as u32).max(start);
+    let start = source_offset(index.offset(source, diagnostic.range.start));
+    let end = source_offset(index.offset(source, diagnostic.range.end)).max(start);
 
     let in_script = root.is_some_and(|root| in_script(root, start, end));
     let node = root
@@ -169,7 +169,7 @@ fn enclosing_node<'b, 'a>(
 }
 
 /// Whether a node is one a `svelte-ignore` comment can be placed in front of.
-fn is_container(node: &TemplateNode) -> bool {
+const fn is_container(node: &TemplateNode) -> bool {
     !matches!(
         node,
         TemplateNode::Text(_)

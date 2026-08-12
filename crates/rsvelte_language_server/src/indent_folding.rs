@@ -6,7 +6,7 @@
 //! numbers come out of the shared [`LineIndex`], so they agree with every other
 //! position this server sends.
 
-use crate::text::LineIndex;
+use crate::text::{LineIndex, source_offset};
 
 /// An inclusive, 0-based range of lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,9 +23,10 @@ struct Indent {
 
 /// The folds implied by the indentation of `ranges`, or of the whole document
 /// when no range is given.
+#[must_use]
 pub fn indent_folding(text: &str, index: &LineIndex, ranges: &[LineRange]) -> Vec<LineRange> {
     let indents: Vec<Indent> = (0..index.line_count())
-        .filter_map(|line| collect_indent(index.line_text(text, line), line as u32))
+        .filter_map(|line| collect_indent(index.line_text(text, line), source_offset(line)))
         .collect();
     let tabs: u32 = indents.iter().map(|indent| indent.tabs).sum();
     let spaces: u32 = indents.iter().map(|indent| indent.spaces).sum();
@@ -37,7 +38,7 @@ pub fn indent_folding(text: &str, index: &LineIndex, ranges: &[LineRange]) -> Ve
 
     let whole = [LineRange {
         start_line: 0,
-        end_line: index.line_count().saturating_sub(1) as u32,
+        end_line: source_offset(index.line_count().saturating_sub(1)),
     }];
     let ranges = if ranges.is_empty() {
         &whole[..]
@@ -163,6 +164,7 @@ fn guess_tab_size(lines: &[Indent]) -> u32 {
 /// The lines strictly inside a `<script>` / `<style>` body spanning
 /// `start..end`, which is what upstream's `indentBasedFoldingRangeForTag`
 /// folds.
+#[must_use]
 pub fn body_lines(index: &LineIndex, text: &str, start: usize, end: usize) -> Option<LineRange> {
     let first = index.position(text, start).line;
     let last = index.position(text, end).line;

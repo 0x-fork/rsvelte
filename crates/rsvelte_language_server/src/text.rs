@@ -7,6 +7,16 @@
 
 use lsp_types::Position;
 
+/// Converts a source byte offset into the u32 offset domain used by rsvelte.
+#[must_use]
+pub fn source_offset(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
+}
+
+const fn utf16_width(character: char) -> u32 {
+    if character.len_utf16() == 1 { 1 } else { 2 }
+}
+
 /// Byte offset of the start of every line in a source string.
 #[derive(Debug, Clone)]
 pub struct LineIndex {
@@ -14,6 +24,7 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
+    #[must_use]
     pub fn new(text: &str) -> Self {
         let bytes = text.as_bytes();
         let mut line_starts = Vec::with_capacity(bytes.len() / 32 + 1);
@@ -21,13 +32,13 @@ impl LineIndex {
         let mut i = 0;
         while i < bytes.len() {
             match bytes[i] {
-                b'\n' => line_starts.push(i as u32 + 1),
+                b'\n' => line_starts.push(source_offset(i).saturating_add(1)),
                 // A lone `\r` also terminates a line in the LSP text model.
                 b'\r' => {
                     if bytes.get(i + 1) == Some(&b'\n') {
                         i += 1;
                     }
-                    line_starts.push(i as u32 + 1);
+                    line_starts.push(source_offset(i).saturating_add(1));
                 }
                 _ => {}
             }
@@ -37,12 +48,14 @@ impl LineIndex {
     }
 
     /// The number of lines in the indexed text.
-    pub fn line_count(&self) -> usize {
+    #[must_use]
+    pub const fn line_count(&self) -> usize {
         self.line_starts.len()
     }
 
     /// The content of one line, without its terminator. Out-of-range lines are
     /// empty.
+    #[must_use]
     pub fn line_text<'a>(&self, text: &'a str, line: usize) -> &'a str {
         let Some(&start) = self.line_starts.get(line) else {
             return "";
@@ -58,6 +71,7 @@ impl LineIndex {
     /// end of the text and out-of-range characters to the end of their line's
     /// content; a character landing inside a surrogate pair rounds down to the
     /// start of that character.
+    #[must_use]
     pub fn offset(&self, text: &str, position: Position) -> usize {
         let line = position.line as usize;
         let Some(&start) = self.line_starts.get(line) else {
@@ -72,33 +86,31 @@ impl LineIndex {
 
         let mut utf16 = 0u32;
         for (i, c) in content.char_indices() {
-            if utf16 + c.len_utf16() as u32 > position.character {
+            if utf16 + utf16_width(c) > position.character {
                 return start + i;
             }
-            utf16 += c.len_utf16() as u32;
+            utf16 += utf16_width(c);
         }
         start + content.len()
     }
 
     /// The position of byte `offset`. An offset past the end of the text, or
     /// inside a multi-byte character, is clamped down to a character boundary.
+    #[must_use]
     pub fn position(&self, text: &str, offset: usize) -> Position {
         let offset = floor_char_boundary(text, offset);
-        let line = match self.line_starts.binary_search(&(offset as u32)) {
+        let line = match self.line_starts.binary_search(&source_offset(offset)) {
             Ok(i) => i,
             Err(i) => i - 1,
         };
         let start = self.line_starts[line] as usize;
-        let character = text[start..offset]
-            .chars()
-            .map(|c| c.len_utf16() as u32)
-            .sum();
-        Position::new(line as u32, character)
+        let character = text[start..offset].chars().map(utf16_width).sum();
+        Position::new(source_offset(line), character)
     }
 }
 
 /// The largest char boundary `<= offset`, clamped to the length of `text`.
-fn floor_char_boundary(text: &str, offset: usize) -> usize {
+const fn floor_char_boundary(text: &str, offset: usize) -> usize {
     if offset >= text.len() {
         return text.len();
     }

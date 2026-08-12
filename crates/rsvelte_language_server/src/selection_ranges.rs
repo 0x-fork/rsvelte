@@ -165,10 +165,10 @@ fn open_tag_end(text: &str, node: &View<'_>) -> Option<u32> {
             attribute_span(attribute).1 as usize
         });
     let rest = text.get(from..node.end as usize)?;
-    Some((from + rest.find('>')? + 1) as u32)
+    u32::try_from(from + rest.find('>')? + 1).ok()
 }
 
-fn attribute_span(attribute: &Attribute<'_>) -> Span {
+const fn attribute_span(attribute: &Attribute<'_>) -> Span {
     match attribute {
         Attribute::Attribute(node) => (node.start, node.end),
         Attribute::SpreadAttribute(node) => (node.start, node.end),
@@ -383,7 +383,7 @@ mod tests {
             "{#each items as }x{/each}",
             "<script>const a = {\n</script><p>x</p>",
         ] {
-            let offset = text.find("x").or_else(|| text.find("hi")).unwrap_or(1);
+            let offset = text.find('x').or_else(|| text.find("hi")).unwrap_or(1);
             assert!(
                 selection_ranges(text, &[offset]).is_some(),
                 "{text:?} should still answer"
