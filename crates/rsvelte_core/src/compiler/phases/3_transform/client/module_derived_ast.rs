@@ -30,6 +30,7 @@ pub(super) fn transform_module_derived_destructuring_ast(
     non_reactive_vars: &[String],
     proxy_vars: &[String],
     dev: bool,
+    server: bool,
     locations: Option<&AsyncDerivedLocations>,
 ) -> Option<String> {
     memchr::memmem::find(source.as_bytes(), b"$derived")?;
@@ -61,6 +62,7 @@ pub(super) fn transform_module_derived_destructuring_ast(
                 non_reactive_vars,
                 proxy_vars,
                 dev,
+                server,
                 locations,
                 next_temp: 0,
                 edits: Vec::new(),
@@ -80,6 +82,7 @@ struct ModuleDerivedCollector<'a> {
     non_reactive_vars: &'a [String],
     proxy_vars: &'a [String],
     dev: bool,
+    server: bool,
     locations: Option<&'a AsyncDerivedLocations>,
     next_temp: usize,
     edits: Vec<Edit>,
@@ -164,6 +167,11 @@ impl<'a> ModuleDerivedCollector<'a> {
             &mut declarations,
             &mut array_counter,
             self.dev.then_some(label),
+            if self.server {
+                "$$derived_array"
+            } else {
+                "$$array"
+            },
         )?;
         if self.dev {
             for declaration in declarations.iter_mut().skip(1) {
@@ -205,6 +213,7 @@ mod tests {
             &[],
             &[],
             false,
+            false,
             None,
         )
         .unwrap();
@@ -223,6 +232,7 @@ mod tests {
             &[],
             &[],
             true,
+            false,
             None,
         )
         .unwrap();
