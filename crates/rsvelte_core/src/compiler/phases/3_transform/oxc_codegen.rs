@@ -233,6 +233,174 @@ fn comment_key(text: &str) -> String {
         .join(" ")
 }
 
+fn restore_marked_effect_comment(mut code: String) -> String {
+    const MARKER: &str = "// __rsvelte_effect_trailing__";
+    let Some(comment_start) = code.find(MARKER) else {
+        return code;
+    };
+    let comment_end = code[comment_start..]
+        .find('\n')
+        .map_or(code.len(), |offset| comment_start + offset);
+    let payload = &code[comment_start + MARKER.len()..comment_end];
+    let comment = if let Some(text) = payload.strip_prefix("line__") {
+        format!("//{text}")
+    } else if let Some(text) = payload.strip_prefix("block__") {
+        text.to_string()
+    } else {
+        format!("//{payload}")
+    };
+    let after = ["$.user_effect(", "$.user_pre_effect(", "$.effect_root("]
+        .iter()
+        .filter_map(|callee| {
+            code[comment_end..]
+                .find(callee)
+                .map(|offset| comment_end + offset)
+        })
+        .min();
+    let before = ["$.user_effect(", "$.user_pre_effect(", "$.effect_root("]
+        .iter()
+        .filter_map(|callee| code[..comment_start].rfind(callee))
+        .max();
+    let Some(effect_offset) = after.or(before) else {
+        code.replace_range(comment_start..comment_end, &comment);
+        return code;
+    };
+    let Some(open) = code[effect_offset..]
+        .find('(')
+        .map(|offset| effect_offset + offset)
+    else {
+        return code;
+    };
+    let mut depth = 0u32;
+    let mut end = None;
+    for (offset, byte) in code[open..].bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = code[open + offset + 1..]
+                        .starts_with(';')
+                        .then_some(open + offset + 2);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return code;
+    };
+    let line_start = code[..effect_offset]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let indent = &code[line_start..effect_offset];
+    let argument = code[open + 1..end - 2].trim();
+    let replacement = format!(
+        "{}(\n{indent}\t{argument}, {comment}\n{indent});",
+        &code[effect_offset..open]
+    );
+    if effect_offset < comment_start {
+        code.replace_range(comment_start..comment_end, "");
+        code.replace_range(effect_offset..end, &replacement);
+    } else {
+        code.replace_range(effect_offset..end, &replacement);
+        code.replace_range(comment_start..comment_end, "");
+    }
+    code
+}
+
+fn rehome_direct_effect_block_comments(code: &str, source: &str) -> String {
+    struct EffectCalls {
+        spans: Vec<oxc_span::Span>,
+    }
+
+    impl<'a> Visit<'a> for EffectCalls {
+        fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+            if matches!(
+                &call.callee,
+                Expression::StaticMemberExpression(member)
+                    if matches!(&member.object, Expression::Identifier(id) if id.name == "$")
+                        && matches!(member.property.name.as_str(), "user_effect" | "user_pre_effect" | "effect_root")
+            ) {
+                self.spans.push(call.span);
+            }
+            walk::walk_call_expression(self, call);
+        }
+    }
+
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::mjs()).parse();
+    if !parsed.diagnostics.is_empty() {
+        return code.to_string();
+    }
+    let mut calls = EffectCalls { spans: Vec::new() };
+    calls.visit_program(&parsed.program);
+    let mut edits = Vec::new();
+    for comment in &parsed.program.comments {
+        if matches!(comment.kind, CommentKind::Line) {
+            continue;
+        }
+        let Some(call) = calls
+            .spans
+            .iter()
+            .filter(|span| span.end <= comment.span.start)
+            .max_by_key(|span| span.end)
+        else {
+            continue;
+        };
+        let comment_text = &code[comment.span.start as usize..comment.span.end as usize];
+        let gap = &code[call.end as usize..comment.span.start as usize];
+        let source_marks_effect_trailing = source.contains(&format!("; {comment_text}"))
+            && ["$.user_effect", "$.user_pre_effect", "$.effect_root"]
+                .iter()
+                .any(|callee| source[..source.find(comment_text).unwrap_or(0)].contains(callee));
+        let tail_of_block = code[comment.span.end as usize..]
+            .trim_start()
+            .starts_with('}');
+        if gap.trim() != ";" && !source_marks_effect_trailing && !tail_of_block {
+            continue;
+        }
+        let start = call.start as usize;
+        let comment_end = comment.span.end as usize;
+        let Some(open) = code[start..call.end as usize]
+            .find('(')
+            .map(|offset| start + offset)
+        else {
+            continue;
+        };
+        let line_start = code[..start].rfind('\n').map_or(0, |offset| offset + 1);
+        let indent = &code[line_start..start];
+        let argument = code[open + 1..call.end as usize - 1]
+            .trim()
+            .lines()
+            .map(|line| format!("{indent}  {}", line.strip_prefix(indent).unwrap_or(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replacement = format!(
+            "{}(\n{argument} {comment_text},\n{indent});",
+            &code[start..open]
+        );
+        if gap.trim() == ";" {
+            edits.push((start, comment_end - start, replacement));
+        } else {
+            let call_end = call.end as usize;
+            let end = call_end + usize::from(code.as_bytes().get(call_end) == Some(&b';'));
+            edits.push((start, end - start, replacement));
+            edits.push((
+                comment.span.start as usize,
+                comment_end - comment.span.start as usize,
+                String::new(),
+            ));
+        }
+    }
+    let mut code = code.to_string();
+    for (start, len, replacement) in edits.into_iter().rev() {
+        code.replace_range(start..start + len, &replacement);
+    }
+    code
+}
+
 fn following_anchor(source_after: &str) -> Option<String> {
     let source_after = source_after.trim_start();
     if source_after.starts_with("$:") {
@@ -429,6 +597,25 @@ fn nearest_statement_division_target(
         .map(|(_, _, slash)| slash)
 }
 
+fn inspect_trailing_comment_target(code: &str, before: usize) -> Option<usize> {
+    let call = code[..before].rfind("$.inspect(")?;
+    let array = code[call..before].find("() => [")? + call + "() => ".len();
+    let mut depth = 0_u32;
+    for (offset, byte) in code.as_bytes()[array..before].iter().enumerate() {
+        match byte {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(array + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn relocate_late_comments(
     program: &Program<'_>,
     mut code: String,
@@ -494,7 +681,8 @@ fn relocate_late_comments(
             .rsplit_once('\n')
             .map_or(span.start == 0, |(_, prefix)| prefix.trim().is_empty());
         let source_after_trimmed = source_after.trim_start();
-        let trailing_target = (!inside_source_top_level_statement(program.source_text, span.start)
+        let mut trailing_target = (anchor_target.is_none()
+            && !inside_source_top_level_statement(program.source_text, span.start)
             && (source_after.trim().is_empty() || source_after.trim_start().starts_with("//")))
         .then(|| {
             starts_on_own_line
@@ -627,6 +815,22 @@ fn relocate_late_comments(
                 let relative = source[..script_end].rfind(text)?;
                 source.get(relative + text.len()..)
             });
+        let removed_inspect_comment = !program.source_text.contains("$.inspect(")
+            && loc_map
+                .and_then(|loc_map| {
+                    loc_map
+                        .iter()
+                        .find(|(start, end, _)| span.start >= *start && span.end <= *end)
+                })
+                .and_then(|(_, _, source_offset)| {
+                    let source = original_source?.get((*source_offset)? as usize..)?;
+                    let script_end = source.find("</script>")?;
+                    let comment_start = source[..script_end].rfind(text)?;
+                    let before = &source[..comment_start];
+                    let inspect = before.rfind("$inspect(")?;
+                    before[inspect..].trim_end().ends_with(';').then_some(())
+                })
+                .is_some();
         let trailing_script_comment = original_source_after_comment.is_some_and(|source| {
             source
                 .find("</script>")
@@ -651,6 +855,9 @@ fn relocate_late_comments(
         let body_tail = (dangling_chunk && dangling_prefix_has_code && trailing_script_comment)
             .then(|| code.rfind("\n}").map(|target| target + 1))
             .flatten();
+        if body_tail.is_some() {
+            trailing_target = None;
+        }
         let generated_own_line = actual.is_some_and(|(start, _)| {
             code[..start]
                 .rsplit_once('\n')
@@ -701,6 +908,37 @@ fn relocate_late_comments(
             })
         })
         .flatten();
+        let removed_inspect_target = removed_inspect_comment
+            .then(|| {
+                let actual_start = actual.map_or(code.len(), |(start, _)| start);
+                code[..actual_start]
+                    .rfind("\n\tvar ")
+                    .map(|start| start + 1)
+            })
+            .flatten();
+        if let Some(target) = removed_inspect_target {
+            edits.push((target, 0, format!("\t{text}\n")));
+            if let Some((actual_start, actual_len)) = actual {
+                edits.push((actual_start, actual_len, String::new()));
+            }
+            continue;
+        }
+        let inspect_target = source_before
+            .contains("$.inspect")
+            .then(|| {
+                inspect_trailing_comment_target(
+                    &code,
+                    actual.map_or(code.len(), |(start, _)| start),
+                )
+            })
+            .flatten();
+        if let Some(target) = inspect_target {
+            edits.push((target, 0, format!(", {text}\n")));
+            if let Some((actual_start, actual_len)) = actual {
+                edits.push((actual_start, actual_len, String::new()));
+            }
+            continue;
+        }
         if actual.is_some()
             && matches!(source_preceding, Some(';'))
             && !source_continues_after_script
@@ -892,6 +1130,10 @@ fn print_inner(program: &Program<'_>) -> String {
     let anchors = source_anchors(&program, &printed.code, printed.map.as_ref());
     let (code, _) =
         relocate_late_comments(&program, printed.code, &anchors, &substitutions, None, None);
+    let code = rehome_direct_effect_block_comments(
+        &restore_marked_effect_comment(code),
+        program.source_text,
+    );
     let code = restore_raw_strings(code, &substitutions);
     let (code, _) = separate_block_comments_from_line_continuations(&program, code);
     let (code, _) = unescape_script_close_tags(code);
@@ -957,7 +1199,10 @@ fn print_with_raw_map_inner(
         })
         .unwrap_or_default();
     CodegenResult {
-        code: without_final_newline(code),
+        code: without_final_newline(rehome_direct_effect_block_comments(
+            &restore_marked_effect_comment(code),
+            program.source_text,
+        )),
         mappings,
     }
 }

@@ -712,7 +712,7 @@ impl<'a> ServerTransformState<'a> {
         // Lower value-position `$effect.tracking()` → `false`,
         // `$effect.root(…)` → `() => {}`, `$effect.pending()` → `0` inside the
         // template expression (写经 server `CallExpression` visitor).
-        script::lower_effect_value_runes_expr(&mut out, self.b, self.options.dev, self.source);
+        script::lower_effect_value_runes_expr(&mut out, self.b);
         // Drop statement-position `$effect(…)` / `$effect.pre(…)` / `$inspect(…)`
         // calls nested in a template-expression IIFE arrow / function body (写经
         // server `ExpressionStatement` visitor → `b.empty`).

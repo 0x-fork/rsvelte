@@ -39,6 +39,7 @@ struct Chunk {
     text: String,
     /// Comments with spans relative to `text`.
     comments: Vec<Comment>,
+    component_tail: bool,
 }
 
 /// The per-compile registry of comment regions.
@@ -54,6 +55,20 @@ impl ChunkRegistry {
     /// offset to it to get the address to place a node at. `None` when there is
     /// nothing to carry.
     pub fn register(&mut self, text: &str, comments: &[Comment]) -> Option<u32> {
+        self.register_inner(text, comments, false)
+    }
+
+    /// Register a region whose anchor is a template expression rather than a statement.
+    pub fn register_expression(&mut self, text: &str, comments: &[Comment]) -> Option<u32> {
+        self.register_inner(text, comments, true)
+    }
+
+    fn register_inner(
+        &mut self,
+        text: &str,
+        comments: &[Comment],
+        _expression_anchor: bool,
+    ) -> Option<u32> {
         if comments.is_empty() || text.is_empty() {
             return None;
         }
@@ -65,6 +80,7 @@ impl ChunkRegistry {
             prov_base,
             text: text.to_string(),
             comments: comments.to_vec(),
+            component_tail: false,
         });
         super::comment_stats::bump::REGISTERED_CHUNKS(1);
         super::comment_stats::bump::REGISTERED_COMMENTS(comments.len() as u64);
@@ -73,6 +89,12 @@ impl ChunkRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
+    }
+
+    pub fn register_component_tail(&mut self, text: &str, comments: &[Comment]) -> Option<u32> {
+        let base = self.register_inner(text, comments, true)?;
+        self.chunks.last_mut()?.component_tail = true;
+        Some(base)
     }
 }
 
