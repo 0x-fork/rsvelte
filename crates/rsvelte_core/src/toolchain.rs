@@ -375,6 +375,38 @@ impl<'source> PreparedComponent<'source> {
         self.compile_mode(target.into())
     }
 
+    /// Emit client output and expose the generated OXC-compatible program to an
+    /// in-process consumer before its arena is released.
+    pub fn compile_client_with_program_sink(
+        &mut self,
+        sink: &mut dyn FnMut(
+            &crate::compiler::phases::phase3_transform::JsProgram,
+            &crate::compiler::phases::phase3_transform::js_ast::arena::JsArena,
+        ),
+    ) -> Result<CompileResult, CompileError> {
+        // SAFETY: `self.ast` cannot move for the duration of this mutable borrow.
+        let _arena_guard =
+            unsafe { crate::ast::arena::SerializeArenaGuard::new(&self.ast.arena as *const _) };
+        let options = &self.options;
+        let transform_result = transform_component_with_scripts(
+            &self.analysis,
+            &self.ast,
+            self.source,
+            options,
+            options.sourcemap.is_some(),
+            Some(&self.retained_scripts),
+            Some(sink),
+        )
+        .map_err(CompileError::from)?;
+        Ok(crate::compiler::finalize_compile_result(
+            transform_result,
+            &self.analysis,
+            self.source,
+            options,
+            self.runes_mode,
+        ))
+    }
+
     /// Emit client and server targets from the same analysis.
     ///
     /// # Errors
@@ -415,6 +447,7 @@ impl<'source> PreparedComponent<'source> {
             options,
             include_sourcemap_content,
             Some(&self.retained_scripts),
+            None,
         )
         .map_err(CompileError::from)?;
         let mut result = crate::compiler::finalize_compile_result(

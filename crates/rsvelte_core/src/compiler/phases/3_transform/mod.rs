@@ -102,6 +102,7 @@ pub(crate) fn transform_component_with_sourcemap_content(
         options,
         include_sourcemap_content,
         None,
+        None,
     )
 }
 
@@ -112,6 +113,7 @@ pub(crate) fn transform_component_with_scripts(
     options: &CompileOptions,
     include_sourcemap_content: bool,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    client_program_sink: Option<&mut dyn FnMut(&js_ast::JsProgram, &js_ast::arena::JsArena)>,
 ) -> Result<TransformResult, TransformError> {
     use js_ast::codegen::{
         SourceMapping, encode_vlq_mappings, generate_sourcemap_json, get_source_name,
@@ -120,8 +122,14 @@ pub(crate) fn transform_component_with_scripts(
 
     let (js, mut js_mappings) = match options.generate {
         GenerateMode::Client => {
-            let result =
-                client::transform_client(analysis, ast, source, options, retained_scripts)?;
+            let result = client::transform_client(
+                analysis,
+                ast,
+                source,
+                options,
+                retained_scripts,
+                client_program_sink,
+            )?;
 
             if options.enable_sourcemap {
                 // Merge codegen-tracked mappings with full token-level mappings.
