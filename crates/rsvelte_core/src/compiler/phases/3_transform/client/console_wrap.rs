@@ -20,7 +20,8 @@
 //! value set without consulting a binding.
 
 use oxc_ast::ast::{
-    BindingIdentifier, BindingPattern, Program, VariableDeclarationKind, VariableDeclarator,
+    BindingIdentifier, BindingPattern, Program, VariableDeclaration, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_ast_visit::{Visit, walk};
 use rustc_hash::FxHashMap;
@@ -123,11 +124,15 @@ impl<'a> Visit<'a> for ConstCollector<'_> {
         *self.counts.entry(it.name.to_string()).or_insert(0) += 1;
     }
 
-    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
-        walk::walk_variable_declarator(self, it);
+    fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
         if !matches!(it.kind, VariableDeclarationKind::Const) {
             return;
         }
+        walk::walk_variable_declaration(self, it);
+    }
+
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        walk::walk_variable_declarator(self, it);
         let BindingPattern::BindingIdentifier(id) = &it.id else {
             return;
         };

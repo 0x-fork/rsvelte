@@ -929,7 +929,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 SPAN
             };
             declarators.push(VariableDeclarator::new(
-                span, kind, binding, None, init, false, &self.ab,
+                span, binding, None, init, false, &self.ab,
             ));
         }
 
@@ -1567,8 +1567,10 @@ impl<'a, 'arena> Cx<'a, 'arena> {
             ArenaVec::new_in(&self.ab),
             id,
             None,
-            super_class,
-            None,
+            super_class.map(|expression| ClassHeritage {
+                expression,
+                type_arguments: None,
+            }),
             ArenaVec::new_in(&self.ab),
             body,
             false,

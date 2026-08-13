@@ -731,7 +731,6 @@ impl<'a> B<'a> {
         for (pat, init) in pairs {
             declarators.push(VariableDeclarator::new(
                 SPAN,
-                kind,
                 pat,
                 None,
                 init,
@@ -749,8 +748,7 @@ impl<'a> B<'a> {
         pattern: BindingPattern<'a>,
         init: Option<Expression<'a>>,
     ) -> Statement<'a> {
-        let declarator =
-            VariableDeclarator::new(SPAN, kind, pattern, None, init, false, &self.ab());
+        let declarator = VariableDeclarator::new(SPAN, pattern, None, init, false, &self.ab());
         let decls = ArenaVec::from_value_in(declarator, &self.ab());
         let decl = VariableDeclaration::boxed(SPAN, kind, decls, false, &self.ab());
         Statement::VariableDeclaration(decl)
@@ -872,7 +870,6 @@ impl<'a> B<'a> {
             let pat = self.id_pat(name);
             declarators.push(VariableDeclarator::new(
                 SPAN,
-                kind,
                 pat,
                 None,
                 init,

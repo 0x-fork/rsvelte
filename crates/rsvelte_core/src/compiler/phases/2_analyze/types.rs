@@ -653,7 +653,7 @@ fn strip_typescript_from_program_impl(
 
     // Text-based fallback: strip `declare global { ... }`, `declare module ... { ... }`,
     // and `declare namespace ... { ... }` blocks. These may not always be parsed as
-    // TSModuleDeclaration depending on the OXC version, so do a simple text-based scan
+    // TSExternalModuleDeclaration depending on the OXC version, so do a simple text-based scan
     // to ensure they're removed.
     //
     // Every keyword below starts with `declare `, so one SIMD scan for that prefix
@@ -980,8 +980,8 @@ mod ts_removals {
                 return;
             }
             let last_impl = class.implements.last().unwrap();
-            let search_start = if let Some(super_class) = &class.super_class {
-                super_class.span().end as usize
+            let search_start = if let Some(heritage) = &class.heritage {
+                heritage.expression.span().end as usize
             } else if let Some(type_params) = &class.type_parameters {
                 type_params.span.end as usize
             } else if let Some(id) = &class.id {
@@ -1038,7 +1038,11 @@ mod ts_removals {
             self.remove(it.span);
         }
 
-        fn visit_ts_module_declaration(&mut self, it: &TSModuleDeclaration<'a>) {
+        fn visit_ts_external_module_declaration(&mut self, it: &TSExternalModuleDeclaration<'a>) {
+            self.remove(it.span);
+        }
+
+        fn visit_ts_namespace_declaration(&mut self, it: &TSNamespaceDeclaration<'a>) {
             self.remove(it.span);
         }
 
@@ -1293,7 +1297,8 @@ mod ts_removals {
                 Declaration::TSTypeAliasDeclaration(_)
                 | Declaration::TSInterfaceDeclaration(_)
                 | Declaration::TSEnumDeclaration(_)
-                | Declaration::TSModuleDeclaration(_) => true,
+                | Declaration::TSExternalModuleDeclaration(_)
+                | Declaration::TSNamespaceDeclaration(_) => true,
                 _ => false,
             };
             if drop_statement {

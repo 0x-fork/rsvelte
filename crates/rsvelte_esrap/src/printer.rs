@@ -29,14 +29,15 @@ use oxc_ast::ast::{
     ObjectProperty, ObjectPropertyKind, Program, PropertyDefinition, PropertyDefinitionType,
     PropertyKey, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Statement,
     StaticMemberExpression, StringLiteral, SwitchStatement, TSAccessibility, TSEnumDeclaration,
-    TSEnumMember, TSEnumMemberName, TSGlobalDeclaration, TSImportEqualsDeclaration, TSImportType,
-    TSImportTypeQualifier, TSInterfaceDeclaration, TSLiteral, TSMappedType,
-    TSMappedTypeModifierOperator, TSModuleBlock, TSModuleDeclaration, TSModuleDeclarationBody,
-    TSModuleDeclarationKind, TSModuleDeclarationName, TSModuleReference, TSNamedTupleMember,
-    TSSignature, TSThisParameter, TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
-    TSTypeLiteral, TSTypeName, TSTypeOperatorOperator, TSTypeParameter, TSTypeParameterDeclaration,
-    TSTypeParameterInstantiation, TSTypePredicateName, TSTypeQueryExprName, TemplateLiteral,
-    TryStatement, UnaryExpression, VariableDeclaration, VariableDeclarationKind, WithClause,
+    TSEnumMember, TSEnumMemberName, TSExternalModuleDeclaration, TSGlobalDeclaration,
+    TSImportEqualsDeclaration, TSImportType, TSImportTypeQualifier, TSInterfaceDeclaration,
+    TSLiteral, TSMappedType, TSMappedTypeModifierOperator, TSModuleBlock, TSModuleReference,
+    TSNamedTupleMember, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+    TSNamespaceDeclarationKind, TSSignature, TSThisParameter, TSTupleElement, TSType,
+    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
+    TSTypeParameter, TSTypeParameterDeclaration, TSTypeParameterInstantiation, TSTypePredicateName,
+    TSTypeQueryExprName, TemplateLiteral, TryStatement, UnaryExpression, VariableDeclaration,
+    VariableDeclarationKind, WithClause,
 };
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UnaryOperator;
@@ -1066,7 +1067,8 @@ impl<'opt> Printer<'opt> {
             Statement::TSTypeAliasDeclaration(d) => self.type_alias_declaration(d, ctx),
             Statement::TSInterfaceDeclaration(d) => self.interface_declaration(d, ctx),
             Statement::TSEnumDeclaration(d) => self.enum_declaration(d, ctx),
-            Statement::TSModuleDeclaration(d) => self.module_declaration(d, ctx),
+            Statement::TSExternalModuleDeclaration(d) => self.external_module_declaration(d, ctx),
+            Statement::TSNamespaceDeclaration(d) => self.namespace_declaration(d, true, ctx),
             Statement::TSGlobalDeclaration(d) => self.global_declaration(d, ctx),
             Statement::TSImportEqualsDeclaration(d) => Self::import_equals_declaration(d, ctx),
             Statement::TSExportAssignment(d) => {
@@ -1321,7 +1323,8 @@ impl<'opt> Printer<'opt> {
             Declaration::TSTypeAliasDeclaration(d) => self.type_alias_declaration(d, ctx),
             Declaration::TSInterfaceDeclaration(d) => self.interface_declaration(d, ctx),
             Declaration::TSEnumDeclaration(d) => self.enum_declaration(d, ctx),
-            Declaration::TSModuleDeclaration(d) => self.module_declaration(d, ctx),
+            Declaration::TSExternalModuleDeclaration(d) => self.external_module_declaration(d, ctx),
+            Declaration::TSNamespaceDeclaration(d) => self.namespace_declaration(d, true, ctx),
             Declaration::TSGlobalDeclaration(d) => self.global_declaration(d, ctx),
             Declaration::TSImportEqualsDeclaration(d) => Self::import_equals_declaration(d, ctx),
         }
@@ -1425,10 +1428,10 @@ impl<'opt> Printer<'opt> {
             self.type_parameter_declaration(tp, ctx);
             ctx.write(" ");
         }
-        if let Some(super_class) = &node.super_class {
+        if let Some(heritage) = &node.heritage {
             ctx.write("extends ");
-            self.child_with_parens(super_class, 19, ctx);
-            if let Some(ta) = &node.super_type_arguments {
+            self.child_with_parens(&heritage.expression, 19, ctx);
+            if let Some(ta) = &heritage.type_arguments {
                 self.type_parameter_instantiation(ta, ctx);
             }
             ctx.write(" ");
@@ -3507,7 +3510,7 @@ impl<'opt> Printer<'opt> {
                         obj_or_array: false,
                         is_elision: false,
                         render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                            p.print_expression(&h.expression, child);
+                            Self::print_type_name(&h.type_name, child);
                             if let Some(ta) = &h.type_arguments {
                                 p.type_parameter_instantiation(ta, child);
                             }
@@ -3580,26 +3583,42 @@ impl<'opt> Printer<'opt> {
         }
     }
 
-    fn module_declaration(&mut self, node: &TSModuleDeclaration, ctx: &mut Context) {
+    fn external_module_declaration(
+        &mut self,
+        node: &TSExternalModuleDeclaration,
+        ctx: &mut Context,
+    ) {
         if node.declare {
             ctx.write("declare ");
         }
-        let kind = match node.kind {
-            TSModuleDeclarationKind::Module => "module ",
-            TSModuleDeclarationKind::Namespace => "namespace ",
-        };
-        ctx.write(kind);
-        match &node.id {
-            TSModuleDeclarationName::Identifier(id) => ctx.write(id.name.as_str()),
-            TSModuleDeclarationName::StringLiteral(s) => ctx.write(Self::string_literal(s)),
+        ctx.write("module ");
+        ctx.write(Self::string_literal(&node.id));
+        if let Some(body) = &node.body {
+            self.module_block(body, ctx);
         }
+    }
+
+    fn namespace_declaration(
+        &mut self,
+        node: &TSNamespaceDeclaration,
+        include_keyword: bool,
+        ctx: &mut Context,
+    ) {
+        if include_keyword {
+            if node.declare {
+                ctx.write("declare ");
+            }
+            ctx.write(match node.kind {
+                TSNamespaceDeclarationKind::Module => "module ",
+                TSNamespaceDeclarationKind::Namespace => "namespace ",
+            });
+        }
+        ctx.write(node.id.name.as_str());
         match &node.body {
-            None => {}
-            Some(TSModuleDeclarationBody::TSModuleBlock(block)) => self.module_block(block, ctx),
-            Some(TSModuleDeclarationBody::TSModuleDeclaration(inner)) => {
-                // `namespace A.B {}` — esrap recurses into the nested decl.
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => self.module_block(block, ctx),
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
                 ctx.write(".");
-                self.module_declaration(inner, ctx);
+                self.namespace_declaration(inner, false, ctx);
             }
         }
     }

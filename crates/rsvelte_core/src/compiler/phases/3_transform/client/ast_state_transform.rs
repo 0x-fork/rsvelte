@@ -4321,7 +4321,8 @@ fn projected_statement_is_type_only(statement: &Statement<'_>) -> bool {
         | Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_)
-        | Statement::TSModuleDeclaration(_) => true,
+        | Statement::TSExternalModuleDeclaration(_)
+        | Statement::TSNamespaceDeclaration(_) => true,
         Statement::VariableDeclaration(declaration) => declaration.declare,
         Statement::FunctionDeclaration(function) => {
             function.r#type == FunctionType::TSDeclareFunction
@@ -4340,7 +4341,8 @@ fn projected_statement_is_type_only(statement: &Statement<'_>) -> bool {
                     Declaration::TSTypeAliasDeclaration(_)
                         | Declaration::TSInterfaceDeclaration(_)
                         | Declaration::TSEnumDeclaration(_)
-                        | Declaration::TSModuleDeclaration(_)
+                        | Declaration::TSExternalModuleDeclaration(_)
+                        | Declaration::TSNamespaceDeclaration(_)
                 )
                 || matches!(
                     declaration,

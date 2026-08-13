@@ -4835,7 +4835,8 @@ fn create_class_expression<'a>(
     });
 
     // superClass
-    let super_class = class_expr.super_class.as_ref().map(|sc| {
+    let super_class = class_expr.heritage.as_ref().map(|heritage| {
+        let sc = &heritage.expression;
         let super_expr = convert_expression(arena, sc, offset, line_offsets);
         arena.alloc_js_node(expr_to_node(super_expr))
     });
@@ -7505,7 +7506,11 @@ fn convert_statement_for_program(
                         class_obj.set_field("id", Value::Null);
                     }
 
-                    if let Some(super_class) = &class_decl.super_class {
+                    if let Some(super_class) = class_decl
+                        .heritage
+                        .as_ref()
+                        .map(|heritage| &heritage.expression)
+                    {
                         let super_expr = convert_expression_for_program(
                             arena,
                             super_class,
@@ -8115,7 +8120,7 @@ fn convert_statement_for_program(
         }
 
         // TypeScript module/namespace declarations - emit so remove_typescript_nodes can detect them
-        oxc_ast::ast::Statement::TSModuleDeclaration(module_decl) => {
+        oxc_ast::ast::Statement::TSExternalModuleDeclaration(module_decl) => {
             // `declare module`, `declare global`, `declare namespace` etc. are
             // type-only and must be stripped.
             if module_decl.declare {
@@ -8132,30 +8137,20 @@ fn convert_statement_for_program(
             let loc = create_typed_loc(start, end, line_offsets);
 
             // Include body so remove_typescript_nodes can check for non-type nodes
-            let body = module_decl.body.as_ref().and_then(|body| {
-                match body {
-                    oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
-                        let block_body: Vec<JsNode> = block
-                            .body
-                            .iter()
-                            .filter_map(|stmt| {
-                                convert_statement_for_program(arena, stmt, offset, line_offsets)
-                            })
-                            .collect();
-                        // Structure: node.body = { body: [...statements...] }
-                        // TSModuleDeclaration body is a wrapper with inner body
-                        Some(arena.alloc_js_node(JsNode::BlockStatement {
-                            start: start as u32,
-                            end: end as u32,
-                            loc: loc.clone(),
-                            body: arena.alloc_js_children(block_body),
-                        }))
-                    }
-                    oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(_inner) => {
-                        // Nested module declaration - just include empty body
-                        None
-                    }
-                }
+            let body = module_decl.body.as_ref().map(|block| {
+                let block_body: Vec<JsNode> = block
+                    .body
+                    .iter()
+                    .filter_map(|stmt| {
+                        convert_statement_for_program(arena, stmt, offset, line_offsets)
+                    })
+                    .collect();
+                arena.alloc_js_node(JsNode::BlockStatement {
+                    start: start as u32,
+                    end: end as u32,
+                    loc: loc.clone(),
+                    body: arena.alloc_js_children(block_body),
+                })
             });
 
             Some(JsNode::TSModuleDeclaration {
@@ -8163,6 +8158,17 @@ fn convert_statement_for_program(
                 end: end as u32,
                 loc,
                 body,
+            })
+        }
+        oxc_ast::ast::Statement::TSNamespaceDeclaration(module_decl) => {
+            Some(JsNode::EmptyStatement {
+                start: (offset + module_decl.span.start as usize) as u32,
+                end: (offset + module_decl.span.end as usize) as u32,
+                loc: create_typed_loc(
+                    offset + module_decl.span.start as usize,
+                    offset + module_decl.span.end as usize,
+                    line_offsets,
+                ),
             })
         }
 
@@ -8262,7 +8268,8 @@ fn convert_class_declaration_as_node(
     });
 
     // superClass
-    let super_class = class_decl.super_class.as_ref().map(|super_class| {
+    let super_class = class_decl.heritage.as_ref().map(|heritage| {
+        let super_class = &heritage.expression;
         let super_class_value =
             convert_expression_for_program(arena, super_class, offset, line_offsets);
         arena.alloc_js_node(expr_to_node(super_class_value))
@@ -8503,7 +8510,11 @@ fn convert_declaration_for_program(
             }
 
             // superClass
-            if let Some(super_class) = &class_decl.super_class {
+            if let Some(super_class) = class_decl
+                .heritage
+                .as_ref()
+                .map(|heritage| &heritage.expression)
+            {
                 let super_class_value =
                     convert_expression_for_program(arena, super_class, offset, line_offsets);
                 obj.set_field("superClass", super_class_value.as_json().clone());
@@ -8528,7 +8539,7 @@ fn convert_declaration_for_program(
             Value::Object(obj)
         }
         // TypeScript module/namespace declarations
-        oxc_ast::ast::Declaration::TSModuleDeclaration(module_decl) => {
+        oxc_ast::ast::Declaration::TSExternalModuleDeclaration(module_decl) => {
             // `declare module`, `declare global`, `declare namespace` etc. are
             // type-only and must be stripped from output. Emit an EmptyStatement
             // so remove_typescript_nodes can filter it out.
@@ -8544,25 +8555,31 @@ fn convert_declaration_for_program(
             push_span_fields(&mut obj, start, end, line_offsets);
 
             // Include body for non-type node detection
-            if let Some(ref body) = module_decl.body {
-                match body {
-                    oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
-                        let block_body: Vec<Value> = block
-                            .body
-                            .iter()
-                            .filter_map(|stmt| {
-                                convert_statement_for_program(arena, stmt, offset, line_offsets)
-                            })
-                            .map(|n| n.to_value())
-                            .collect();
-                        let mut block_obj = Map::new();
-                        block_obj.set_field("body", Value::Array(block_body));
-                        obj.set_field("body", Value::Object(block_obj));
-                    }
-                    oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(_inner) => {}
-                }
+            if let Some(block) = &module_decl.body {
+                let block_body: Vec<Value> = block
+                    .body
+                    .iter()
+                    .filter_map(|stmt| {
+                        convert_statement_for_program(arena, stmt, offset, line_offsets)
+                    })
+                    .map(|n| n.to_value())
+                    .collect();
+                let mut block_obj = Map::new();
+                block_obj.set_field("body", Value::Array(block_body));
+                obj.set_field("body", Value::Object(block_obj));
             }
 
+            Value::Object(obj)
+        }
+        oxc_ast::ast::Declaration::TSNamespaceDeclaration(module_decl) => {
+            let mut obj = Map::new();
+            obj.set_field("type", Value::String("EmptyStatement".to_string()));
+            push_span_fields(
+                &mut obj,
+                offset + module_decl.span.start as usize,
+                offset + module_decl.span.end as usize,
+                line_offsets,
+            );
             Value::Object(obj)
         }
         _ => Value::Null,
@@ -9256,7 +9273,8 @@ fn convert_expression_for_program<'a>(
                 )))
             });
 
-            let super_class = class_expr.super_class.as_ref().map(|sc| {
+            let super_class = class_expr.heritage.as_ref().map(|heritage| {
+                let sc = &heritage.expression;
                 arena.alloc_js_node(expr_to_node(convert_expression_for_program(
                     arena,
                     sc,
