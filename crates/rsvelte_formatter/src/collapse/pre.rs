@@ -1,7 +1,7 @@
 use super::{
     FormatOptions, Fragment, TemplateNode, VisualWidth, apply_edits, child_fragments,
-    current_column, is_block_display, is_whitespace_preserving, node_end, node_start,
-    parse_formatted, split_open_tag_attrs, tab_width, with_pre_content,
+    current_column, indent_config, is_block_display, is_whitespace_preserving, node_end,
+    node_start, parse_formatted, split_open_tag_attrs, tab_width, with_pre_content,
 };
 
 struct PreReindent<'a> {
@@ -71,21 +71,6 @@ fn reindent_pre_lines(formatted: &str, context: &PreReindent<'_>) -> String {
     result
 }
 
-/// Whether a fragment (recursively) contains a control-flow block — the trigger
-/// for the `<pre>` hybrid reformat (a `<pre>` of only raw text is left verbatim).
-pub(super) fn fragment_has_block(fragment: &Fragment) -> bool {
-    fragment.nodes.iter().any(|n| {
-        matches!(
-            n,
-            TemplateNode::IfBlock(_)
-                | TemplateNode::EachBlock(_)
-                | TemplateNode::AwaitBlock(_)
-                | TemplateNode::KeyBlock(_)
-                | TemplateNode::SnippetBlock(_)
-        ) || child_fragments(n).iter().any(|f| fragment_has_block(f))
-    })
-}
-
 /// Whether a fragment has any element/component/slot child that (a) has at
 /// least one attribute AND (b) itself has non-text children (elements,
 /// expression tags, or blocks).  Used as a secondary trigger for
@@ -119,9 +104,31 @@ pub(super) fn fragment_has_element_with_children(fragment: &Fragment) -> bool {
     })
 }
 
+pub(super) fn fragment_has_block(fragment: &Fragment) -> bool {
+    fragment.nodes.iter().any(|n| {
+        matches!(
+            n,
+            TemplateNode::IfBlock(_)
+                | TemplateNode::EachBlock(_)
+                | TemplateNode::AwaitBlock(_)
+                | TemplateNode::KeyBlock(_)
+                | TemplateNode::SnippetBlock(_)
+        ) || child_fragments(n).iter().any(|f| fragment_has_block(f))
+    })
+}
+
+fn fragment_needs_block_reformat(fragment: &Fragment) -> bool {
+    fragment.nodes.iter().any(|n| {
+        matches!(n, TemplateNode::RegularElement(e) if matches!(e.name.as_str(), "script" | "style"))
+            || child_fragments(n)
+                .iter()
+                .any(|f| fragment_has_block(f) || fragment_needs_block_reformat(f))
+    })
+}
+
 /// Walk the tree (tracking nesting depth) and, for each `<pre>`/`<textarea>` whose
-/// content contains a block OR has element children with their own non-text children,
-/// push an edit re-formatting its inner content with the pre hybrid rule
+/// raw-content subtree contains a block or whose attributed children need layout, push an edit
+/// re-formatting its inner content with the pre hybrid rule
 /// (see [`reformat_pre_inner`]).
 pub(super) fn collect_pre_block_reformats(
     out: &str,
@@ -137,15 +144,52 @@ pub(super) fn collect_pre_block_reformats(
         }
         if let TemplateNode::RegularElement(e) = node
             && matches!(e.name.as_str(), "pre" | "textarea")
-            && (fragment_has_block(&e.fragment) || fragment_has_element_with_children(&e.fragment))
+            && (fragment_has_element_with_children(&e.fragment)
+                || fragment_needs_block_reformat(&e.fragment))
         {
             if let Some(edit) = reformat_pre_inner(out, e, depth + 1, options) {
                 edits.push(edit);
             }
             continue; // its subtree is owned by this edit
         }
+        if let TemplateNode::RegularElement(e) = node
+            && matches!(e.name.as_str(), "pre" | "textarea")
+        {
+            collect_direct_pre_block_body_indents(out, &e.fragment, depth + 1, options, edits);
+            continue;
+        }
         for child in child_fragments(node) {
             collect_pre_block_reformats(out, child, depth + 1, options, edits);
+        }
+    }
+}
+
+fn collect_direct_pre_block_body_indents(
+    out: &str,
+    fragment: &Fragment,
+    depth: usize,
+    options: &FormatOptions,
+    edits: &mut Vec<(u32, u32, String)>,
+) {
+    for node in &fragment.nodes {
+        if let TemplateNode::IfBlock(block) = node
+            && let Some(TemplateNode::Text(text)) = block.consequent.nodes.first()
+        {
+            let raw = out
+                .get(text.start as usize..text.end as usize)
+                .unwrap_or_default();
+            let leading = raw
+                .bytes()
+                .take_while(|b| *b == b' ' || *b == b'\t')
+                .count();
+            if leading > 0 && !raw[..leading].contains('\n') {
+                let indent = indent_config(options).0.repeat(depth + 1);
+                edits.push((
+                    text.start,
+                    text.start + leading as u32,
+                    format!("\n{indent}"),
+                ));
+            }
         }
     }
 }
