@@ -51,9 +51,6 @@
 //! `build_pending_snippet_block`), discarding the real children for SSR.
 //!
 //! 写经 GAPs (not ported — see [`visit_svelte_boundary`]):
-//! - The `pending` ATTRIBUTE branch (`build_pending_attribute_block` +
-//!   `is_pending_attr_nullish` if/else). A boundary with only a `pending`
-//!   attribute falls through to the children-body path.
 //! - The `failed` *attribute* value uses `ServerTransformState::visit_expr` (the
 //!   read-wrapped expression) rather than upstream's
 //!   `build_attribute_value(..., is_component=true)`; correct for the common
@@ -87,13 +84,14 @@ pub fn visit_svelte_boundary<'a>(node: &SvelteElement<'a>, state: &mut ServerTra
     let failed_snippet = find_snippet(&node.fragment, "failed");
     let failed_attribute = find_attribute(&node.attributes, "failed");
 
+    let pending_attribute = find_attribute(&node.attributes, "pending");
+
     // `pending` snippet (a `{#snippet pending()}` child). When present, the
     // SERVER renders the pending state — upstream `SvelteBoundary.js` sets
     // `children_body = build_pending_snippet_block(pending_snippet)`, i.e.
     // `[push('<!--[!-->'), <pending body>, push('<!--]-->')]` — and DISCARDS the
     // real children for SSR (they only render client-side once the boundary
-    // resolves). The `pending` *attribute* branch is still a GAP (defensive
-    // fallback to the children body).
+    // resolves).
     let pending_snippet = find_snippet(&node.fragment, "pending");
 
     // The children fragment with the `failed`/`pending` snippets filtered out
@@ -118,25 +116,51 @@ pub fn visit_svelte_boundary<'a>(node: &SvelteElement<'a>, state: &mut ServerTra
     // - otherwise → `[push('<!--[-->'), <children block>, push('<!--]-->')]`.
     // SvelteBoundary slot / snippet body IS an `is_text_first` parent.
     let saved_scope = state.enter_template_scope(node.start);
-    let children_body: Vec<Statement<'a>> = if let Some(pending) = pending_snippet {
-        let saved_pending = state.enter_template_scope(pending.start);
-        let pending_block = build_fragment_block(&pending.body, true, state);
-        state.restore_scope(saved_pending);
-        let b = state.b;
-        vec![
-            b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN_ELSE)])),
-            pending_block,
-            b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
-        ]
-    } else {
-        let children_block = build_fragment_block(&children_fragment, true, state);
-        let b = state.b;
-        vec![
-            b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN)])),
-            children_block,
-            b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
-        ]
-    };
+    let children_body: Vec<Statement<'a>> =
+        if let Some(Attribute::Attribute(attr)) = pending_attribute {
+            let pending_callee = boundary_attribute_value(&attr.value, state);
+            let b = state.b;
+            let pending_body = vec![
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN_ELSE)])),
+                b.stmt(b.call(pending_callee, vec![b.id("$$renderer")])),
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
+            ];
+
+            if pending_snippet.is_none() {
+                let children_block = build_fragment_block(&children_fragment, true, state);
+                let callee = boundary_attribute_value(&attr.value, state);
+                let b = state.b;
+                vec![b.if_stmt(
+                    callee,
+                    b.block(pending_body),
+                    Some(b.block(vec![
+                        b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN)])),
+                        children_block,
+                        b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
+                    ])),
+                )]
+            } else {
+                pending_body
+            }
+        } else if let Some(pending) = pending_snippet {
+            let saved_pending = state.enter_template_scope(pending.start);
+            let pending_block = build_fragment_block(&pending.body, true, state);
+            state.restore_scope(saved_pending);
+            let b = state.b;
+            vec![
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN_ELSE)])),
+                pending_block,
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
+            ]
+        } else {
+            let children_block = build_fragment_block(&children_fragment, true, state);
+            let b = state.b;
+            vec![
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_OPEN)])),
+                children_block,
+                b.stmt(b.call("$$renderer.push", vec![marker(state, BLOCK_CLOSE)])),
+            ]
+        };
     state.restore_scope(saved_scope);
 
     // No `failed` branch → skip the boundary wrapper, push children_body inline.
@@ -177,7 +201,7 @@ pub fn visit_svelte_boundary<'a>(node: &SvelteElement<'a>, state: &mut ServerTra
     } else if let Some(Attribute::Attribute(attr)) = failed_attribute {
         // `failed={expr}` (no snippet): `{ failed: <expr> }` (shorthand when the
         // expression is the bare identifier `failed`).
-        let value = failed_attribute_value(&attr.value, state);
+        let value = boundary_attribute_value(&attr.value, state);
         props.push(state.b.init("failed", value));
     }
 
@@ -276,7 +300,7 @@ fn build_boundary_snippet<'a>(
 /// value (`failed={expr}` / `failed="{expr}"`) becomes the read-wrapped
 /// expression; a bare-`true` / static-text value falls back to `true`
 /// (defensive — `failed` is always an expression in practice).
-fn failed_attribute_value<'a>(
+fn boundary_attribute_value<'a>(
     value: &crate::ast::template::AttributeValue,
     state: &mut ServerTransformState<'a>,
 ) -> oxc_ast::ast::Expression<'a> {
