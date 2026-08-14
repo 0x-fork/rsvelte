@@ -23,14 +23,10 @@ fn formats_unformatted_js() {
         parser_ret.diagnostics
     );
 
-    let formatted = format_program(
-        &allocator,
-        &parser_ret.program,
-        JsFormatOptions::default(),
-    )
-    .print()
-    .expect("print")
-    .into_code();
+    let formatted = format_program(&allocator, &parser_ret.program, JsFormatOptions::default())
+        .print()
+        .expect("print")
+        .into_code();
 
     println!("--- input ---\n{source}\n--- output ---\n{formatted}");
 
