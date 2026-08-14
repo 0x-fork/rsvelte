@@ -9,16 +9,17 @@ use crossbeam_channel::{Receiver, Sender, after, never, select, unbounded};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     CancelParams, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CompletionOptions, CompletionParams, ConfigurationItem,
-    ConfigurationParams, DiagnosticOptions, DiagnosticServerCapabilities,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport, HoverParams,
-    HoverProviderCapability, NumberOrString, OneOf, PublishDiagnosticsParams,
-    RelatedFullDocumentDiagnosticReport, SelectionRangeParams, SelectionRangeProviderCapability,
-    ServerCapabilities, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, CompletionOptions,
+    CompletionParams, ConfigurationItem, ConfigurationParams, DiagnosticOptions,
+    DiagnosticServerCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    FullDocumentDiagnosticReport, HoverParams, HoverProviderCapability, NumberOrString, OneOf,
+    PublishDiagnosticsParams, RelatedFullDocumentDiagnosticReport, SelectionRangeParams,
+    SelectionRangeProviderCapability, ServerCapabilities, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri,
 };
 
 use crate::client::ClientState;
@@ -98,6 +99,9 @@ fn capabilities(client: &ClientState) -> ServerCapabilities {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
             ..CodeActionOptions::default()
         })),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -121,6 +125,7 @@ enum Pending {
     Completion,
     Hover,
     CodeAction,
+    CodeLens,
     FoldingRange,
     SelectionRange,
     DocumentSymbol,
@@ -231,6 +236,7 @@ impl Server {
             "textDocument/completion" => self.on_completion(request),
             "textDocument/hover" => self.on_hover(request),
             "textDocument/codeAction" => self.on_code_action(request),
+            "textDocument/codeLens" => self.on_code_lens(request),
             "textDocument/foldingRange" => self.on_folding_range(request),
             "textDocument/selectionRange" => self.on_selection_range(request),
             "textDocument/documentSymbol" => self.on_document_symbol(request),
@@ -407,6 +413,33 @@ impl Server {
             diagnostics: params.context.diagnostics,
         };
         self.pending.insert(id, Pending::CodeAction);
+        self.worker.submit(job);
+    }
+
+    fn on_code_lens(&mut self, request: Request) {
+        let id = request.id;
+        let params = match serde_json::from_value::<CodeLensParams>(request.params) {
+            Ok(params) => params,
+            Err(err) => {
+                log::warn(format_args!("textDocument/codeLens: {err}"));
+                self.respond_no_lenses(id);
+                return;
+            }
+        };
+        if !self.settings.runes_legacy_mode_code_lens_enable {
+            self.respond_no_lenses(id);
+            return;
+        }
+        let Some((path, text)) = self.component(&params.text_document.uri) else {
+            self.respond_no_lenses(id);
+            return;
+        };
+        let job = Job::CodeLens {
+            id: id.clone(),
+            path,
+            text,
+        };
+        self.pending.insert(id, Pending::CodeLens);
         self.worker.submit(job);
     }
 
@@ -662,6 +695,11 @@ impl Server {
                     self.respond(Response::new_ok(id, actions));
                 }
             }
+            Outcome::CodeLenses { id, lenses } => {
+                if self.pending.remove(&id).is_some() {
+                    self.respond(Response::new_ok(id, lenses));
+                }
+            }
             Outcome::FoldingRanges { id, ranges } => {
                 if self.pending.remove(&id).is_some() {
                     self.respond(Response::new_ok(id, ranges));
@@ -804,6 +842,10 @@ impl Server {
 
     fn respond_no_actions(&self, id: RequestId) {
         self.respond(Response::new_ok(id, Vec::<CodeActionOrCommand>::new()));
+    }
+
+    fn respond_no_lenses(&self, id: RequestId) {
+        self.respond(Response::new_ok(id, Vec::<CodeLens>::new()));
     }
 
     fn respond_no_ranges(&self, id: RequestId) {
