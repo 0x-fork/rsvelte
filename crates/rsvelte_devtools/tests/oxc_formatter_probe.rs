@@ -27,7 +27,6 @@ fn formats_unformatted_js() {
         &allocator,
         &parser_ret.program,
         JsFormatOptions::default(),
-        None,
     )
     .print()
     .expect("print")
