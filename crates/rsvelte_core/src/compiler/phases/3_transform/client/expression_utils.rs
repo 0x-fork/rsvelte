@@ -2481,6 +2481,10 @@ pub(super) fn is_member_expression(expr: &str) -> bool {
         if part.is_empty() {
             return false;
         }
+        let part = part.strip_prefix('#').unwrap_or(part);
+        if part.is_empty() {
+            return false;
+        }
         let first = part.chars().next().unwrap();
         if !first.is_alphabetic() && first != '_' && first != '$' {
             return false;
@@ -2754,7 +2758,7 @@ pub(super) fn is_top_level_function_call(expr: &str) -> bool {
         if c.is_alphanumeric() || c == '_' || c == '$' {
             seen_ident_char = true;
             i += 1;
-        } else if c == '.' && seen_ident_char {
+        } else if seen_ident_char && (c == '.' || (c == '#' && i > 0 && chars[i - 1] == '.')) {
             i += 1;
         } else if c.is_whitespace() && seen_ident_char {
             // Whitespace is only part of the path when followed by `.`.
