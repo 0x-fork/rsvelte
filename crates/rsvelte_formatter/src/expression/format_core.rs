@@ -406,7 +406,7 @@ pub(super) fn format_expr_core(
     if single_line {
         js.expand = oxc_formatter::Expand::Never;
     }
-    let formatted = format_program(allocator, &parser_ret.program, js, None)
+    let formatted = format_program(allocator, &parser_ret.program, js)
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();

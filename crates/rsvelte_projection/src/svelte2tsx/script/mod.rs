@@ -874,13 +874,13 @@ fn collect_module_names(
             // contribute both a value and a type binding, so an
             // instance-script `interface X` would shadow the module
             // declaration once hoisted.
-            oxc::Statement::TSModuleDeclaration(module_decl) => {
-                if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module_decl.id {
-                    exported_names
-                        .module_value_names
-                        .insert(id.name.to_string());
-                    exported_names.module_type_names.insert(id.name.to_string());
-                }
+            oxc::Statement::TSNamespaceDeclaration(module_decl) => {
+                exported_names
+                    .module_value_names
+                    .insert(module_decl.id.name.to_string());
+                exported_names
+                    .module_type_names
+                    .insert(module_decl.id.name.to_string());
             }
             oxc::Statement::TSEnumDeclaration(enum_decl) => {
                 exported_names

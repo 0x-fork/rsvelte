@@ -209,10 +209,8 @@ pub(super) fn collect_top_level_declared_names(body: &[oxc::Statement]) -> HashS
                     names.insert(id.name.to_string());
                 }
             }
-            oxc::Statement::TSModuleDeclaration(m) => {
-                if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &m.id {
-                    names.insert(id.name.to_string());
-                }
+            oxc::Statement::TSNamespaceDeclaration(m) => {
+                names.insert(m.id.name.to_string());
             }
             oxc::Statement::TSEnumDeclaration(e) => {
                 names.insert(e.id.name.to_string());

@@ -51,7 +51,7 @@ pub(super) fn format_const_declaration(
                 .unwrap_or(options.js.line_width);
         let mut js = options.js.clone();
         js.line_width = line_width;
-        let formatted = format_program(allocator, &parser_ret.program, js, None)
+        let formatted = format_program(allocator, &parser_ret.program, js)
             .print()
             .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
             .into_code();
@@ -145,7 +145,7 @@ pub(super) fn format_declaration_tag_body(
 
     let mut js = options.js.clone();
     js.line_width = line_width;
-    let formatted = format_program(allocator, &parser_ret.program, js, None)
+    let formatted = format_program(allocator, &parser_ret.program, js)
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();
@@ -214,7 +214,7 @@ pub(super) fn format_snippet_header_source(
         .unwrap_or(options.js.line_width);
     // NOTE: do NOT set `expand = Never` — width-driven breaking is the point.
 
-    let formatted = format_program(allocator, &parser_ret.program, js, None)
+    let formatted = format_program(allocator, &parser_ret.program, js)
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();

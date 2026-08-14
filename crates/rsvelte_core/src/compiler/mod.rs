@@ -672,6 +672,20 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileResult, C
     crate::toolchain::PreparedComponent::new(source, options)?.compile_mode(generate)
 }
 
+/// Compile a client component while exposing its generated JS program to an
+/// in-process consumer. The callback must not retain either borrow.
+pub fn compile_client_with_program_sink(
+    source: &str,
+    options: CompileOptions,
+    sink: &mut dyn FnMut(
+        &phases::phase3_transform::JsProgram,
+        &phases::phase3_transform::js_ast::arena::JsArena,
+    ),
+) -> Result<CompileResult, CompileError> {
+    crate::toolchain::PreparedComponent::new(source, options)?
+        .compile_client_with_program_sink(sink)
+}
+
 #[doc(hidden)]
 pub fn compile_with_external_sourcemap_content(
     source: &str,

@@ -232,13 +232,14 @@ pub(crate) fn transform_client(
     source: &str,
     options: &CompileOptions,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    program_sink: Option<&mut dyn FnMut(&super::js_ast::JsProgram, &super::js_ast::arena::JsArena)>,
 ) -> Result<CodegenResult, TransformError> {
     if ast::oracle::enabled() {
         // Run both pipelines and score the AST one against the text one, which
         // is the specification here (it passes every fixture). The text result
         // is what we return, so turning the oracle on cannot change output.
         let oracle =
-            transform_client_with_visitors(analysis, ast, source, options, retained_scripts)?;
+            transform_client_with_visitors(analysis, ast, source, options, retained_scripts, None)?;
         ast::oracle::record(
             match ast::transform_client_ast(analysis, ast, source, options) {
                 None => ast::oracle::Verdict::FellBack,
@@ -255,7 +256,14 @@ pub(crate) fn transform_client(
         return Ok(result);
     }
 
-    transform_client_with_visitors(analysis, ast, source, options, retained_scripts)
+    transform_client_with_visitors(
+        analysis,
+        ast,
+        source,
+        options,
+        retained_scripts,
+        program_sink,
+    )
 }
 
 /// Transform a module (.svelte.js/.svelte.ts) into client-side JavaScript.
@@ -477,6 +485,9 @@ fn transform_client_with_visitors(
     source: &str,
     options: &CompileOptions,
     retained_scripts: Option<&crate::ast::oxc_program::RetainedScripts<'_>>,
+    mut program_sink: Option<
+        &mut dyn FnMut(&super::js_ast::JsProgram, &super::js_ast::arena::JsArena),
+    >,
 ) -> Result<CodegenResult, TransformError> {
     use crate::compiler::phases::phase3_transform::client::visitors::fragment::fragment;
 
@@ -2368,6 +2379,9 @@ fn transform_client_with_visitors(
 
     // Create the program
     let program = JsProgram { body };
+    if let Some(sink) = &mut program_sink {
+        sink(&program, &context.arena);
+    }
 
     // Generate JavaScript code from the program, optionally with source map data
     super::profile::record_assembly_after_fragment(super::profile::timer_elapsed(_assembly_start));

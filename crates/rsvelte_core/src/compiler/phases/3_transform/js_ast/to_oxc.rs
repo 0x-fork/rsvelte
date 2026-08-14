@@ -23,18 +23,18 @@
 //! route:
 //!
 //!   * `JsStatement::Raw` / `JsStatement::RawMapped` — source text that
-//!     [`Self::parse_raw_statements`] re-parses into real oxc statements, with
-//!     [`Self::expand_stmt`] flattening a multi-statement chunk inline at
+//!     `parse_raw_statements` re-parses into real oxc statements, with
+//!     `expand_stmt` flattening a multi-statement chunk inline at
 //!     statement-list sites. A whole module body emitted as one `Raw` converts.
 //!   * `JsExpr::Raw` — opaque expression text, re-parsed by
-//!     [`Self::parse_raw_expression`].
+//!     `parse_raw_expression`.
 //!   * `JsExpr::Spanned` — not raw text at all: a real inner expression carrying
 //!     the original-source byte span, converted normally and then stamped so
 //!     `print_with_map` maps it back to the user's source.
 //!
 //! Re-parsing **fails loudly when the text does not parse** (`chunk-parse`) and
-//! **can differ silently when it does**: [`Self::restore_legacy_pre_effect_deps`]
-//! and [`Self::restore_single_target_destructure_sequences`] exist precisely
+//! **can differ silently when it does**: `restore_legacy_pre_effect_deps`
+//! and `restore_single_target_destructure_sequences` exist precisely
 //! because a round-trip that parses can still print differently from the text it
 //! came from.
 //!
@@ -46,7 +46,7 @@
 //! independently-parsed `Raw` chunks has no shared coordinate space to place
 //! them in.
 //!
-//! [`Synth`] builds one. Each comment-bearing chunk is re-parsed from a
+//! `Synth` builds one. Each comment-bearing chunk is re-parsed from a
 //! `pad + chunk` buffer so its spans (and its comments') land in a private,
 //! monotonically increasing region of a unified buffer above `loc_base`;
 //! container nodes get the span of the region their children consumed. Spans
@@ -929,7 +929,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 SPAN
             };
             declarators.push(VariableDeclarator::new(
-                span, kind, binding, None, init, false, &self.ab,
+                span, binding, None, init, false, &self.ab,
             ));
         }
 
@@ -1567,8 +1567,10 @@ impl<'a, 'arena> Cx<'a, 'arena> {
             ArenaVec::new_in(&self.ab),
             id,
             None,
-            super_class,
-            None,
+            super_class.map(|expression| ClassHeritage {
+                expression,
+                type_arguments: None,
+            }),
             ArenaVec::new_in(&self.ab),
             body,
             false,

@@ -728,7 +728,7 @@ impl<'a, 'arena> Cx<'a, 'arena> {
                 None => None,
             };
             declarators.push(VariableDeclarator::new(
-                SPAN, kind, binding, None, init, false, &self.ab,
+                SPAN, binding, None, init, false, &self.ab,
             ));
         }
         Some(VariableDeclaration::boxed(

@@ -19,7 +19,8 @@ use super::config::{
 use super::diagnostic::{Diagnostic, DiagnosticSeverity, Position, Range};
 use super::kit_file::load_kit_files_settings_with_config;
 use super::manifest::{
-    self, CachedDiagnostics, SerializableDiagnostic, WarningCache, current_stats,
+    self, CachedDiagnostics, SerializableDiagnostic, WarningCache, content_digest,
+    current_content_digest, current_stats,
 };
 use super::mapper::{is_syntactic_ts_code, map_tsgo_diagnostics};
 use super::overlay::{self, OverlayLayout, materialize_overlay_with_kit};
@@ -305,18 +306,20 @@ fn apply_warning_filter(diagnostics: &mut Vec<Diagnostic>, options: &RunOptions)
     else {
         return;
     };
-    let Some(env) = super::warning_filter::SidecarEnv::from_env() else {
-        // Once per process, so `--watch` doesn't re-print it on every rebuild.
-        static NO_NODE_NOTE: std::sync::Once = std::sync::Once::new();
-        NO_NODE_NOTE.call_once(|| {
-            eprintln!(
-                "rsvelte-check: warning: `compilerOptions.warningFilter` is set but could not be \
-                 evaluated (no Node sidecar available). All warnings are shown."
-            );
-        });
-        return;
+    let failure = match super::warning_filter::SidecarEnv::from_env() {
+        Some(env) => super::warning_filter::apply(&env, &config_path, diagnostics).err(),
+        None => Some("no runnable Node warning-filter sidecar is available".into()),
     };
-    super::warning_filter::apply(&env, &config_path, diagnostics);
+    if let Some(message) = failure {
+        diagnostics.push(Diagnostic {
+            file: config_path,
+            severity: DiagnosticSeverity::Error,
+            code: Some("warning_filter_failed".into()),
+            message,
+            range: None,
+            source: "svelte",
+        });
+    }
 }
 
 /// Drop diagnostics whose file lives outside the checked workspace root.
@@ -611,12 +614,14 @@ fn compile_or_reuse(
     if let (Some((mtime, size)), Some(entry)) = (stats, cache.entries.get(file))
         && entry.mtime_ms == mtime
         && entry.size == size
+        && current_content_digest(file) == Some(entry.content_digest)
     {
         return (
             file.to_path_buf(),
             CachedDiagnostics {
                 mtime_ms: mtime,
                 size,
+                content_digest: entry.content_digest,
                 diagnostics: entry.diagnostics.clone(),
             },
         );
@@ -627,11 +632,15 @@ fn compile_or_reuse(
         .map(SerializableDiagnostic::from_live)
         .collect();
     let (mtime_ms, size) = stats.unwrap_or((0, 0));
+    let content_digest = std::fs::read_to_string(file)
+        .ok()
+        .map_or(0, |source| content_digest(&source));
     (
         file.to_path_buf(),
         CachedDiagnostics {
             mtime_ms,
             size,
+            content_digest,
             diagnostics,
         },
     )
