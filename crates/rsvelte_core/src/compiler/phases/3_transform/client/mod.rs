@@ -3608,14 +3608,7 @@ fn extract_shadowed_state_names(script: &str) -> rustc_hash::FxHashSet<String> {
         // Check if this line is at the top level BEFORE counting braces in this line
         let line_starts_at_top = brace_depth == 0;
 
-        // Track brace depth (simple heuristic - doesn't handle strings/comments)
-        for ch in trimmed.chars() {
-            match ch {
-                '{' => brace_depth += 1,
-                '}' => brace_depth -= 1,
-                _ => {}
-            }
-        }
+        advance_brace_depth_lexical(trimmed, &mut brace_depth);
 
         // Check if this is a let/const/var declaration
         let has_decl = trimmed.starts_with("let ")
@@ -3674,6 +3667,28 @@ fn extract_shadowed_state_names(script: &str) -> rustc_hash::FxHashSet<String> {
         .intersection(&inner_state)
         .cloned()
         .collect()
+}
+
+fn advance_brace_depth_lexical(line: &str, depth: &mut i32) {
+    let bytes = line.as_bytes();
+    let mut prev = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some((next, is_comment)) = skip_opaque(bytes, i, prev) {
+            if !is_comment {
+                prev = Some(b'x');
+            }
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'{' => *depth += 1,
+            b'}' => *depth -= 1,
+            c if !c.is_ascii_whitespace() => prev = Some(c),
+            _ => {}
+        }
+        i += 1;
+    }
 }
 /// Every identifier in `script` that is written to, found in one pass.
 ///
@@ -5177,6 +5192,25 @@ fn top_level_statement_end_lines(
     fresh
 }
 
+fn has_snapshot_ignore_before(output: &str) -> bool {
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if memmem::find(trimmed.as_bytes(), b"svelte-ignore").is_some()
+            && memmem::find(trimmed.as_bytes(), b"state_snapshot_uncloneable").is_some()
+        {
+            return true;
+        }
+        if trimmed.starts_with("//") || (trimmed.starts_with("/*") && trimmed.ends_with("*/")) {
+            continue;
+        }
+        break;
+    }
+    false
+}
+
 fn transform_instance_script_for_visitors(
     script: &str,
     analysis: &ComponentAnalysis,
@@ -6460,23 +6494,7 @@ fn transform_instance_script_for_visitors(
             let _pa =
                 super::profile::pa_guard(super::profile::PA_SNAPSHOT_DEV, transformed.len() as u64);
             if dev && memmem::find(transformed.as_bytes(), b"$state.snapshot(").is_some() {
-                let prev_has_ignore = {
-                    let mut found = false;
-                    for line in result.lines().rev() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if memmem::find(trimmed.as_bytes(), b"svelte-ignore").is_some()
-                            && memmem::find(trimmed.as_bytes(), b"state_snapshot_uncloneable")
-                                .is_some()
-                        {
-                            found = true;
-                        }
-                        break;
-                    }
-                    found
-                };
+                let prev_has_ignore = has_snapshot_ignore_before(result);
                 if prev_has_ignore {
                     let mut new_transformed = String::new();
                     let mut remaining: &str = &transformed;
@@ -7598,45 +7616,44 @@ fn index_shadowed_decls(
 
 /// Find the enclosing function body (from `{` to matching `}`) that contains `pos`.
 fn find_enclosing_function_body(script: &str, pos: usize) -> Option<(usize, usize)> {
-    let bytes = script.as_bytes();
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::FunctionBody;
+    use oxc_ast_visit::{Visit, walk};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
 
-    // Scan backwards from pos to find the opening `{` of the enclosing function
-    let mut brace_depth = 0i32;
-    let mut func_open = None;
-    let mut i = pos;
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b'}' => brace_depth += 1,
-            b'{' => {
-                if brace_depth == 0 {
-                    func_open = Some(i);
-                    break;
-                }
-                brace_depth -= 1;
+    struct BodyFinder {
+        pos: u32,
+        body: Option<(u32, u32)>,
+    }
+
+    impl<'a> Visit<'a> for BodyFinder {
+        fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
+            if body.span.start < self.pos
+                && self.pos < body.span.end
+                && self
+                    .body
+                    .is_none_or(|(start, end)| body.span.end - body.span.start < end - start)
+            {
+                self.body = Some((body.span.start, body.span.end));
             }
-            _ => {}
+            walk::walk_function_body(self, body);
         }
     }
-    let func_start = func_open?;
 
-    // Find the matching closing `}` by scanning forward
-    let mut brace_depth = 0i32;
-    let mut func_end = None;
-    for (j, &byte) in bytes.iter().enumerate().take(script.len()).skip(func_start) {
-        match byte {
-            b'{' => brace_depth += 1,
-            b'}' => {
-                brace_depth -= 1;
-                if brace_depth == 0 {
-                    func_end = Some(j + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, script, SourceType::mjs()).parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return None;
     }
-    Some((func_start, func_end?))
+    let mut finder = BodyFinder {
+        pos: pos as u32,
+        body: None,
+    };
+    finder.visit_program(&parsed.program);
+    finder
+        .body
+        .map(|(start, end)| (start as usize, end as usize))
 }
 
 /// Apply `$.get()`, `$.set()`, `$.update()` transforms for a variable within a function body.
