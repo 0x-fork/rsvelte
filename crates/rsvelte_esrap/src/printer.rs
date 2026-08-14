@@ -74,15 +74,18 @@ impl KeywordCursor {
     /// active, otherwise a plain write.
     fn write(&mut self, ctx: &mut Context, fragment: &str) {
         if let Some((line, col)) = self.cursor {
-            Printer::write_source_keyword(ctx, line, col, fragment);
-            self.cursor = Some((line, col + usize_to_u32(fragment.len())));
+            ctx.location(line, col);
+            ctx.write(fragment);
+            let next_col = col + usize_to_u32(fragment.len());
+            ctx.location(line, next_col);
+            self.cursor = Some((line, next_col));
         } else {
             ctx.write(fragment);
         }
     }
 }
 
-pub struct Printer<'opt> {
+pub struct Printer<'opt, const HAS_COMMENTS: bool = true> {
     options: &'opt PrintOptions,
     emit_locations: bool,
     /// Set by the first unsupported node encountered; printing continues so the
@@ -414,7 +417,7 @@ fn arrow_concise_body_needs_wrap(body: &Expression) -> bool {
     }
 }
 
-impl<'opt> Printer<'opt> {
+impl<'opt, const HAS_COMMENTS: bool> Printer<'opt, HAS_COMMENTS> {
     #[cfg(test)]
     pub const fn new(options: &'opt PrintOptions) -> Self {
         Self {
@@ -625,6 +628,9 @@ impl<'opt> Printer<'opt> {
         from_line: Option<u32>,
         pad: bool,
     ) {
+        if !HAS_COMMENTS {
+            return;
+        }
         if !self.has_loc(to) {
             return;
         }
@@ -664,7 +670,7 @@ impl<'opt> Printer<'opt> {
         prev_end: u32,
         next: Option<u32>,
     ) -> bool {
-        if self.comments.is_empty() || !self.has_loc(prev_end) {
+        if !HAS_COMMENTS || !self.has_loc(prev_end) {
             return false;
         }
         // A `next` boundary that is itself synthesized bounds nothing (esrap's
@@ -697,6 +703,9 @@ impl<'opt> Printer<'opt> {
     /// `None` and synthesized offsets are esrap's `!node.loc`, which discards
     /// every pending comment instead of carrying the cursor forward.
     fn reset_comment_index(&mut self, node_start: Option<u32>) {
+        if !HAS_COMMENTS {
+            return;
+        }
         let Some(node_start) = node_start else {
             self.comment_index = self.comments.len();
             return;
@@ -722,7 +731,7 @@ impl<'opt> Printer<'opt> {
 
     /// The `_` wildcard's leading flush: emit comments positioned before `node`.
     fn flush_leading(&mut self, ctx: &mut Context, node_start: u32) {
-        if self.comments.is_empty() {
+        if !HAS_COMMENTS {
             return;
         }
         self.flush_comments_until(ctx, node_start, self.line_of(node_start), None, true);
@@ -741,7 +750,7 @@ impl<'opt> Printer<'opt> {
     /// limit for the closing `flush_comments_until`.
     fn sequence(
         &mut self,
-        mut nodes: Vec<SeqNode<'_>>,
+        mut nodes: Vec<SeqNode<'_, HAS_COMMENTS>>,
         until: Option<u32>,
         pad: bool,
         separator: &'static str,
@@ -1067,7 +1076,7 @@ impl<'opt> Printer<'opt> {
         // block (`() => { /* x */ }`); the lone pending newline keeps the block
         // `empty()`, so a comment-free `{}` is unaffected.
         ctx.newline();
-        if !self.comments.is_empty()
+        if HAS_COMMENTS
             && body_start.is_some_and(|start| self.has_loc(start))
             && self.has_loc(body_end)
         {
@@ -1126,10 +1135,11 @@ impl<'opt> Printer<'opt> {
                     // acorn AST has no paren node: with oxc's preserved parens
                     // `return (/*c*/ x)` would otherwise anchor at the `(`, which
                     // precedes the comment, and the rule would never fire.
-                    let contains_comment = self
-                        .comments
-                        .get(self.comment_index)
-                        .is_some_and(|c| c.start < unparen(arg).span().start);
+                    let contains_comment = HAS_COMMENTS
+                        && self
+                            .comments
+                            .get(self.comment_index)
+                            .is_some_and(|c| c.start < unparen(arg).span().start);
                     let start = s.span().start;
                     if contains_comment {
                         self.write_keyword(ctx, start, "return", " (");
@@ -1302,7 +1312,7 @@ impl<'opt> Printer<'opt> {
                         is_elision: false,
                     }
                 },
-                |_p, s, child| Printer::import_specifier(s, child),
+                |_p, s, child| Printer::<HAS_COMMENTS>::import_specifier(s, child),
                 None,
                 true,
                 ",",
@@ -1398,7 +1408,7 @@ impl<'opt> Printer<'opt> {
                     is_elision: false,
                 }
             },
-            |_p, s, child| Printer::export_specifier(s, child),
+            |_p, s, child| Printer::<HAS_COMMENTS>::export_specifier(s, child),
             None,
             true,
             ",",
@@ -1615,7 +1625,7 @@ impl<'opt> Printer<'opt> {
         }
         if !node.implements.is_empty() {
             ctx.write("implements");
-            let nodes: Vec<SeqNode> = node
+            let nodes: Vec<SeqNode<HAS_COMMENTS>> = node
                 .implements
                 .iter()
                 .map(|imp| {
@@ -1625,12 +1635,14 @@ impl<'opt> Printer<'opt> {
                         end: Some(span.end),
                         obj_or_array: false,
                         is_elision: false,
-                        render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                            Printer::print_type_name(&imp.expression, child);
-                            if let Some(ta) = &imp.type_arguments {
-                                p.type_parameter_instantiation(ta, child);
-                            }
-                        }),
+                        render: Box::new(
+                            move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                                Printer::<HAS_COMMENTS>::print_type_name(&imp.expression, child);
+                                if let Some(ta) = &imp.type_arguments {
+                                    p.type_parameter_instantiation(ta, child);
+                                }
+                            },
+                        ),
                     }
                 })
                 .collect();
@@ -3278,7 +3290,7 @@ impl<'opt> Printer<'opt> {
     }
 
     fn call_arguments(&mut self, args: &[Argument], call_end: u32, ctx: &mut Context) {
-        if self.comments.is_empty() {
+        if !HAS_COMMENTS {
             self.call_arguments_plain(args, ctx);
             return;
         }
@@ -3729,7 +3741,7 @@ impl<'opt> Printer<'opt> {
     }
 
     /// Build [`SeqNode`]s for a list of types (union/intersection).
-    fn type_seq_nodes<'p>(types: &'p [TSType<'p>]) -> Vec<SeqNode<'p>> {
+    fn type_seq_nodes<'p>(types: &'p [TSType<'p>]) -> Vec<SeqNode<'p, HAS_COMMENTS>> {
         types
             .iter()
             .map(|ty| {
@@ -3739,15 +3751,19 @@ impl<'opt> Printer<'opt> {
                     end: Some(span.end),
                     obj_or_array: false,
                     is_elision: false,
-                    render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                        p.print_type(ty, child);
-                    }),
+                    render: Box::new(
+                        move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                            p.print_type(ty, child);
+                        },
+                    ),
                 }
             })
             .collect()
     }
 
-    fn tuple_element_seq_nodes<'p>(els: &'p [TSTupleElement<'p>]) -> Vec<SeqNode<'p>> {
+    fn tuple_element_seq_nodes<'p>(
+        els: &'p [TSTupleElement<'p>],
+    ) -> Vec<SeqNode<'p, HAS_COMMENTS>> {
         els.iter()
             .map(|el| {
                 let span = el.span();
@@ -3756,15 +3772,17 @@ impl<'opt> Printer<'opt> {
                     end: Some(span.end),
                     obj_or_array: false,
                     is_elision: false,
-                    render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                        p.tuple_element(el, child);
-                    }),
+                    render: Box::new(
+                        move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                            p.tuple_element(el, child);
+                        },
+                    ),
                 }
             })
             .collect()
     }
 
-    fn signature_seq_nodes<'p>(members: &'p [TSSignature<'p>]) -> Vec<SeqNode<'p>> {
+    fn signature_seq_nodes<'p>(members: &'p [TSSignature<'p>]) -> Vec<SeqNode<'p, HAS_COMMENTS>> {
         members
             .iter()
             .map(|m| {
@@ -3774,9 +3792,11 @@ impl<'opt> Printer<'opt> {
                     end: Some(span.end),
                     obj_or_array: false,
                     is_elision: false,
-                    render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                        p.signature(m, child);
-                    }),
+                    render: Box::new(
+                        move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                            p.signature(m, child);
+                        },
+                    ),
                 }
             })
             .collect()
@@ -3887,7 +3907,7 @@ impl<'opt> Printer<'opt> {
         }
         if !node.extends.is_empty() {
             ctx.write(" extends ");
-            let nodes: Vec<SeqNode> = node
+            let nodes: Vec<SeqNode<HAS_COMMENTS>> = node
                 .extends
                 .iter()
                 .map(|h| {
@@ -3897,12 +3917,14 @@ impl<'opt> Printer<'opt> {
                         end: Some(span.end),
                         obj_or_array: false,
                         is_elision: false,
-                        render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                            Self::print_type_name(&h.type_name, child);
-                            if let Some(ta) = &h.type_arguments {
-                                p.type_parameter_instantiation(ta, child);
-                            }
-                        }),
+                        render: Box::new(
+                            move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                                Self::print_type_name(&h.type_name, child);
+                                if let Some(ta) = &h.type_arguments {
+                                    p.type_parameter_instantiation(ta, child);
+                                }
+                            },
+                        ),
                     }
                 })
                 .collect();
@@ -3927,7 +3949,7 @@ impl<'opt> Printer<'opt> {
         ctx.write(" {");
         ctx.indent();
         ctx.newline();
-        let nodes: Vec<SeqNode> = node
+        let nodes: Vec<SeqNode<HAS_COMMENTS>> = node
             .body
             .members
             .iter()
@@ -3938,9 +3960,11 @@ impl<'opt> Printer<'opt> {
                     end: Some(span.end),
                     obj_or_array: false,
                     is_elision: false,
-                    render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                        p.enum_member(m, child);
-                    }),
+                    render: Box::new(
+                        move |p: &mut Printer<'_, HAS_COMMENTS>, child: &mut Context| {
+                            p.enum_member(m, child);
+                        },
+                    ),
                 }
             })
             .collect();
@@ -4124,9 +4148,10 @@ struct SeqMeta {
 /// One node of a comma sequence, as fed to [`Printer::sequence`]. Carries the
 /// node's source span (so trailing comments can be flushed in source order) and
 /// a closure that renders it into a child context.
-type SeqRenderer<'p> = dyn FnMut(&mut Printer<'_>, &mut Context) + 'p;
+type SeqRenderer<'p, const HAS_COMMENTS: bool> =
+    dyn FnMut(&mut Printer<'_, HAS_COMMENTS>, &mut Context) + 'p;
 
-struct SeqNode<'p> {
+struct SeqNode<'p, const HAS_COMMENTS: bool> {
     /// Node `loc.end` byte offset, or `None` for a synthetic node without a
     /// span (no trailing-comment flush is attempted for it).
     end: Option<u32>,
@@ -4135,7 +4160,7 @@ struct SeqNode<'p> {
     start: Option<u32>,
     obj_or_array: bool,
     is_elision: bool,
-    render: Box<SeqRenderer<'p>>,
+    render: Box<SeqRenderer<'p, HAS_COMMENTS>>,
 }
 
 const fn accessibility_str(acc: TSAccessibility) -> &'static str {
@@ -4225,7 +4250,11 @@ impl<'a> BodyElem<'a, '_> {
         }
     }
 
-    fn print(&self, printer: &mut Printer, ctx: &mut Context) {
+    fn print<const HAS_COMMENTS: bool>(
+        &self,
+        printer: &mut Printer<'_, HAS_COMMENTS>,
+        ctx: &mut Context,
+    ) {
         match self {
             BodyElem::Directive(d) => printer.print_directive(d, ctx),
             BodyElem::Statement(s) => printer.print_statement(s, ctx),
@@ -4264,7 +4293,7 @@ mod tests {
             ret.diagnostics
         );
         let opts = PrintOptions::default();
-        let mut printer = Printer::new(&opts);
+        let mut printer = Printer::<false>::new(&opts);
         let mut ctx = Context::new();
         printer.print_program(&ret.program, &mut ctx);
         (
@@ -4292,7 +4321,7 @@ mod tests {
         );
         let opts = PrintOptions::default();
         let comments = build_comments(&ret.program, src, &line_starts(src));
-        let mut printer = Printer::with_comments(&opts, comments, line_starts(src));
+        let mut printer = Printer::<true>::with_comments(&opts, comments, line_starts(src));
         let mut ctx = Context::new();
         printer.print_program(&ret.program, &mut ctx);
         let out = crate::command::print(&ctx.into_buffer(), &opts.indent, 0);
