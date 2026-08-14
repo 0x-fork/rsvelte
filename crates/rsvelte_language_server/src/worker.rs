@@ -18,9 +18,10 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use lsp_server::RequestId;
 use lsp_types::{
-    CodeActionOrCommand, CompletionList, Diagnostic, DocumentSymbolResponse, FoldingRange, Hover,
-    Range, SelectionRange, TextEdit, Uri,
+    CodeActionOrCommand, CodeLens, CompletionList, Diagnostic, DocumentSymbolResponse,
+    FoldingRange, Hover, Range, SelectionRange, TextEdit, Uri,
 };
+use serde_json::Value;
 
 use crate::format::FormatSessions;
 use crate::lint::LintConfigCache;
@@ -65,6 +66,21 @@ pub enum Job {
         path: PathBuf,
         text: Arc<String>,
         diagnostics: Vec<Diagnostic>,
+        quickfix: bool,
+        suggestions: bool,
+        fix_all: bool,
+    },
+    CodeLens {
+        id: RequestId,
+        path: PathBuf,
+        text: Arc<String>,
+    },
+    ExtractComponent {
+        id: RequestId,
+        uri: Uri,
+        text: Arc<String>,
+        range: Range,
+        file_path: String,
     },
     FoldingRange {
         id: RequestId,
@@ -118,6 +134,14 @@ pub enum Outcome {
     CodeActions {
         id: RequestId,
         actions: Vec<CodeActionOrCommand>,
+    },
+    CodeLenses {
+        id: RequestId,
+        lenses: Vec<CodeLens>,
+    },
+    ExtractedComponent {
+        id: RequestId,
+        result: Value,
     },
     FoldingRanges {
         id: RequestId,
@@ -248,13 +272,53 @@ fn run(jobs: &Receiver<Job>, outcomes: &Sender<Outcome>) {
                 path,
                 text,
                 diagnostics,
+                quickfix,
+                suggestions,
+                fix_all,
             } => {
+                let config = lint_configs.get(path.parent().unwrap_or(Path::new(".")));
                 let actions = guard("code action", &path, || {
-                    crate::code_actions::quickfixes(&text, &uri, &diagnostics)
+                    let mut actions = if quickfix {
+                        crate::code_actions::quickfixes(&text, &uri, &diagnostics)
+                    } else {
+                        Vec::new()
+                    };
+                    actions.extend(crate::code_actions::lint_actions(
+                        &text,
+                        &path,
+                        &uri,
+                        &config,
+                        &diagnostics,
+                        quickfix,
+                        suggestions,
+                        fix_all,
+                    ));
+                    actions
                 })
                 .unwrap_or_default();
                 Outcome::CodeActions { id, actions }
             }
+            Job::CodeLens { id, path, text } => Outcome::CodeLenses {
+                id,
+                lenses: guard("code lens", &path, || {
+                    crate::code_lens::code_lenses(&text, &path)
+                })
+                .unwrap_or_default(),
+            },
+            Job::ExtractComponent {
+                id,
+                uri,
+                text,
+                range,
+                file_path,
+            } => Outcome::ExtractedComponent {
+                id,
+                result: guard("extract component", Path::new(uri.as_str()), || {
+                    crate::extract::component(&text, uri.as_str(), range, &file_path)
+                })
+                .unwrap_or_else(|| Err("Invalid selection range".to_string()))
+                .unwrap_or_else(Value::String),
+            },
             Job::FoldingRange {
                 id,
                 path,

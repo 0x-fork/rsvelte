@@ -9,18 +9,18 @@ use crossbeam_channel::{Receiver, Sender, after, never, select, unbounded};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     CancelParams, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CompletionOptions, CompletionParams, ConfigurationItem,
-    ConfigurationParams, DiagnosticOptions, DiagnosticServerCapabilities,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, HoverParams,
-    HoverProviderCapability, NumberOrString, OneOf, PublishDiagnosticsParams,
-    RelatedFullDocumentDiagnosticReport, SelectionRangeParams, SelectionRangeProviderCapability,
-    ServerCapabilities, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
-    WorkspaceFoldersServerCapabilities,
+    CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, CompletionOptions,
+    CompletionParams, ConfigurationItem, ConfigurationParams, DiagnosticOptions,
+    DiagnosticServerCapabilities, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions,
+    ExecuteCommandParams, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    FullDocumentDiagnosticReport, HoverParams, HoverProviderCapability, NumberOrString, OneOf,
+    PublishDiagnosticsParams, RelatedFullDocumentDiagnosticReport, SelectionRangeParams,
+    SelectionRangeProviderCapability, ServerCapabilities, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceFoldersServerCapabilities,
 };
 
 use crate::client::ClientState;
@@ -97,9 +97,20 @@ fn capabilities(client: &ClientState) -> ServerCapabilities {
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            code_action_kinds: Some(vec![
+                CodeActionKind::QUICKFIX,
+                CodeActionKind::REFACTOR_REWRITE,
+                CodeActionKind::from(crate::code_actions::FIX_ALL_KIND),
+            ]),
             ..CodeActionOptions::default()
         })),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![crate::extract::COMMAND.to_string()],
+            ..ExecuteCommandOptions::default()
+        }),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -130,6 +141,8 @@ enum Pending {
     Completion,
     Hover,
     CodeAction,
+    CodeLens,
+    ExtractComponent,
     FoldingRange,
     SelectionRange,
     DocumentSymbol,
@@ -244,6 +257,8 @@ impl Server {
             "textDocument/completion" => self.on_completion(request),
             "textDocument/hover" => self.on_hover(request),
             "textDocument/codeAction" => self.on_code_action(request),
+            "textDocument/codeLens" => self.on_code_lens(request),
+            "workspace/executeCommand" => self.on_execute_command(request),
             "textDocument/foldingRange" => self.on_folding_range(request),
             "textDocument/selectionRange" => self.on_selection_range(request),
             "textDocument/documentSymbol" => self.on_document_symbol(request),
@@ -401,26 +416,88 @@ impl Server {
             self.respond_no_actions(id);
             return;
         };
-        // A client asking only for other kinds (organize imports, refactorings)
-        // gets nothing rather than a quickfix it did not ask for.
-        let wants_quickfix = params
-            .context
-            .only
-            .as_ref()
-            .is_none_or(|kinds| kinds.contains(&CodeActionKind::QUICKFIX));
-        if params.context.diagnostics.is_empty() || !wants_quickfix {
+        if params.context.diagnostics.is_empty()
+            && params.context.only.as_ref().is_none_or(|kinds| {
+                !kinds.contains(&CodeActionKind::from(crate::code_actions::FIX_ALL_KIND))
+            })
+        {
             self.respond_no_actions(id);
             return;
         }
+        let only = params.context.only.as_ref();
         let job = Job::CodeAction {
             id: id.clone(),
             path: uri_to_path(uri.as_str()),
             text: document.shared_text(),
             uri,
             diagnostics: params.context.diagnostics,
+            quickfix: only.is_none_or(|kinds| kinds.contains(&CodeActionKind::QUICKFIX)),
+            suggestions: only.is_none_or(|kinds| kinds.contains(&CodeActionKind::REFACTOR_REWRITE)),
+            fix_all: only.is_none_or(|kinds| {
+                kinds.contains(&CodeActionKind::from(crate::code_actions::FIX_ALL_KIND))
+            }),
         };
         self.pending.insert(id, Pending::CodeAction);
         self.worker.submit(job);
+    }
+
+    fn on_code_lens(&mut self, request: Request) {
+        let id = request.id;
+        let Ok(params) = serde_json::from_value::<CodeLensParams>(request.params) else {
+            return self.respond_no_lenses(id);
+        };
+        if !self.settings.runes_legacy_mode_code_lens_enable {
+            return self.respond_no_lenses(id);
+        }
+        let Some((path, text)) = self.component(&params.text_document.uri) else {
+            return self.respond_no_lenses(id);
+        };
+        self.pending.insert(id.clone(), Pending::CodeLens);
+        self.worker.submit(Job::CodeLens { id, path, text });
+    }
+
+    fn on_execute_command(&mut self, request: Request) {
+        let id = request.id;
+        let Ok(params) = serde_json::from_value::<ExecuteCommandParams>(request.params) else {
+            return self.respond_nothing(id);
+        };
+        if params.command != crate::extract::COMMAND {
+            return self.respond_nothing(id);
+        }
+        let Some(args) = params.arguments.into_iter().nth(1) else {
+            return self.respond_nothing(id);
+        };
+        let Some(uri) = args
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|uri| uri.parse::<Uri>().ok())
+        else {
+            return self.respond_nothing(id);
+        };
+        let Some(document) = self.component_document(&uri) else {
+            return self.respond_nothing(id);
+        };
+        let text = document.shared_text();
+        let Some(range) = args
+            .get("range")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+        else {
+            return self.respond_nothing(id);
+        };
+        let file_path = args
+            .get("filePath")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.pending.insert(id.clone(), Pending::ExtractComponent);
+        self.worker.submit(Job::ExtractComponent {
+            id,
+            uri,
+            text,
+            range,
+            file_path,
+        });
     }
 
     fn on_folding_range(&mut self, request: Request) {
@@ -703,6 +780,16 @@ impl Server {
                     self.respond(Response::new_ok(id, actions));
                 }
             }
+            Outcome::CodeLenses { id, lenses } => {
+                if self.pending.remove(&id).is_some() {
+                    self.respond(Response::new_ok(id, lenses));
+                }
+            }
+            Outcome::ExtractedComponent { id, result } => {
+                if self.pending.remove(&id).is_some() {
+                    self.respond(Response::new_ok(id, result));
+                }
+            }
             Outcome::FoldingRanges { id, ranges } => {
                 if self.pending.remove(&id).is_some() {
                     self.respond(Response::new_ok(id, ranges));
@@ -867,6 +954,10 @@ impl Server {
 
     fn respond_no_actions(&self, id: RequestId) {
         self.respond(Response::new_ok(id, Vec::<CodeActionOrCommand>::new()));
+    }
+
+    fn respond_no_lenses(&self, id: RequestId) {
+        self.respond(Response::new_ok(id, Vec::<CodeLens>::new()));
     }
 
     fn respond_no_ranges(&self, id: RequestId) {
