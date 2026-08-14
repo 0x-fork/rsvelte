@@ -83,6 +83,7 @@ impl KeywordCursor {
 
 pub struct Printer<'opt> {
     options: &'opt PrintOptions,
+    emit_locations: bool,
     /// Set by the first unsupported node encountered; printing continues so the
     /// harness gets a single representative miss per file.
     pub missing: Option<Unsupported>,
@@ -417,6 +418,7 @@ impl<'opt> Printer<'opt> {
     pub const fn new(options: &'opt PrintOptions) -> Self {
         Self {
             options,
+            emit_locations: false,
             missing: None,
             comments: Vec::new(),
             comment_index: 0,
@@ -436,6 +438,7 @@ impl<'opt> Printer<'opt> {
     ) -> Self {
         Self {
             options,
+            emit_locations: false,
             missing: None,
             comments,
             comment_index: 0,
@@ -455,10 +458,18 @@ impl<'opt> Printer<'opt> {
         map_line_starts: Vec<u32>,
         loc_base: u32,
         loc_map: &[(u32, u32, Option<u32>)],
+        emit_locations: bool,
     ) -> Self {
+        self.emit_locations = emit_locations;
         self.map_line_starts = Some(map_line_starts);
         self.loc_base = Some(loc_base);
         self.loc_map = loc_map.to_vec();
+        self
+    }
+
+    /// Enable source-map anchor commands for this print.
+    pub const fn with_source_map(mut self) -> Self {
+        self.emit_locations = true;
         self
     }
 
@@ -527,6 +538,11 @@ impl<'opt> Printer<'opt> {
     /// the offset can't be resolved (no source context), falls back to a plain
     /// `keyword + suffix` write.
     fn write_keyword(&self, ctx: &mut Context, start: u32, keyword: &str, suffix: &str) {
+        if !self.emit_locations {
+            ctx.write(keyword);
+            ctx.write(suffix);
+            return;
+        }
         if let Some((line, column)) = self.offset_to_line_col(start) {
             Self::write_source_keyword(ctx, line, column, keyword);
             if !suffix.is_empty() {
@@ -544,7 +560,7 @@ impl<'opt> Printer<'opt> {
     /// unmapped. Implemented as an explicit [`KeywordCursor`] because Rust closures
     /// can't borrow `self` mutably across calls the way the JS closure does.
     fn keyword_cursor(&self, start: u32, map_ok: bool) -> KeywordCursor {
-        let cursor = if map_ok {
+        let cursor = if map_ok && self.emit_locations {
             self.offset_to_line_col(start)
         } else {
             None
@@ -556,6 +572,9 @@ impl<'opt> Printer<'opt> {
     /// offsets are only trustworthy when the `function` token shares a line with
     /// `async`, anchored by the id or body starting on the same line as the node.
     fn function_async_offset_ok(&self, node: &Function) -> bool {
+        if !self.emit_locations {
+            return false;
+        }
         let Some((line, _)) = self.offset_to_line_col(node.span().start) else {
             return false;
         };
@@ -576,6 +595,9 @@ impl<'opt> Printer<'opt> {
     /// there are no decorators and the id (or body, if anonymous) starts on the
     /// node's start line.
     fn class_modifier_map_ok(&self, node: &Class) -> bool {
+        if !self.emit_locations {
+            return false;
+        }
         if !node.decorators.is_empty() {
             return false;
         }
@@ -641,7 +663,7 @@ impl<'opt> Printer<'opt> {
         prev_end: u32,
         next: Option<u32>,
     ) -> bool {
-        if !self.has_loc(prev_end) {
+        if self.comments.is_empty() || !self.has_loc(prev_end) {
             return false;
         }
         // A `next` boundary that is itself synthesized bounds nothing (esrap's
@@ -698,11 +720,11 @@ impl<'opt> Printer<'opt> {
     }
 
     /// The `_` wildcard's leading flush: emit comments positioned before `node`.
-    fn flush_leading(&mut self, ctx: &mut Context, node_start: u32, node_start_line: u32) {
+    fn flush_leading(&mut self, ctx: &mut Context, node_start: u32) {
         if self.comments.is_empty() {
             return;
         }
-        self.flush_comments_until(ctx, node_start, node_start_line, None, true);
+        self.flush_comments_until(ctx, node_start, self.line_of(node_start), None, true);
     }
 
     /// Port of esrap's `sequence` (`languages/ts/index.js`). Lays `nodes` out as
@@ -927,7 +949,7 @@ impl<'opt> Printer<'opt> {
     /// string-literal `ExpressionStatement` esrap sees.
     fn print_directive(&mut self, d: &Directive, ctx: &mut Context) {
         let start = d.span.start;
-        self.flush_leading(ctx, start, self.line_of(start));
+        self.flush_leading(ctx, start);
         ctx.write(Self::string_literal(&d.expression));
         ctx.write(";");
     }
@@ -936,7 +958,7 @@ impl<'opt> Printer<'opt> {
     fn print_statement(&mut self, stmt: &Statement, ctx: &mut Context) {
         // esrap's `_` wildcard: emit comments positioned before this node first.
         let start = stmt.span().start;
-        self.flush_leading(ctx, start, self.line_of(start));
+        self.flush_leading(ctx, start);
         match stmt {
             Statement::ExpressionStatement(s) => {
                 // esrap wraps a leading object/function-expression statement in
@@ -1506,7 +1528,7 @@ impl<'opt> Printer<'opt> {
         // esrap's `_` wildcard flushes any comment positioned before the member
         // (e.g. a leading JSDoc block) before visiting it.
         let start = element.span().start;
-        self.flush_leading(ctx, start, self.line_of(start));
+        self.flush_leading(ctx, start);
         match element {
             ClassElement::MethodDefinition(m) => self.method_definition(m, ctx),
             ClassElement::PropertyDefinition(p) => self.property_definition(p, ctx),
@@ -1852,7 +1874,7 @@ impl<'opt> Printer<'opt> {
                         // comment also forces the sequence multiline (via the
                         // `newline()` in `write_comment`), so it can't swallow the
                         // following token (`tabindex = // c 0` → unparseable).
-                        p.flush_leading(child, span.start, p.line_of(span.start));
+                        p.flush_leading(child, span.start);
                         p.binding_property(prop, child);
                     }),
                 }
@@ -1866,7 +1888,7 @@ impl<'opt> Printer<'opt> {
                 obj_or_array: false,
                 is_elision: false,
                 render: Box::new(move |p: &mut Printer, child: &mut Context| {
-                    p.flush_leading(child, span.start, p.line_of(span.start));
+                    p.flush_leading(child, span.start);
                     child.write("...");
                     p.binding_pattern(&rest.argument, child);
                 }),
@@ -2094,7 +2116,7 @@ impl<'opt> Printer<'opt> {
         for declarator in &decl.declarations {
             let mut child = Context::child();
             let start = declarator.span().start;
-            self.flush_leading(&mut child, start, self.line_of(start));
+            self.flush_leading(&mut child, start);
             self.binding_pattern(&declarator.id, &mut child);
             if declarator.definite {
                 child.write("!");
@@ -2157,7 +2179,7 @@ impl<'opt> Printer<'opt> {
     fn print_expression(&mut self, expr: &Expression, ctx: &mut Context) {
         // esrap's `_` wildcard: emit comments positioned before this node first.
         let start = expr.span().start;
-        self.flush_leading(ctx, start, self.line_of(start));
+        self.flush_leading(ctx, start);
         match expr {
             Expression::ParenthesizedExpression(p) => {
                 // esrap parses with acorn, which ELIDES parentheses — there is
@@ -2842,7 +2864,7 @@ impl<'opt> Printer<'opt> {
                         // esrap's `sequence` visits each property through the `_`
                         // wildcard, which flushes any comment positioned before
                         // it (`{ /** doc */ key: … }`). Mirror that per property.
-                        p.flush_leading(child, span.start, p.line_of(span.start));
+                        p.flush_leading(child, span.start);
                         match prop {
                             ObjectPropertyKind::ObjectProperty(prop) => {
                                 p.object_property(prop, child);
@@ -3868,7 +3890,7 @@ mod tests {
         let mut ctx = Context::new();
         printer.print_program(&ret.program, &mut ctx);
         (
-            crate::command::print(&ctx.into_commands(), &opts.indent),
+            crate::command::print(&ctx.into_commands(), &opts.indent, 0),
             printer.missing,
         )
     }
@@ -3895,7 +3917,7 @@ mod tests {
         let mut printer = Printer::with_comments(&opts, comments, line_starts(src));
         let mut ctx = Context::new();
         printer.print_program(&ret.program, &mut ctx);
-        let out = crate::command::print(&ctx.into_commands(), &opts.indent);
+        let out = crate::command::print(&ctx.into_commands(), &opts.indent, 0);
         assert!(
             printer.missing.is_none(),
             "unsupported node: {:?}",
