@@ -524,17 +524,73 @@ fn combine_sourcemaps(
         return None;
     }
 
-    // For simplicity, we'll use a basic implementation that takes the first map
-    // A full implementation would use proper source map remapping
-    // TODO: Implement full remapping logic similar to @jridgewell/remapping
-    let mut combined = sourcemap_list[0].clone();
+    let first = &sourcemap_list[0];
+    let mut sources = Vec::new();
+    let mut mappings = Vec::with_capacity(first.mappings.len());
 
-    // Ensure sources contains the filename
-    if combined.sources.is_empty() {
-        combined.sources = vec![filename.to_string()];
+    for line in &first.mappings {
+        let mut combined_line = Vec::with_capacity(line.len());
+        for segment in line {
+            let mut segment = segment.clone();
+            if segment.len() >= 4 {
+                let mut source = first.sources.get(segment[1] as usize).cloned();
+                let mut line = segment[2];
+                let mut column = segment[3];
+
+                // This is the loader behavior used by upstream's `remapping`:
+                // every intermediate `input.svelte` map is traced through the
+                // next preprocessor map, while foreign sources remain leaves.
+                if source.as_deref() == Some(filename) {
+                    for map in &sourcemap_list[1..] {
+                        let Some(parent_line) = map.mappings.get(line as usize) else {
+                            break;
+                        };
+                        let Some(parent) = parent_line
+                            .iter()
+                            .rev()
+                            .find(|candidate| candidate.len() >= 4 && candidate[0] <= column)
+                        else {
+                            break;
+                        };
+                        source = map.sources.get(parent[1] as usize).cloned();
+                        line = parent[2];
+                        column = parent[3] + (column - parent[0]);
+                        if source.as_deref() != Some(filename) {
+                            break;
+                        }
+                    }
+                }
+
+                let source = source.unwrap_or_else(|| filename.to_string());
+                let source_index = sources
+                    .iter()
+                    .position(|candidate| candidate == &source)
+                    .unwrap_or_else(|| {
+                        sources.push(source);
+                        sources.len() - 1
+                    });
+                segment[1] = source_index as i64;
+                segment[2] = line;
+                segment[3] = column;
+            }
+            combined_line.push(segment);
+        }
+        mappings.push(combined_line);
     }
 
-    Some(combined)
+    if sources.is_empty() {
+        sources.push(filename.to_string());
+    }
+
+    Some(SimpleDecodedMap {
+        version: first.version,
+        file: None,
+        sources,
+        sources_content: None,
+        names: first.names.clone(),
+        mappings,
+        source_root: first.source_root.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -580,6 +636,54 @@ mod tests {
         let result = PreprocessResult::new("test".to_string(), Some("test.svelte".to_string()));
         assert_eq!(result.source, "test");
         assert_eq!(result.file_basename, "test.svelte");
+    }
+
+    #[test]
+    fn test_combine_sourcemaps_traces_preprocessor_chain() {
+        let map = |mappings| SimpleDecodedMap {
+            version: Some(3),
+            file: Some("intermediate.js".to_string()),
+            sources: vec!["input.svelte".to_string()],
+            sources_content: None,
+            names: vec![],
+            mappings,
+            source_root: None,
+        };
+
+        // The last transform maps generated 0:5 to its input 1:3; the
+        // preceding transform maps that input position to original 4:7.
+        let combined = combine_sourcemaps(
+            "input.svelte",
+            &[
+                map(vec![vec![vec![5, 0, 1, 3]]]),
+                map(vec![vec![], vec![vec![3, 0, 4, 7]]]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(combined.file, None);
+        assert_eq!(combined.sources, vec!["input.svelte"]);
+        assert_eq!(combined.mappings, vec![vec![vec![5, 0, 4, 7]]]);
+    }
+
+    #[test]
+    fn test_combine_sourcemaps_keeps_foreign_sources_as_leaves() {
+        let combined = combine_sourcemaps(
+            "input.svelte",
+            &[SimpleDecodedMap {
+                version: Some(3),
+                file: None,
+                sources: vec!["other.ts".to_string()],
+                sources_content: None,
+                names: vec![],
+                mappings: vec![vec![vec![0, 0, 2, 4]]],
+                source_root: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(combined.sources, vec!["other.ts"]);
+        assert_eq!(combined.mappings, vec![vec![vec![0, 0, 2, 4]]]);
     }
 
     #[test]
