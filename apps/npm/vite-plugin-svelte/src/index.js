@@ -9,6 +9,7 @@ import { compileModule } from './plugins/compile-module.js';
 import { svelteInspector } from '@sveltejs/vite-plugin-svelte-inspector';
 import { loadCustom } from './plugins/load-custom.js';
 import { hotUpdate } from './plugins/hot-update.js';
+import { nativeCompile } from './plugins/native-compile.js';
 
 /**
  * returns a list of plugins to handle svelte files
@@ -31,7 +32,7 @@ export function svelte(inlineOptions) {
 		loadCompiledCss(api),
 		loadCustom(api),
 		preprocess(api),
-		compile(api),
+		...nativeCompile(api, compile(api), compile(api)),
 		compileModule(api),
 		hotUpdate(api),
 		svelteInspector()

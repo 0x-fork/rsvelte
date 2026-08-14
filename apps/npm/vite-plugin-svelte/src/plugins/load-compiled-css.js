@@ -32,6 +32,7 @@ export function loadCompiledCss(api) {
 			filter,
 			async handler(id) {
 				const ssr = this.environment.config.consumer === 'server';
+				if (!ssr && api.nativeCompile) return;
 				const svelteRequest = api.idParser(id, ssr);
 				if (!svelteRequest) {
 					return;

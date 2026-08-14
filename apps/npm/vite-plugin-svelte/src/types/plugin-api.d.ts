@@ -7,6 +7,7 @@ export interface PluginAPI {
 	filter: IdFilter;
 	idParser: IdParser;
 	compileSvelte: CompileSvelte;
+	nativeCompile?: boolean;
 	/**
 	 * @deprecated  use 'filter' instead
 	 * // TODO remove in next major

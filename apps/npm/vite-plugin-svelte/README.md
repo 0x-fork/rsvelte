@@ -23,6 +23,50 @@ resolved automatically for your platform.
 
 If you are on SvelteKit, do **not** add `svelte()` to your plugins list — see (B).
 
+## Native Rolldown integration
+
+In a Vite 8 project, override Vite's transitive `rolldown` dependency in
+`package.json`. If the project already uses this plugin, this is the only
+change:
+
+```diff
+ {
+   "devDependencies": {
+     "@rsvelte/vite-plugin-svelte": "latest",
+     "svelte": "^5.0.0",
+     "vite": "^8.0.0"
++  },
++  "pnpm": {
++    "overrides": {
++      "rolldown": "npm:@rsvelte/rolldown@latest"
++    }
+   }
+ }
+```
+
+Run `pnpm install`; `vite.config.js` remains unchanged. When migrating from the
+official Svelte plugin too, change its dependency and import at the same time:
+
+```diff
+   "devDependencies": {
+-    "@sveltejs/vite-plugin-svelte": "^6.0.0",
++    "@rsvelte/vite-plugin-svelte": "latest",
+     "svelte": "^5.0.0",
+     "vite": "^8.0.0"
+   }
+```
+
+```diff
+-import { svelte } from '@sveltejs/vite-plugin-svelte';
++import { svelte } from '@rsvelte/vite-plugin-svelte';
+```
+
+For static client production builds, the plugin runs preprocessors first and
+then passes its resolved `compilerOptions`, `extensions`, and `emitCss` settings
+to rsvelte inside Rolldown. Development/HMR, SSR, `dynamicCompileOptions`,
+callback compiler options, and custom `onwarn` handlers retain the existing
+N-API compiler path. No additional rsvelte plugin is required.
+
 ## (A) Plain Vite + Svelte
 
 Install the plugin:
@@ -79,17 +123,28 @@ Add the override to your `package.json`, then reinstall:
 {
   "pnpm": {
     "overrides": {
-      "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@^0.4.1"
+      "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@latest"
     }
   }
 }
+```
+
+For native compilation on Vite 8, add the Rolldown override from above next to
+the plugin override:
+
+```diff
+     "overrides": {
+-      "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@^0.4.1"
++      "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@latest",
++      "rolldown": "npm:@rsvelte/rolldown@latest"
+     }
 ```
 
 ```jsonc
 // npm
 {
   "overrides": {
-    "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@^0.4.1"
+    "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@latest"
   }
 }
 ```
@@ -98,7 +153,7 @@ Add the override to your `package.json`, then reinstall:
 // yarn (v1 and Berry)
 {
   "resolutions": {
-    "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@^0.4.1"
+    "@sveltejs/vite-plugin-svelte": "npm:@rsvelte/vite-plugin-svelte@latest"
   }
 }
 ```
