@@ -52,7 +52,7 @@ pub fn format_css_source(
     let allocator = Allocator::default();
     let mut options = *options;
     options.variant = variant;
-    let code = format_css(&allocator, source, options, None)
+    let code = format_css(&allocator, source, options)
         .map_err(|d| FormatError::StyleFormat(format!("{d:?}")))?
         .print()
         .map_err(|e| FormatError::StyleFormat(format!("{e:?}")))?

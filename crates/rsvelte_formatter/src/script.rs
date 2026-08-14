@@ -36,7 +36,7 @@ pub fn format_js_source(
             parser_ret.diagnostics
         )));
     }
-    let formatted = format_program(&allocator, &parser_ret.program, options.js.clone(), None)
+    let formatted = format_program(&allocator, &parser_ret.program, options.js.clone())
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();
@@ -135,7 +135,7 @@ pub fn format_script(
         js.line_width =
             oxc_formatter_core::LineWidth::try_from(nested_width).unwrap_or(js.line_width);
     }
-    let formatted = format_program(allocator, &parser_ret.program, js, None)
+    let formatted = format_program(allocator, &parser_ret.program, js)
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();
@@ -223,7 +223,7 @@ pub fn format_nested_script(
             .min(js.line_width.value().saturating_sub(1));
     let nested_width = js.line_width.value().saturating_sub(narrow);
     js.line_width = oxc_formatter_core::LineWidth::try_from(nested_width).unwrap_or(js.line_width);
-    let formatted = format_program(allocator, &parser_ret.program, js, None)
+    let formatted = format_program(allocator, &parser_ret.program, js)
         .print()
         .map_err(|e| FormatError::ScriptParse(format!("{e:?}")))?
         .into_code();
