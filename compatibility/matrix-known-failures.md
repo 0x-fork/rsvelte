@@ -28,9 +28,9 @@ Normalization here is identical to `verify.mjs` (flatten template holes → oxfm
 blank lines), so formatting-only differences are tolerated exactly as the corpus gate
 tolerates them. An entry is a divergence that survives that.
 
-## Matrix known failures (`matrix-known-failures.json`, 842 entries)
+## Matrix known failures (`matrix-known-failures.json`, 782 entries)
 
-Partition of `matrix-known-failures.json` by family: `4 + 316 + 8 + 24 + 60 + 82 + 180 + 168`
+Partition of `matrix-known-failures.json` by family: `4 + 316 + 8 + 24 + 82 + 180 + 168`
 
 ### `binding-position` — 4 entries
 
@@ -211,42 +211,11 @@ a *parser* question, by another author, with no warning intent, contributes 60 w
 target) pairs and 18 divergences. The comparison earns its place on populations nobody built for
 it.
 
-### `param-pattern` — 60 entries
+### `param-pattern` — 0 entries
 
-Every entry is the **legacy reactive dependency list**, not the statement body: rsvelte emits
-`() => $.deep_read_state(rows())` where official emits
-`() => ($.deep_read_state(rows()), $.deep_read_state(id()))`, and the same omission appears in
-the `$.template_effect` deps array of the two markup contexts. The body text matches on all 180
-cases; only the list of what the effect re-reads diverges, so the shipped symptom is a **lost
-reactive dependency** — the statement does not re-run when the prop changes.
+Parameter defaults and computed keys now contribute their enclosing reactive dependencies.
 
-The rule rsvelte gets wrong is *which* identifiers inside a nested function count as reads. A
-name in a **parameter default** or a **computed key** is a read (it is evaluated on every call,
-in the enclosing scope), and upstream's `extract_all_identifiers` / scope resolution treats it as
-one; rsvelte's extractor drops every identifier lexically inside a parameter list. Hence exactly
-the five `read-` shapes whose name sits there fail, and `read-body` — the same read one bracket
-later — passes:
-
-| shape | in the ratchet |
-|---|---|
-| `({ k = id }) => k` | yes |
-| `([k = id]) => k` | yes |
-| `({ [id]: k }) => k` | yes |
-| `(o = { id }) => o` | yes |
-| `(o = [id]) => o` | yes |
-| `(k) => k + id` | no — passes |
-
-**[D]** It is not caused by the wrap fix this family shipped with, and the discriminating case is
-`(o = id) => o`: a parameter default with no brackets at all, which
-`is_destructured_param_binding` rejects at its first step and therefore cannot influence. rsvelte
-omits `$.deep_read_state(id())` there too, official includes it. That shape is a control, not a
-row — it is *only* a dependency-list case, with no pattern in it.
-
-12 entries per shape: 6 of the 9 contexts reach a dependency list (four `$:` forms via
-`$.legacy_pre_effect`, plus `interpolation` and `each-expression` via `$.template_effect`), each
-on `client` and `client-dev`. `server` has no dependency list and matches everywhere.
-
-Partition of `matrix-known-failures.json` entries under `param-pattern/` by shape: `12 + 12 + 12 + 12 + 12`
+Partition of `matrix-known-failures.json` entries under `param-pattern/` by shape: `0`
 
 ### `directive-element` — 82 entries
 
