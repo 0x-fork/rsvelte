@@ -449,7 +449,7 @@ fn validate_binding_for_svelte_element(
                 valid_bindings.join(", ")
             );
 
-            return Err(errors::bind_invalid_name(binding_name, Some(&message)).at(start, end));
+            return Err(errors::bind_invalid_target(binding_name, &message).at(start, end));
         }
 
         // Check invalid_elements
