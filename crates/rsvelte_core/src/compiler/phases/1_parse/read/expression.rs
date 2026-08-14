@@ -8161,14 +8161,39 @@ fn convert_statement_for_program(
             })
         }
         oxc_ast::ast::Statement::TSNamespaceDeclaration(module_decl) => {
-            Some(JsNode::EmptyStatement {
-                start: (offset + module_decl.span.start as usize) as u32,
-                end: (offset + module_decl.span.end as usize) as u32,
-                loc: create_typed_loc(
-                    offset + module_decl.span.start as usize,
-                    offset + module_decl.span.end as usize,
-                    line_offsets,
-                ),
+            let start = offset + module_decl.span.start as usize;
+            let end = offset + module_decl.span.end as usize;
+            let loc = create_typed_loc(start, end, line_offsets);
+            if module_decl.declare {
+                return Some(JsNode::EmptyStatement {
+                    start: start as u32,
+                    end: end as u32,
+                    loc,
+                });
+            }
+            let body = match &module_decl.body {
+                oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                    let block_body = block
+                        .body
+                        .iter()
+                        .filter_map(|stmt| {
+                            convert_statement_for_program(arena, stmt, offset, line_offsets)
+                        })
+                        .collect();
+                    Some(arena.alloc_js_node(JsNode::BlockStatement {
+                        start: start as u32,
+                        end: end as u32,
+                        loc: loc.clone(),
+                        body: arena.alloc_js_children(block_body),
+                    }))
+                }
+                oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+            };
+            Some(JsNode::TSModuleDeclaration {
+                start: start as u32,
+                end: end as u32,
+                loc,
+                body,
             })
         }
 
