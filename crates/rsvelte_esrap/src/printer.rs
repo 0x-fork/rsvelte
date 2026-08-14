@@ -46,7 +46,7 @@ use compact_str::{CompactString, format_compact};
 
 use crate::PrintOptions;
 use crate::command::EventKind;
-use crate::context::Context;
+use crate::context::{Context, EventMark};
 
 fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).expect("source positions exceed the u32 AST coordinate range")
@@ -852,27 +852,28 @@ impl<'opt> Printer<'opt> {
     ) {
         let mut multiline = false;
         let mut length: i64 = -1;
-        let mut items: Vec<SeqItem> = Vec::with_capacity(n);
+        let mut items: Vec<SeqLayout> = Vec::with_capacity(n);
 
         for i in 0..n {
             let node_meta = meta(i);
-            let mut child = parent.child();
-            render(self, i, &mut child);
+            let mark = parent.event_mark();
+            let scope = parent.begin_scope();
+            render(self, i, parent);
 
-            let node_multiline = child.multiline;
+            let node_multiline = parent.multiline;
             if i < n - 1 || node_meta.is_elision {
-                child.write(separator);
+                parent.write(separator);
             }
 
             let next = if i == n - 1 { until } else { meta(i + 1).start };
             if let Some(end) = node_meta.end {
-                self.flush_trailing_comments(&mut child, end, next);
+                self.flush_trailing_comments(parent, end, next);
             }
 
-            length += usize_to_i64(child.measure()) + 1;
-            multiline |= child.multiline;
-            items.push(SeqItem {
-                ctx: child,
+            length += usize_to_i64(parent.measure()) + 1;
+            multiline |= parent.end_scope(scope);
+            items.push(SeqLayout {
+                mark,
                 multiline: node_multiline,
                 obj_or_array: node_meta.obj_or_array,
                 is_elision: node_meta.is_elision,
@@ -881,29 +882,36 @@ impl<'opt> Printer<'opt> {
 
         multiline |= length > 60;
 
-        if multiline {
-            parent.indent();
-            parent.newline();
-        } else if pad && length > 0 {
-            parent.write(" ");
-        }
-
-        let mut prev: Option<(bool, bool)> = None;
-        for item in items {
-            if let Some((prev_multiline, prev_obj)) = prev {
-                if prev_multiline && item.multiline && !(prev_obj && item.obj_or_array) {
-                    parent.margin();
-                }
+        for i in (0..items.len()).rev() {
+            let item = items[i];
+            if i > 0 {
+                let prev = items[i - 1];
+                let margin =
+                    prev.multiline && item.multiline && !(prev.obj_or_array && item.obj_or_array);
                 if !item.is_elision {
-                    if multiline {
-                        parent.newline();
-                    } else {
-                        parent.write(" ");
-                    }
+                    parent.insert_event(
+                        item.mark,
+                        if multiline {
+                            EventKind::Newline
+                        } else {
+                            EventKind::Space
+                        },
+                    );
+                }
+                if margin {
+                    parent.insert_event(item.mark, EventKind::Margin);
                 }
             }
-            prev = Some((item.multiline, item.obj_or_array));
-            parent.append(item.ctx);
+        }
+
+        if let Some(first) = items.first() {
+            if multiline {
+                parent.insert_event(first.mark, EventKind::Newline);
+                parent.insert_event(first.mark, EventKind::Indent);
+                parent.multiline = true;
+            } else if pad && length > 0 {
+                parent.insert_event(first.mark, EventKind::Space);
+            }
         }
 
         if let Some(until) = until {
@@ -1274,22 +1282,24 @@ impl<'opt> Printer<'opt> {
         }
         if !named.is_empty() {
             ctx.write("{");
-            let nodes: Vec<SeqNode> = named
-                .iter()
-                .map(|s| {
+            self.sequence_slice(
+                &named,
+                |s| {
                     let span = s.span();
-                    SeqNode {
+                    SeqMeta {
                         start: Some(span.start),
                         end: Some(span.end),
                         obj_or_array: false,
                         is_elision: false,
-                        render: Box::new(move |_p: &mut Printer, child: &mut Context| {
-                            Printer::import_specifier(s, child);
-                        }),
                     }
-                })
-                .collect();
-            self.sequence(nodes, None, true, ",", true, ctx);
+                },
+                |_p, s, child| Printer::import_specifier(s, child),
+                None,
+                true,
+                ",",
+                true,
+                ctx,
+            );
             ctx.write("}");
         }
         ctx.write(" from ");
@@ -1368,22 +1378,24 @@ impl<'opt> Printer<'opt> {
             kw.write(ctx, "type ");
         }
         ctx.write("{");
-        let nodes: Vec<SeqNode> = specifiers
-            .iter()
-            .map(|s| {
+        self.sequence_slice(
+            specifiers,
+            |s| {
                 let span = s.span();
-                SeqNode {
+                SeqMeta {
                     start: Some(span.start),
                     end: Some(span.end),
                     obj_or_array: false,
                     is_elision: false,
-                    render: Box::new(move |_p: &mut Printer, child: &mut Context| {
-                        Printer::export_specifier(s, child);
-                    }),
                 }
-            })
-            .collect();
-        self.sequence(nodes, None, true, ",", true, ctx);
+            },
+            |_p, s, child| Printer::export_specifier(s, child),
+            None,
+            true,
+            ",",
+            true,
+            ctx,
+        );
         ctx.write("}");
     }
 
@@ -3118,6 +3130,32 @@ impl<'opt> Printer<'opt> {
     /// argument is itself multiline** — so a trailing function/array/object
     /// argument can span lines while the call stays on one line
     /// (`$.run([ … ])`, `foo(a, b, () => { … })`). Length is not a factor.
+    #[inline]
+    fn call_argument_direct(
+        &mut self,
+        arg: &Argument,
+        next: Option<u32>,
+        comma: bool,
+        ctx: &mut Context,
+    ) -> bool {
+        let scope = ctx.begin_scope();
+        match arg {
+            Argument::SpreadElement(spread) => {
+                ctx.write("...");
+                self.print_expression(&spread.argument, ctx);
+            }
+            _ => match arg.as_expression() {
+                Some(expression) => self.print_expression(expression, ctx),
+                None => self.unsupported("Argument", ctx),
+            },
+        }
+        if comma {
+            ctx.write(",");
+        }
+        let emitted_line = self.flush_trailing_comments(ctx, arg.span().end, next);
+        ctx.end_scope(scope) || (comma && emitted_line)
+    }
+
     fn call_arguments(&mut self, args: &[Argument], call_end: u32, ctx: &mut Context) {
         let n = args.len();
 
@@ -3130,28 +3168,25 @@ impl<'opt> Printer<'opt> {
                 .get(self.comment_index)
                 .is_some_and(|c| c.start < arg_start && c.start_line < self.line_of(arg_start));
 
-            let mut child = ctx.child();
-            match arg {
-                Argument::SpreadElement(spread) => {
-                    child.write("...");
-                    self.print_expression(&spread.argument, &mut child);
-                }
-                _ => match arg.as_expression() {
-                    Some(expression) => self.print_expression(expression, &mut child),
-                    None => self.unsupported("Argument", &mut child),
-                },
-            }
-            self.flush_trailing_comments(&mut child, arg.span().end, Some(call_end));
-
             ctx.write("(");
             if wrap {
                 ctx.indent();
                 ctx.newline();
-                ctx.append(child);
+            }
+            match arg {
+                Argument::SpreadElement(spread) => {
+                    ctx.write("...");
+                    self.print_expression(&spread.argument, ctx);
+                }
+                _ => match arg.as_expression() {
+                    Some(expression) => self.print_expression(expression, ctx),
+                    None => self.unsupported("Argument", ctx),
+                },
+            }
+            self.flush_trailing_comments(ctx, arg.span().end, Some(call_end));
+            if wrap {
                 ctx.dedent();
                 ctx.newline();
-            } else {
-                ctx.append(child);
             }
             ctx.write(")");
             return;
@@ -3165,58 +3200,26 @@ impl<'opt> Printer<'opt> {
                 c.start < second_start && c.start_line < self.line_of(second_start)
             });
 
-            let mut first_child = ctx.child();
-            match first {
-                Argument::SpreadElement(spread) => {
-                    first_child.write("...");
-                    self.print_expression(&spread.argument, &mut first_child);
-                }
-                _ => match first.as_expression() {
-                    Some(expression) => self.print_expression(expression, &mut first_child),
-                    None => self.unsupported("Argument", &mut first_child),
-                },
-            }
-            first_child.write(",");
-            if self.flush_trailing_comments(
-                &mut first_child,
-                first.span().end,
-                Some(second.span().start),
-            ) {
-                first_child.multiline = true;
-            }
-
-            let mut second_child = ctx.child();
-            match second {
-                Argument::SpreadElement(spread) => {
-                    second_child.write("...");
-                    self.print_expression(&spread.argument, &mut second_child);
-                }
-                _ => match second.as_expression() {
-                    Some(expression) => self.print_expression(expression, &mut second_child),
-                    None => self.unsupported("Argument", &mut second_child),
-                },
-            }
-            self.flush_trailing_comments(&mut second_child, second.span().end, Some(call_end));
-
             ctx.write("(");
-            if force_multiline || first_child.multiline {
-                ctx.indent();
-                ctx.newline();
-                ctx.append(first_child);
-                ctx.newline();
-                ctx.append(second_child);
+            let start = ctx.event_mark();
+            let first_multiline =
+                self.call_argument_direct(first, Some(second.span().start), true, ctx);
+            let separator = ctx.event_mark();
+            ctx.space();
+            self.call_argument_direct(second, Some(call_end), false, ctx);
+
+            if force_multiline || first_multiline {
+                ctx.insert_event(separator, EventKind::Newline);
+                ctx.insert_event(start, EventKind::Newline);
+                ctx.insert_event(start, EventKind::Indent);
                 ctx.dedent();
                 ctx.newline();
-            } else {
-                ctx.append(first_child);
-                ctx.write(" ");
-                ctx.append(second_child);
             }
             ctx.write(")");
             return;
         }
 
-        if let [_, _, last] = args {
+        if let [first, second, last] = args {
             let last_start = last
                 .as_expression()
                 .map_or_else(|| last.span().start, |e| unparen(e).span().start);
@@ -3224,78 +3227,47 @@ impl<'opt> Printer<'opt> {
                 .comments
                 .get(self.comment_index)
                 .is_some_and(|c| c.start < last_start && c.start_line < self.line_of(last_start));
-            let mut rendered = [ctx.child(), ctx.child(), ctx.child()];
-
-            for (i, (arg, child)) in args.iter().zip(&mut rendered).enumerate() {
-                match arg {
-                    Argument::SpreadElement(spread) => {
-                        child.write("...");
-                        self.print_expression(&spread.argument, child);
-                    }
-                    _ => match arg.as_expression() {
-                        Some(expression) => self.print_expression(expression, child),
-                        None => self.unsupported("Argument", child),
-                    },
-                }
-                if i < 2 {
-                    child.write(",");
-                }
-                let next = if i == 2 {
-                    Some(call_end)
-                } else {
-                    Some(args[i + 1].span().start)
-                };
-                if self.flush_trailing_comments(child, arg.span().end, next) && i < 2 {
-                    child.multiline = true;
-                }
-            }
-
-            let wrap = force_multiline || rendered[0].multiline || rendered[1].multiline;
             ctx.write("(");
-            if wrap {
-                ctx.indent();
-                for child in rendered {
-                    ctx.newline();
-                    ctx.append(child);
-                }
+            let start = ctx.event_mark();
+            let first_multiline =
+                self.call_argument_direct(first, Some(second.span().start), true, ctx);
+            let first_separator = ctx.event_mark();
+            ctx.space();
+            let second_multiline =
+                self.call_argument_direct(second, Some(last.span().start), true, ctx);
+            let second_separator = ctx.event_mark();
+            ctx.space();
+            self.call_argument_direct(last, Some(call_end), false, ctx);
+
+            if force_multiline || first_multiline || second_multiline {
+                ctx.insert_event(second_separator, EventKind::Newline);
+                ctx.insert_event(first_separator, EventKind::Newline);
+                ctx.insert_event(start, EventKind::Newline);
+                ctx.insert_event(start, EventKind::Indent);
                 ctx.dedent();
                 ctx.newline();
-            } else {
-                for (i, child) in rendered.into_iter().enumerate() {
-                    if i > 0 {
-                        ctx.write(" ");
-                    }
-                    ctx.append(child);
-                }
             }
             ctx.write(")");
             return;
         }
 
-        // Render each argument into its own context (non-final ones carry the
-        // trailing comma), flushing each arg's trailing comments in source order
-        // — esrap threads comments through the single `comment_index` cursor in
-        // its argument loop (`flush_trailing_comments(context, arg.loc.end, next)`).
-        let mut rendered: Vec<Context> = Vec::with_capacity(n);
+        if args.is_empty() {
+            ctx.write("()");
+            return;
+        }
 
-        // esrap special case: a comment sitting *above* the final argument forces
-        // the whole sequence multiline (it sets the non-final `child_context`'s
-        // `multiline`), so a `(\n\t// comment\n\targ\n)` layout is used instead of
-        // dangling the comment after `(`.
+        ctx.write("(");
+        let start = ctx.event_mark();
+        let mut separators = Vec::with_capacity(n - 1);
         let mut force_multiline = false;
+        let mut any_multiline = false;
 
         for (i, arg) in args.iter().enumerate() {
             let is_last = i == n - 1;
-            // Unwrapped, for the same reason the `ReturnStatement` rule is: an
-            // explicit paren would put the argument's start on the `(`, which can
-            // share the comment's line and hide it from the test below.
             let arg_start = arg
                 .as_expression()
                 .map_or_else(|| arg.span().start, |e| unparen(e).span().start);
 
-            // No `has_loc` guard needed: every comment offset is >= `loc_base` by
-            // construction, so `c.start < arg_start` is already false for a
-            // synthesized argument span.
             if is_last
                 && let Some(c) = self.comments.get(self.comment_index)
                 && c.start < arg_start
@@ -3304,64 +3276,26 @@ impl<'opt> Printer<'opt> {
                 force_multiline = true;
             }
 
-            let mut child = ctx.child();
-            match arg {
-                Argument::SpreadElement(s) => {
-                    child.write("...");
-                    self.print_expression(&s.argument, &mut child);
-                }
-                _ => match arg.as_expression() {
-                    Some(e) => self.print_expression(e, &mut child),
-                    None => self.unsupported("Argument", &mut child),
-                },
+            if i > 0 {
+                separators.push(ctx.event_mark());
+                ctx.space();
             }
-            if !is_last {
-                child.write(",");
-            }
-
             let next = if is_last {
                 Some(call_end)
             } else {
                 Some(args[i + 1].span().start)
             };
-            let emitted_line = self.flush_trailing_comments(&mut child, arg.span().end, next);
-            // esrap accumulates all non-final args in one `child_context` and
-            // `append`s a `join` context after each, which propagates the
-            // trailing line comment's pending newline into `child_context.multiline`
-            // and forces the wrapped layout. Mirror that per non-final arg.
-            if emitted_line && !is_last {
-                child.multiline = true;
-            }
-
-            rendered.push(child);
+            any_multiline |= self.call_argument_direct(arg, next, !is_last, ctx) && !is_last;
         }
 
-        // esrap forces the wrap only on the **non-final** args' multiline state
-        // (so a trailing multiline function/array/object argument keeps the call
-        // on one line). The force-multiline special case also only sets the
-        // non-final context.
-        let wrap = force_multiline
-            || rendered
-                .iter()
-                .take(n.saturating_sub(1))
-                .any(|c| c.multiline);
-
-        ctx.write("(");
-        if wrap {
-            ctx.indent();
-            for arg_ctx in rendered {
-                ctx.newline();
-                ctx.append(arg_ctx);
+        if force_multiline || any_multiline {
+            for separator in separators.into_iter().rev() {
+                ctx.insert_event(separator, EventKind::Newline);
             }
+            ctx.insert_event(start, EventKind::Newline);
+            ctx.insert_event(start, EventKind::Indent);
             ctx.dedent();
             ctx.newline();
-        } else {
-            for (i, arg_ctx) in rendered.into_iter().enumerate() {
-                if i > 0 {
-                    ctx.write(" ");
-                }
-                ctx.append(arg_ctx);
-            }
         }
         ctx.write(")");
     }
@@ -4048,6 +3982,14 @@ struct SeqItem {
     /// This item is an array elision (a hole, `[a, , b]`). esrap still writes
     /// the hole's separator but omits the inter-element space/newline *before*
     /// it, so consecutive holes read `,,` rather than `, ,`.
+    is_elision: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SeqLayout {
+    mark: EventMark,
+    multiline: bool,
+    obj_or_array: bool,
     is_elision: bool,
 }
 
