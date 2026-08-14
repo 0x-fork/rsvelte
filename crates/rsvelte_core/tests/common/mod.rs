@@ -467,12 +467,6 @@ pub const RUNTIME_RUNES_SKIP_NAMES: &[&str] = &[
     // wrapper for the IfBlock branch — the awaited `@const` blocker is not
     // propagated across the closure boundary.
     "async-style-after-await",
-    // Svelte 5.56.x #18525 (`bfbb026f2`): `<svelte:boundary {pending}>` with a
-    // `$derived` pending attribute. The server `pending` ATTRIBUTE branch
-    // (`build_pending_attribute_block` + the `is_pending_attr_nullish` wrapper)
-    // is a pre-existing gap in `svelte_boundary.rs` — only the `pending`
-    // SNIPPET branch is ported. Client matches, server=MISMATCH.
-    "async-batch-derived",
     // `hmr: true` fixtures whose SERVER output drops the `<!---->` anchor the
     // official compiler emits around a dev-mode dynamic component (and, for
     // `hmr-each-keyed-unshift`, a preserved JSDoc comment). Client output
@@ -485,12 +479,7 @@ pub const RUNTIME_RUNES_SKIP_NAMES: &[&str] = &[
 pub const RUNTIME_LEGACY_SKIP_NAMES: &[&str] = &[];
 
 /// hydration fixtures still failing on the rsvelte port.
-pub const HYDRATION_SKIP_NAMES: &[&str] = &[
-    // Same server `pending` ATTRIBUTE gap as `runtime-runes/async-batch-derived`:
-    // the `if (pending()) {…} else {…}` wrapper around the boundary body is not
-    // emitted. Client output matches.
-    "boundary-pending-attribute",
-];
+pub const HYDRATION_SKIP_NAMES: &[&str] = &[];
 
 /// server-side-rendering fixtures still failing on the rsvelte port.
 pub const SSR_SKIP_NAMES: &[&str] = &[];
