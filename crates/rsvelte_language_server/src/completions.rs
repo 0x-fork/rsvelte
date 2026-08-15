@@ -8,12 +8,13 @@ use lsp_types::{
     MarkupContent, MarkupKind,
 };
 
-use crate::context::{EmbeddedRegions, attribute_context};
+use crate::context::{EmbeddedRegions, attribute_context, attribute_prefix_context};
+use crate::html_data::{STANDARD_TAGS, TAGS, attributes};
 use crate::modifiers::MODIFIERS;
 use crate::tags::{SvelteTag, latest_opening_tag};
 
 /// The characters that put the client in a position to want these items.
-pub const TRIGGER_CHARACTERS: [&str; 5] = ["#", "@", ":", "/", "|"];
+pub const TRIGGER_CHARACTERS: [&str; 7] = ["<", " ", "#", "@", ":", "/", "|"];
 
 const HTML_COMMENT_START: &str = "<!--";
 
@@ -24,9 +25,20 @@ const WINDOW: usize = 10;
 #[must_use]
 pub fn completions(text: &str, offset: usize) -> Option<CompletionList> {
     if EmbeddedRegions::new(text).contains(offset) {
-        return None;
+        return crate::css::completions(text, offset);
     }
     let before = preceding(text, offset);
+
+    if let Some(prefix) = tag_prefix(text, offset) {
+        return Some(html_tag_completions(prefix));
+    }
+
+    if let Some(context) = attribute_prefix_context(text, offset) {
+        return Some(html_attribute_completions(
+            context.element_tag,
+            context.prefix,
+        ));
+    }
 
     if preceded_by_opening_brace(before) {
         return trigger_character(before).and_then(|trigger| match trigger {
@@ -51,6 +63,12 @@ pub fn completions(text: &str, offset: usize) -> Option<CompletionList> {
     }
 
     if let Some(attribute) = attribute_context(text, offset) {
+        if attribute.in_value && attribute.name == "lang" {
+            return Some(language_completions(attribute.element_tag));
+        }
+        if attribute.in_value && attribute.name == "style" {
+            return crate::css::completions(text, offset);
+        }
         if !attribute.can_have_event_modifier() {
             return None;
         }
@@ -58,6 +76,77 @@ pub fn completions(text: &str, offset: usize) -> Option<CompletionList> {
     }
 
     component_documentation(before)
+}
+
+fn language_completions(element: &str) -> CompletionList {
+    let languages: &[&str] = match element {
+        "script" => &["js", "ts"],
+        "style" => &["css", "scss", "less", "sass", "postcss"],
+        _ => &[],
+    };
+    CompletionList {
+        is_incomplete: false,
+        items: languages
+            .iter()
+            .map(|language| CompletionItem {
+                label: (*language).to_string(),
+                kind: Some(CompletionItemKind::VALUE),
+                ..CompletionItem::default()
+            })
+            .collect(),
+    }
+}
+
+fn html_attribute_completions(element: &str, prefix: &str) -> CompletionList {
+    CompletionList {
+        is_incomplete: false,
+        items: attributes(element)
+            .filter(|attribute| attribute.name.starts_with(prefix))
+            .map(|attribute| CompletionItem {
+                label: attribute.name.to_string(),
+                kind: Some(CompletionItemKind::PROPERTY),
+                documentation: Some(markdown(attribute.description.to_string())),
+                ..CompletionItem::default()
+            })
+            .collect(),
+    }
+}
+
+fn tag_prefix(text: &str, offset: usize) -> Option<&str> {
+    let before = text.get(..offset)?;
+    let start = before.rfind('<')?;
+    let prefix = &before[start + 1..];
+    (!prefix.starts_with(['/', '!', '?'])
+        && !prefix.contains('>')
+        && !prefix.chars().any(char::is_whitespace))
+    .then_some(prefix)
+}
+
+fn html_tag_completions(prefix: &str) -> CompletionList {
+    CompletionList {
+        is_incomplete: false,
+        items: TAGS
+            .iter()
+            .filter(|tag| tag.name.starts_with(prefix))
+            .map(|tag| CompletionItem {
+                label: tag.name.to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                documentation: Some(markdown(tag.description.to_string())),
+                ..CompletionItem::default()
+            })
+            .chain(
+                STANDARD_TAGS
+                    .iter()
+                    .filter(|tag| tag.starts_with(prefix))
+                    .map(|tag| CompletionItem {
+                        label: (*tag).to_string(),
+                        kind: Some(CompletionItemKind::CLASS),
+                        documentation: Some(markdown("A standard HTML element.".to_string())),
+                        ..CompletionItem::default()
+                    }),
+            )
+            .collect(),
+    }
 }
 
 /// The up-to-`WINDOW` characters in front of `offset`.
@@ -329,10 +418,65 @@ mod tests {
     }
 
     #[test]
+    fn completes_native_html_and_svelte_tags() {
+        assert!(labels("<sv").unwrap().contains(&"svelte:self".to_string()));
+        assert_eq!(labels("<tex").unwrap(), ["textarea"]);
+    }
+
+    #[test]
+    fn completes_svelte_directives_and_element_bindings() {
+        assert!(
+            labels("<div tra")
+                .unwrap()
+                .contains(&"transition:".to_string())
+        );
+        assert!(
+            labels("<input bind:")
+                .unwrap()
+                .contains(&"bind:checked".to_string())
+        );
+        assert!(
+            !labels("<img bind:")
+                .unwrap()
+                .contains(&"bind:checked".to_string())
+        );
+        assert!(
+            labels("<a data-sveltekit-")
+                .unwrap()
+                .contains(&"data-sveltekit-preload-code".to_string())
+        );
+        assert!(
+            labels("<video bind:")
+                .unwrap()
+                .contains(&"bind:duration".to_string())
+        );
+        assert!(
+            labels("<script gen")
+                .unwrap()
+                .contains(&"generics".to_string())
+        );
+    }
+
+    #[test]
+    fn completes_embedded_language_values() {
+        assert!(
+            labels("<script lang=\"")
+                .unwrap()
+                .contains(&"ts".to_string())
+        );
+        assert!(
+            labels("<style lang=\"")
+                .unwrap()
+                .contains(&"scss".to_string())
+        );
+    }
+
+    #[test]
     fn nothing_inside_style_or_script() {
-        assert_eq!(
-            labels_at("<style>h1{color:blue;}</style><p>test</p>", 10),
-            None
+        assert!(
+            labels_at("<style>h1{color:blue;}</style><p>test</p>", 10)
+                .unwrap()
+                .contains(&"color".to_string())
         );
         assert_eq!(
             labels_at("<script>const a = true</script><p>test</p>", 10),

@@ -6,6 +6,7 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
 use crate::context::{EmbeddedRegions, attribute_context};
+use crate::html_data::attribute as html_attribute;
 use crate::modifiers::MODIFIERS;
 use crate::tags::{SvelteTag, latest_opening_tag};
 
@@ -32,7 +33,7 @@ const ELSE: &str = ":else";
 #[must_use]
 pub fn hover(text: &str, offset: usize) -> Option<Hover> {
     if EmbeddedRegions::new(text).contains(offset) {
-        return None;
+        return crate::css::hover(text, offset).map(markdown);
     }
     let (window_start, window) = around(text, offset);
 
@@ -42,6 +43,14 @@ pub fn hover(text: &str, offset: usize) -> Option<Hover> {
     }
 
     let attribute = attribute_context(text, offset)?;
+    if attribute.in_value && attribute.name == "style" {
+        return crate::css::hover(text, offset).map(markdown);
+    }
+    if !attribute.in_value
+        && let Some(data) = html_attribute(attribute.element_tag, attribute.name)
+    {
+        return Some(markdown(data.description.to_string()));
+    }
     if !attribute.can_have_event_modifier() {
         return None;
     }
@@ -147,7 +156,10 @@ mod tests {
 
     #[test]
     fn nothing_inside_style_or_script() {
-        expect_none("<style>h1{color:blue;}</style><p>test</p>", 10);
+        assert_eq!(
+            hovered_tag("<style>h1{color:blue;}</style><p>test</p>", 10).as_deref(),
+            Some("`color` CSS property")
+        );
         expect_none("<script>const a = true</script><p>test</p>", 10);
     }
 
@@ -233,7 +245,22 @@ mod tests {
 
     #[test]
     fn a_plain_event_directive_has_no_modifier_hover() {
-        expect_none("<div on:click />", 12);
+        assert_eq!(
+            hovered_tag("<div on:click />", 12).as_deref(),
+            Some("Listens for the `click` event.")
+        );
+    }
+
+    #[test]
+    fn native_directives_and_bindings_hover() {
+        assert_eq!(
+            hovered_tag("<div transition: />", 8).as_deref(),
+            Some("Runs a transition when the element enters or leaves.")
+        );
+        assert_eq!(
+            hovered_tag("<input bind:checked />", 13).as_deref(),
+            Some("Binds a checkbox's checked state.")
+        );
     }
 
     #[test]
