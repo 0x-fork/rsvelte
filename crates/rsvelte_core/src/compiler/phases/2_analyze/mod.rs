@@ -1417,10 +1417,7 @@ fn cycle_extract_pattern_ids(node: &JsNode, arena: &ParseArena, out: &mut Vec<St
                 out.push(name.to_string());
             }
         }
-        // For member expressions like `obj.prop`, extract the root object identifier
-        JsNode::MemberExpression { object, .. } => {
-            cycle_extract_pattern_ids(arena.get_js_node(*object), arena, out);
-        }
+        JsNode::MemberExpression { .. } => {}
         JsNode::ArrayPattern { elements, .. } => {
             for elem in elements.iter().flatten() {
                 cycle_extract_pattern_ids(elem, arena, out);

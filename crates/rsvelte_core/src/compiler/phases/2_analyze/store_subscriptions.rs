@@ -587,6 +587,19 @@ fn is_js_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r')
 }
 
+fn regex_literal_can_start(chars: &[char], slash: usize) -> bool {
+    let Some(previous) = chars[..slash]
+        .iter()
+        .rposition(|character| !is_js_whitespace(*character))
+    else {
+        return true;
+    };
+    matches!(
+        chars[previous],
+        '(' | '[' | '{' | '=' | ':' | ',' | ';' | '!' | '?' | '&' | '|' | '+' | '-' | '*' | '%'
+    )
+}
+
 /// If the `$xxx` ident at `[ident_start, ident_end)` is a function/arrow
 /// parameter (including inside array/object destructuring), return the char-index
 /// range `[start, end)` of that arrow's BODY — the lexical scope in which the
@@ -650,6 +663,67 @@ fn dollar_param_body_range(
         }
     }
     None
+}
+
+fn function_param_body_range(
+    chars: &[char],
+    ident_start: usize,
+    ident_end: usize,
+) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    let mut open = None;
+    let mut k = ident_start;
+    while k > 0 {
+        k -= 1;
+        match chars[k] {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                open = Some(k);
+                break;
+            }
+            ';' | '{' | '}' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    let open = open?;
+
+    let mut before = open;
+    while before > 0 && is_js_whitespace(chars[before - 1]) {
+        before -= 1;
+    }
+    while before > 0 && is_identifier_char(chars[before - 1]) {
+        before -= 1;
+    }
+    while before > 0 && is_js_whitespace(chars[before - 1]) {
+        before -= 1;
+    }
+    if before < "function".len()
+        || !chars[before - "function".len()..before]
+            .iter()
+            .copied()
+            .eq("function".chars())
+    {
+        return None;
+    }
+
+    let mut paren_depth = 1usize;
+    let mut close = open + 1;
+    while close < chars.len() && paren_depth > 0 {
+        match chars[close] {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            _ => {}
+        }
+        close += 1;
+    }
+    if paren_depth != 0 || ident_end >= close {
+        return None;
+    }
+    while close < chars.len() && is_js_whitespace(chars[close]) {
+        close += 1;
+    }
+    (chars.get(close) == Some(&'{')).then(|| arrow_body_range(chars, close))
 }
 
 /// Check if a `$xxx` identifier at `ident_end` is being used as an object property key.
@@ -958,6 +1032,8 @@ fn collect_dollar_identifiers_pass(
     let mut in_string: Option<char> = None; // track if inside a string literal
     let mut in_line_comment = false; // track // comments
     let mut in_block_comment = false; // track /* */ comments
+    let mut in_regex = false;
+    let mut in_regex_class = false;
     // Stack of template literal nesting levels. For each active template literal,
     // we track the brace depth at which the template literal was entered. A `${`
     // inside a template literal starts a JS expression context where we should
@@ -986,6 +1062,24 @@ fn collect_dollar_identifiers_pass(
             if c == '*' && i + 1 < len && chars[i + 1] == '/' {
                 in_block_comment = false;
                 i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_regex {
+            if c == '\\' {
+                i += 2;
+            } else if c == '[' {
+                in_regex_class = true;
+                i += 1;
+            } else if c == ']' {
+                in_regex_class = false;
+                i += 1;
+            } else if c == '/' && !in_regex_class {
+                in_regex = false;
+                i += 1;
             } else {
                 i += 1;
             }
@@ -1027,6 +1121,12 @@ fn collect_dollar_identifiers_pass(
                 continue;
             }
         }
+        if c == '/' && regex_literal_can_start(chars, i) {
+            in_regex = true;
+            in_regex_class = false;
+            i += 1;
+            continue;
+        }
 
         // Track brace depth for template literal interpolations
         if c == '{' {
@@ -1062,7 +1162,7 @@ fn collect_dollar_identifiers_pass(
             // preceded by the third dot of a spread (`...$store`) is a real reference,
             // not a member access, so only treat a *single* leading dot as member access.
             let prev_is_ident_char = if i > 0 {
-                if is_identifier_char(chars[i - 1]) {
+                if is_identifier_char(chars[i - 1]) || chars[i - 1] == '\\' {
                     true
                 } else if chars[i - 1] == '.' {
                     // `...$x` (spread) has a second dot immediately before; `obj.$x`
@@ -1096,7 +1196,8 @@ fn collect_dollar_identifiers_pass(
                 // Only add if we have more than just $
                 // (bare $ detection is handled separately via proper AST analysis)
                 if ident.len() > 1 {
-                    let param_range = dollar_param_body_range(chars, ident_start, i);
+                    let param_range = dollar_param_body_range(chars, ident_start, i)
+                        .or_else(|| function_param_body_range(chars, ident_start, i));
                     let is_var_decl = is_dollar_ident_variable_declaration(chars, ident_start)
                         || is_dollar_ident_destructuring_declaration(chars, ident_start);
                     let is_declaration = param_range.is_some()
