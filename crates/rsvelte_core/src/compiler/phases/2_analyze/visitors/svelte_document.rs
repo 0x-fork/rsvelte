@@ -18,21 +18,23 @@ pub fn visit(
 ) -> Result<(), AnalysisError> {
     // Check for duplicate
     if context.has_svelte_document {
-        return Err(errors::svelte_meta_duplicate("svelte:document"));
+        return Err(
+            errors::svelte_meta_duplicate("svelte:document").at(document.start, document.end)
+        );
     }
     context.has_svelte_document = true;
 
     // Validate placement (must be at top level)
     if context.is_inside_element_or_block() {
-        return Err(errors::svelte_meta_invalid_placement("svelte:document"));
+        return Err(errors::svelte_meta_invalid_placement("svelte:document")
+            .at(document.start, document.end));
     }
 
     // svelte:document cannot have children
     if !document.fragment.nodes.is_empty() {
-        return Err(AnalysisError::validation(
-            "svelte_meta_invalid_content",
-            "<svelte:document> cannot have children",
-        ));
+        let (start, _) = document.fragment.nodes.first().unwrap().span();
+        let (_, end) = document.fragment.nodes.last().unwrap().span();
+        return Err(errors::svelte_meta_invalid_content("svelte:document").at(start, end));
     }
 
     // Validate attributes - check for invalid ones

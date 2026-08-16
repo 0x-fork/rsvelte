@@ -10,9 +10,14 @@ use super::diagnostic::diagnostics;
 
 /// Create an error with a specific code and message.
 fn error(code: &str, message: impl Into<String>) -> AnalysisError {
+    let mut message = message.into();
+    if !message.contains("\nhttps://svelte.dev/e/") {
+        message.push_str("\nhttps://svelte.dev/e/");
+        message.push_str(code);
+    }
     AnalysisError::ValidationWithCode {
         code: code.to_string(),
-        message: message.into(),
+        message,
         start: None,
         end: None,
     }
@@ -48,14 +53,14 @@ diagnostics! {
     /// `$host()` can only be used inside custom element component instances
     host_invalid_placement() => "`$host()` can only be used inside custom element component instances";
 
-    /// `$props()` can only be used as a variable declaration initializer at the top level of the `<script>` tag
-    props_invalid_placement() => "`$props()` can only be used as a variable declaration initializer at the top level of the `<script>` tag";
+    /// `$props()` can only be used at the component top level as a variable declaration initializer.
+    props_invalid_placement() => "`$props()` can only be used at the top level of components as a variable declaration initializer";
 
     /// `$props()` can only be used with an object destructuring pattern or an identifier
     props_invalid_identifier() => "`$props()` can only be used with an object destructuring pattern or an identifier";
 
     /// `%rune%` has already been declared
-    props_duplicate(rune: &str) => "`{}` has already been declared", rune;
+    props_duplicate(rune: &str) => "Cannot use `{}()` more than once", rune;
 
     /// Declaring or accessing a prop starting with `$$` is illegal (they are reserved for Svelte internals)
     props_illegal_name() => "Declaring or accessing a prop starting with `$$` is illegal (they are reserved for Svelte internals)";
@@ -64,13 +69,13 @@ diagnostics! {
     props_id_invalid_placement() => "`$props.id()` can only be used as a variable declaration initializer at the top level of the `<script>` tag";
 
     /// `%rune%` cannot be used with arguments
-    rune_invalid_arguments(rune: &str) => "`{}` cannot be used with arguments", rune;
+    rune_invalid_arguments(rune: &str) => "`{}` cannot be called with arguments", rune;
 
     /// `%rune%` cannot be called with a spread argument
     rune_invalid_spread(rune: &str) => "`{}` cannot be called with a spread argument", rune;
 
     /// `%rune%` requires %expected%
-    rune_invalid_arguments_length(rune: &str, expected: &str) => "`{}` requires {}", rune, expected;
+    rune_invalid_arguments_length(rune: &str, expected: &str) => "`{}` must be called with {}", rune, expected;
 
     /// `%rune%` can only be used as a variable declaration initializer, a class field declaration, or the first assignment to a class field at the top level of the constructor.
     state_invalid_placement(rune: &str) => "`{}(...)` can only be used as a variable declaration initializer, a class field declaration, or the first assignment to a class field at the top level of the constructor.\nhttps://svelte.dev/e/state_invalid_placement", rune;
@@ -153,6 +158,9 @@ diagnostics! {
     /// `<%name%>` tags cannot be inside elements or blocks
     svelte_meta_invalid_placement(name: &str) => "`<{}>` tags cannot be inside elements or blocks", name;
 
+    /// `<svelte:self>` components can only appear in supported nested contexts
+    svelte_self_invalid_placement() => "`<svelte:self>` components can only exist inside `{#if}` blocks, `{#each}` blocks, `{#snippet}` blocks or slots passed to components\nhttps://svelte.dev/e/svelte_self_invalid_placement";
+
     // Render tag errors
 
     /// `{@render ...}` tags can only contain call expressions
@@ -167,16 +175,16 @@ diagnostics! {
     // Assignment-related errors
 
     /// Cannot reassign or bind to each block item
-    each_item_invalid_assignment() => "Cannot reassign or bind to each block item";
+    each_item_invalid_assignment() => "Cannot reassign or bind to each block argument in runes mode. Use the array and index variables instead (e.g. `array[i] = value` instead of `entry = value`, or `bind:value={array[i]}` instead of `bind:value={entry}`)";
 
     /// Cannot reassign or bind to snippet parameter
     snippet_parameter_assignment() => "Cannot reassign or bind to snippet parameter";
 
-    /// Cannot use `$` as a variable name
-    dollar_binding_invalid() => "Cannot use `$` as a variable name";
+    /// The `$` name is reserved for Svelte's internal namespace.
+    dollar_binding_invalid() => "The $ name is reserved, and cannot be used for variables and imports";
 
     /// Variable name cannot start with `$`
-    dollar_prefix_invalid() => "Variable name cannot start with `$` except for special Svelte stores";
+    dollar_prefix_invalid() => "The $ prefix is reserved, and cannot be used for variables and imports";
 
     /// Cannot export state from a module if it is reassigned
     state_invalid_export() => "Cannot export state from a module if it is reassigned. Either export a function returning the state value or only mutate the state value's properties\nhttps://svelte.dev/e/state_invalid_export";
@@ -204,19 +212,19 @@ diagnostics! {
     state_field_invalid_assignment() => "Cannot assign to a state field before its declaration";
 
     /// %name% cannot have children
-    svelte_meta_invalid_content(name: &str) => "`<{}>` cannot have children", name;
+    svelte_meta_invalid_content(name: &str) => "<{}> cannot have children", name;
 
     /// `use:`, `transition:` and `animate:` directives, attachments and bindings do not support await expressions
     illegal_await_expression() => "`use:`, `transition:` and `animate:` directives, attachments and bindings do not support await expressions";
 
     /// `arguments` cannot be used outside of functions
-    invalid_arguments_usage() => "`arguments` cannot be used outside of functions";
+    invalid_arguments_usage() => "The arguments keyword cannot be used within the template or at the top level of a component";
 
     /// Runes cannot use computed properties
     rune_invalid_computed_property() => "Runes cannot use computed member expressions";
 
     /// Rune %old_name% has been renamed to %new_name%
-    rune_renamed(old_name: &str, new_name: &str) => "`{}` has been renamed to `{}`", old_name, new_name;
+    rune_renamed(old_name: &str, new_name: &str) => "`{}` is now `{}`", old_name, new_name;
 
     /// Rune %name% has been removed
     rune_removed(name: &str) => "`{}` has been removed", name;
@@ -225,7 +233,7 @@ diagnostics! {
     rune_invalid_name(name: &str) => "`{}` is not a valid rune", name;
 
     /// Runes must be called
-    rune_missing_parentheses() => "Runes must be called as functions";
+    rune_missing_parentheses() => "Cannot use rune without parentheses";
 
     /// {@const} tag cannot reference %name% in this context
     const_tag_invalid_reference(name: &str) => "{{@const}} tag cannot reference `{}` in this context - it can only be used with declarations from an implicit children snippet", name;
@@ -357,7 +365,7 @@ diagnostics! {
     mixed_event_handler_syntaxes(name: &str) => "Mixing old (on:{}) and new syntaxes for event handling is not allowed. Use only the on{} syntax\nhttps://svelte.dev/e/mixed_event_handler_syntaxes", name, name;
 
     /// Imports of `svelte/internal/*` are forbidden
-    import_svelte_internal_forbidden() => "Imports of `svelte/internal/*` are forbidden. It contains private runtime code which is subject to change without notice.\nhttps://svelte.dev/e/import_svelte_internal_forbidden";
+    import_svelte_internal_forbidden() => "Imports of `svelte/internal/*` are forbidden. It contains private runtime code which is subject to change without notice. If you're importing from `svelte/internal/*` to work around a limitation of Svelte, please open an issue at https://github.com/sveltejs/svelte and explain your use case\nhttps://svelte.dev/e/import_svelte_internal_forbidden";
 
     /// %name% cannot be used in runes mode
     runes_mode_invalid_import(name: &str) => "{} cannot be used in runes mode\nhttps://svelte.dev/e/runes_mode_invalid_import", name;
@@ -414,7 +422,7 @@ diagnostics! {
     directive_missing_name(directive_type: &str) => "`{}` name cannot be empty\nhttps://svelte.dev/e/directive_missing_name", directive_type;
 
     /// Sequence expressions are not allowed as attribute/directive values in runes mode, unless wrapped in parentheses
-    attribute_invalid_sequence_expression() => "Sequence expressions are not allowed as attribute/directive values in runes mode, unless wrapped in parentheses\nhttps://svelte.dev/e/attribute_invalid_sequence_expression";
+    attribute_invalid_sequence_expression() => "Comma-separated expressions are not allowed as attribute/directive values in runes mode, unless wrapped in parentheses\nhttps://svelte.dev/e/attribute_invalid_sequence_expression";
 
     /// `%name%` is an illegal variable name. To reference a global variable called `%name%`, use `globalThis.%name%`
     global_reference_invalid(name: &str) => "`{}` is an illegal variable name. To reference a global variable called `{}`, use `globalThis.{}`\nhttps://svelte.dev/e/global_reference_invalid", name, name, name;

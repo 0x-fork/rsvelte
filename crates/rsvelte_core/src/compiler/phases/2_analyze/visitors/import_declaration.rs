@@ -12,7 +12,11 @@ use crate::compiler::phases::phase2_analyze::AnalysisError;
 /// Visit an import declaration (typed JsNode path).
 pub fn visit_typed(node: &JsNode, context: &mut VisitorContext) -> Result<(), AnalysisError> {
     if let JsNode::ImportDeclaration {
-        source, specifiers, ..
+        start,
+        end,
+        source,
+        specifiers,
+        ..
     } = node
     {
         let arena = context.parse_arena;
@@ -29,16 +33,23 @@ pub fn visit_typed(node: &JsNode, context: &mut VisitorContext) -> Result<(), An
         // In runes mode, check for forbidden imports
         if context.analysis.runes {
             if source_str.starts_with("svelte/internal") {
-                return Err(errors::import_svelte_internal_forbidden());
+                return Err(errors::import_svelte_internal_forbidden().at(*start, *end));
             }
 
             if source_str == "svelte" {
                 for specifier in arena.get_js_children(*specifiers) {
-                    if let JsNode::ImportSpecifier { imported, .. } = specifier
+                    if let JsNode::ImportSpecifier {
+                        start,
+                        end,
+                        imported,
+                        ..
+                    } = specifier
                         && let JsNode::Identifier { name, .. } = arena.get_js_node(*imported)
                         && (name.as_str() == "beforeUpdate" || name.as_str() == "afterUpdate")
                     {
-                        return Err(errors::runes_mode_invalid_import(name.as_str()));
+                        return Err(
+                            errors::runes_mode_invalid_import(name.as_str()).at(*start, *end)
+                        );
                     }
                 }
             }
@@ -51,8 +62,11 @@ pub fn visit_typed(node: &JsNode, context: &mut VisitorContext) -> Result<(), An
                 | JsNode::ImportDefaultSpecifier { local, .. }
                 | JsNode::ImportNamespaceSpecifier { local, .. } => {
                     let local_node = arena.get_js_node(*local);
-                    if let JsNode::Identifier { name, .. } = local_node {
-                        Some(name.as_str())
+                    if let JsNode::Identifier {
+                        name, start, end, ..
+                    } = local_node
+                    {
+                        Some((name.as_str(), *start, *end))
                     } else {
                         None
                     }
@@ -60,12 +74,12 @@ pub fn visit_typed(node: &JsNode, context: &mut VisitorContext) -> Result<(), An
                 _ => None,
             };
 
-            if let Some(name) = local_name {
+            if let Some((name, start, end)) = local_name {
                 if name == "$" {
-                    return Err(errors::dollar_binding_invalid());
+                    return Err(errors::dollar_binding_invalid().at(start, end));
                 }
                 if name.starts_with('$') {
-                    return Err(errors::dollar_prefix_invalid());
+                    return Err(errors::dollar_prefix_invalid().at(start, end));
                 }
             }
         }

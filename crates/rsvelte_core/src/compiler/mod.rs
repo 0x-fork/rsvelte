@@ -1596,7 +1596,7 @@ impl CompileError {
     /// Destructure this error the way the official compiler's `CompileError`
     /// exposes itself to JS consumers (`code`, `message`, `start`/`end`).
     pub fn diagnostic(&self) -> CompileErrorDiagnostic {
-        match self {
+        let mut diagnostic = match self {
             CompileError::Parse(e) => {
                 let (code, message) = match e {
                     crate::error::ParseError::SvelteError { code, message, .. } => {
@@ -1636,7 +1636,19 @@ impl CompileError {
                 message: format!("Internal panic: {msg}"),
                 span: None,
             },
+        };
+
+        // Official appends the help URL to every coded message, and a consumer
+        // reads that message verbatim -- upstream's own fixtures strip it for
+        // comparison rather than the compiler omitting it.
+        if let Some(code) = diagnostic.code.as_deref() {
+            let docs_url = format!("\nhttps://svelte.dev/e/{code}");
+            if !diagnostic.message.ends_with(&docs_url) {
+                diagnostic.message.push_str(&docs_url);
+            }
         }
+
+        diagnostic
     }
 }
 
@@ -1683,6 +1695,15 @@ impl std::error::Error for CompileError {}
 mod tests {
     use super::*;
 
+    /// Upstream's `compiler-errors/test.ts` compares messages with the help URL
+    /// removed, because the compiler itself always emits it.
+    fn strip_link(message: &str) -> &str {
+        match message.rfind('\n') {
+            Some(at) if message[at + 1..].starts_with("https://svelte.dev/e/") => &message[..at],
+            _ => message,
+        }
+    }
+
     #[test]
     fn test_warning_position_clamps_to_char_boundary() {
         // "é" is two UTF-8 bytes (0xC3 0xA9). An offset landing between them
@@ -1709,6 +1730,187 @@ mod tests {
         assert!(!d.message.starts_with("Analysis("), "{}", d.message);
         let (start, _) = d.span.expect("attribute_duplicate carries a span");
         assert_eq!(&source[start as usize..], "a=\"2\"></div>");
+    }
+
+    #[test]
+    fn diagnostic_locates_dollar_binding_declarations() {
+        // Byte-for-byte upstream `compiler-errors/samples/dollar-binding-declaration-legacy`;
+        // inlined because this crate is also built without the submodule.
+        let source = "<svelte:options runes={false} />\n\n<script>\n\tfunction ok($) {}\n\tfunction ok2() {\n\t\tlet $;\n\t}\n\n\t// error\n\tlet $;\n</script>\n";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("dollar_binding_invalid"));
+        assert_eq!(diagnostic.span, Some((108, 109)));
+    }
+
+    #[test]
+    fn diagnostic_locates_dollar_binding_imports() {
+        // Byte-for-byte upstream `compiler-errors/samples/dollar-binding-import`.
+        let source = "<script>\n\timport { $ } from './somewhere';\n</script>\n";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("dollar_binding_invalid"));
+        assert_eq!(diagnostic.span, Some((19, 20)));
+    }
+
+    #[test]
+    fn diagnostic_locates_duplicate_component_slot_attributes() {
+        let source = "<Component><div slot=\"content\" /><span slot=\"content\" /></Component>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("slot_attribute_duplicate"));
+        let (start, end) = diagnostic
+            .span
+            .expect("duplicate slot has an attribute span");
+        assert_eq!(&source[start as usize..end as usize], "slot=\"content\"");
+    }
+
+    #[test]
+    fn diagnostic_locates_default_slot_content_conflict() {
+        let source = "<Component><div slot=\"default\" /><p>implicit</p></Component>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("slot_default_duplicate"));
+        let (start, end) = diagnostic.span.expect("implicit content has a span");
+        assert_eq!(&source[start as usize..end as usize], "<p>implicit</p>");
+    }
+
+    #[test]
+    fn diagnostic_locates_renamed_runes() {
+        let source = "<script>$effect.active</script>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("rune_renamed"));
+        assert_eq!(
+            strip_link(&diagnostic.message),
+            "`$effect.active` is now `$effect.tracking`"
+        );
+        let (start, end) = diagnostic.span.expect("renamed rune has a span");
+        assert_eq!(&source[start as usize..end as usize], "$effect.active");
+    }
+
+    #[test]
+    fn diagnostics_locate_global_css_validation_nodes() {
+        // Each source is byte-for-byte the upstream `compiler-errors/samples/<fixture>`,
+        // inlined because this crate is also built without the submodule.
+        for (fixture, source, code, span) in [
+            (
+                "css-global-block-declaration",
+                "<style>\n\t/* ok */\n\t.x :global {\n\t\tcolor: red;\n\t}\n\n\t:global .y {\n\t\tcolor: red;\n\t}\n\n\t/* not ok */\n\t:global {\n\t\tcolor: red;\n\t}\n</style>\n",
+                "css_global_block_invalid_declaration",
+                (109, 119),
+            ),
+            (
+                "css-global-block-combinator",
+                "<style>\n\t/* ok */\n\t.x :global {\n\t}\n\n\t/* not ok */\n\t.x > :global {\n\t}\n</style>\n",
+                "css_global_block_invalid_combinator",
+                (54, 63),
+            ),
+            (
+                "css-global-block-in-pseudoclass",
+                "<style>\n\t/* invalid */\n\t:is(:global) { color: red }\n</style>\n",
+                "css_global_block_invalid_placement",
+                (28, 35),
+            ),
+            (
+                "css-global-modifier",
+                "<style>\n\t/* ok */\n\tdiv :global.x {\n\t\tcolor: red;\n\t}\n\n\t/* not ok */\n\t.x:global {\n\t\tcolor: red;\n\t}\n</style>\n",
+                "css_global_block_invalid_modifier",
+                (70, 77),
+            ),
+            (
+                "css-global-modifier-start-1",
+                "<style>\n\t/* ok */\n\tdiv :global.x {\n\t\tcolor: red;\n\t}\n\n\t/* not ok */\n\t:global.x {\n\t\tcolor: red;\n\t}\n</style>\n",
+                "css_global_block_invalid_modifier_start",
+                (75, 77),
+            ),
+        ] {
+            let diagnostic = compile(source, CompileOptions::default())
+                .unwrap_err()
+                .diagnostic();
+            assert_eq!(diagnostic.code.as_deref(), Some(code), "{fixture}");
+            assert_eq!(diagnostic.span, Some(span), "{fixture}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_locates_invalid_svelte_self() {
+        let source = "<svelte:self />";
+        let err = compile(source, CompileOptions::default()).unwrap_err();
+        let diagnostic = err.diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("svelte_self_invalid_placement")
+        );
+        assert_eq!(diagnostic.span, Some((0, source.len() as u32)));
+    }
+
+    #[test]
+    fn diagnostic_message_carries_the_documentation_url_like_official() {
+        let diagnostic = compile(
+            "<script>function a(x) {} a($state(1));</script>",
+            CompileOptions::default(),
+        )
+        .unwrap_err()
+        .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("state_invalid_placement"));
+        assert_eq!(
+            diagnostic.message,
+            "`$state(...)` can only be used as a variable declaration initializer, a class field declaration, or the first assignment to a class field at the top level of the constructor.\nhttps://svelte.dev/e/state_invalid_placement"
+        );
+    }
+
+    #[test]
+    fn rune_argument_diagnostic_uses_call_message_and_span() {
+        let source = "<script>let value = $derived(1, 2);</script>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("rune_invalid_arguments_length")
+        );
+        assert_eq!(
+            strip_link(&diagnostic.message),
+            "`$derived` must be called with exactly one argument"
+        );
+        let (start, end) = diagnostic.span.expect("rune call has a span");
+        assert_eq!(&source[start as usize..end as usize], "$derived(1, 2)");
+    }
+
+    #[test]
+    fn props_placement_diagnostic_uses_call_message_and_span() {
+        let source = "<script>function invalid() { $props(); }</script>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("props_invalid_placement"));
+        assert_eq!(
+            strip_link(&diagnostic.message),
+            "`$props()` can only be used at the top level of components as a variable declaration initializer"
+        );
+        let (start, end) = diagnostic.span.expect("$props call has a span");
+        assert_eq!(&source[start as usize..end as usize], "$props()");
+    }
+
+    #[test]
+    fn dollar_import_diagnostic_uses_the_imported_identifier() {
+        let source = "<script>\n\timport { $ } from './store';\n</script>";
+        let diagnostic = compile(source, CompileOptions::default())
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("dollar_binding_invalid"));
+        assert_eq!(
+            strip_link(&diagnostic.message),
+            "The $ name is reserved, and cannot be used for variables and imports"
+        );
+        let (start, end) = diagnostic.span.expect("import binding has a span");
+        assert_eq!(&source[start as usize..end as usize], "$");
     }
 
     #[test]

@@ -365,14 +365,24 @@ pub fn validate_identifier_name(
 
         // Check for bare '$'
         if name == "$" {
-            return Err(errors::dollar_binding_invalid());
+            let error = errors::dollar_binding_invalid();
+            return Err(if let Some(start) = binding.declaration_start {
+                error.at(start, start + u32::try_from(name.len()).unwrap())
+            } else {
+                error
+            });
         }
 
         // Check for names starting with '$'
         if name.starts_with('$') {
             // TODO: Filter out type imports in migration script
             // For now, allow all $ prefixed names
-            return Err(errors::dollar_prefix_invalid());
+            let error = errors::dollar_prefix_invalid();
+            return Err(if let Some(start) = binding.declaration_start {
+                error.at(start, start + u32::try_from(name.len()).unwrap())
+            } else {
+                error
+            });
         }
     }
 
@@ -991,7 +1001,7 @@ pub fn validate_assignment_node(
                     .root
                     .is_scope_ancestor_of(binding.scope_index, context.scope)
             {
-                return Err(errors::each_item_invalid_assignment());
+                return Err(errors::each_item_invalid_assignment().at(node_span.0, node_span.1));
             }
 
             if matches!(binding.kind, BindingKind::SnippetParam) {
