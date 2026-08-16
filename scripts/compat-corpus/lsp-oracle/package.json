@@ -1,0 +1,12 @@
+{
+	"name": "rsvelte-lsp-oracle",
+	"private": true,
+	"type": "module",
+	"description": "Isolated environment holding the REAL svelte-language-server, used as the LSP oracle by scripts/compat-corpus/lsp-verify.mjs, plus the `svelte` / `typescript` its answers are produced against. This node_modules is symlinked into every materialised project, so both servers resolve the same dependency tree. The versions are EXACT on purpose: the gate diffs LSP responses against this oracle, so a floating range would let an upstream release move the baseline with no change in this repo. `svelte` and `typescript` match scripts/compat-corpus/check-oracle so the two parity gates observe one environment; `svelte-language-server` is the published build of submodules/language-tools, used instead of the submodule because the gate needs a runnable server and the submodule ships TypeScript sources. `@typescript/native` is TypeScript 7 under the npm alias rsvelte's server looks tsgo up by — without it `TsgoRuntime::start` finds no compiler and every TypeScript-backed feature answers empty, which the gate would score as a divergence of the server rather than of the environment.",
+	"dependencies": {
+		"@typescript/native": "npm:typescript@7.0.2",
+		"svelte": "5.56.9",
+		"svelte-language-server": "0.18.4",
+		"typescript": "6.0.3"
+	}
+}

@@ -386,6 +386,24 @@ committed mini-projects under `compatibility/check-fixtures/`; Layer 2 (`check-e
 ratchet `check-e2e-known-failures.json`) runs real repositories — `submodules/cmsaasstarter` and the
 `submodules/skeleton` pnpm monorepo — installed from their own lockfiles.
 
+**The LSP parity gate is the only one whose unit is a protocol exchange, and it had to be built
+from nothing.** `scripts/compat-corpus/lsp-verify.mjs` drives the pinned real
+`svelte-language-server` and `rsvelte-language-server` over stdio with one identical `initialize`
++ request stream and diffs the responses, ratcheted through `compatibility/lsp-known-failures.json`.
+Upstream ships **no** end-to-end protocol test — every `language-server` test in
+`submodules/language-tools` constructs a plugin class in-process — so no existing harness observes
+either server through the wire an editor speaks, and the transport is where the first defect
+turned up: one frame whose body would not deserialize ended `lsp_server`'s reader thread and took
+the whole server down. The ratchet key is `<unit>|<method>|<verdict>` — a **class**, never a
+payload, because a payload key churns on every TypeScript wording change while a
+`<unit>|<method>` key lets a divergence that changes kind reuse an existing entry. Diagnostics are
+compared per `source` for the same reason: rsvelte publishes its native linter's findings, which
+official has no counterpart for, and one flat key would mask every TypeScript divergence in the
+file behind it. `lsp-bench.mjs` is the sibling benchmark (cold start, time-to-first-diagnostic,
+hover/completion percentiles, peak RSS of the whole process tree); it asserts nothing. What the
+gate cannot see — sampled positions and files, no `didChange` anywhere, no `*/resolve`, one
+capability point, one configuration point — is gate-coverage 27.
+
 ## Implementation Principles
 
 **CRITICAL**: All implementations must follow the official Svelte compiler implementation.

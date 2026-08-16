@@ -1,0 +1,5 @@
+{
+	"name": "lsp-fixture-basic",
+	"private": true,
+	"type": "module"
+}

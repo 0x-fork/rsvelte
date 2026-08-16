@@ -1,0 +1,5 @@
+{
+	"name": "lsp-fixture-native",
+	"private": true,
+	"type": "module"
+}

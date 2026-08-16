@@ -110,6 +110,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 24 | `await_waterfall` runtime parity | the `await_waterfall` warnings a **mounted** rsvelte-compiled component logs vs. official's, 3 cases | one warning code, one component shape; nothing else about the running component is observed | [D] |
 | 25 | Differential output-preservation corpus hash | per `.svelte` source × client/server/client-dev/server-dev hash from base-core vs merge-ref-core | changes outside `crates/rsvelte_core`; every PR without the maintainer-applied `output-preserving` label | [S] |
 | 26 | esrap generated-output corpus | parsed JS output × official/rsvelte tree × 4 targets; AST equivalence, comment kind/body sequence, code/map equality, map bounds/order | production synthetic AST spans and whether a mapping points at the corresponding source token | [S] |
+| 27 | LSP response parity (`lsp-verify.mjs`) | `(unit, method, verdict)` over 13 LSP methods, two servers driven over stdio | the payload inside an accepted verdict class; every `*/resolve`; **the incremental-edit path — a unit is opened once and never edited**; completion ordering and `detail`/`documentation`; one capability and one configuration point | [S] |
 
 Cross-cutting blind spots (**ratchet keys losing in both directions**, path filters, ratchet-doc
 drift, vacuity floors, the **performance**
@@ -1996,6 +1997,122 @@ records does not apply. But the script is wired into exactly one job (`corpus-co
 to `submodules/svelte` alone reaches it (the submodule paths are listed), a change to the
 runtime's warning gating inside a *newer pinned* submodule therefore does reach it, but nothing
 else in the repo runs it.
+
+---
+
+## 27. LSP response parity — `scripts/compat-corpus/lsp-verify.mjs`
+
+**Unit.** One `(unit, method, verdict)` triple, where a *unit* is one file of one *project* and a
+project is one workspace root with one server pair initialized against it
+(`lsp/population.mjs:projects`). The two servers — the pinned real
+`svelte-language-server` (`scripts/compat-corpus/lsp-oracle`) and
+`rsvelte-language-server` — are driven over stdio with identical `initialize` params, identical
+client capabilities (`lsp/client.mjs:clientCapabilities`) and an identical request stream, and
+their responses are reduced to a **verdict** (`lsp/normalize.mjs:verdict`): `only-official`,
+`only-rsvelte`, `count`, `differs:<≤3 field names>`, `error-official:<code>`,
+`error-rsvelte:<code>`, `error-both:<a>/<b>`.
+
+This is the only gate in the repo whose unit is a **protocol exchange**. Upstream has no
+end-to-end protocol test of its own — every `language-server` test in `submodules/language-tools`
+constructs a plugin class in-process — so nothing but this gate observes either server through
+the wire an editor actually speaks.
+
+### Blind spot 27a — the verdict is a class, so an accepted entry stops comparing the payload
+
+`lsp-verify.mjs`'s `record()` keys on `${unit}|${method}|${verdict}`, and `verdict()` returns at
+most three differing field *names*, never their values. **[S]** Once
+`fixtures/basic/src/App.svelte|hover|differs:contents` is in the ratchet, every further change to
+that hover's text — better, worse, or empty-but-not-null — reproduces the same key. The class is
+in the key deliberately (a divergence that changes *kind* does fail), but within a class the
+payload is unobserved. The report file carries the first 400 payload pairs for triage; nothing
+compares them.
+
+### Blind spot 27b — positions are sampled, and sampled only at identifiers
+
+`lsp/population.mjs:samplePositions` matches `/[A-Za-z_$][A-Za-z0-9_$]*/`, drops a keyword list,
+aims at the middle of the token, and takes `--positions` (default 4) evenly spaced from the
+result. **[S]** Two consequences: a defect that fires only at an unsampled identifier is
+invisible, and positions inside **string literals, comments, CSS selectors, attribute values and
+whitespace** are never requested at all — which are exactly the positions where a completion
+provider decides what context it is in.
+
+### Blind spot 27c — files are sampled, per project and per repository
+
+`--max-units` (default 40) caps the files taken from each project and `--corpus-limit` (default
+25) the `.svelte` files sampled from each real-world repository (`population.mjs:listFiles` takes
+an evenly-spaced slice, not the first N). **[S]** The denominators are printed per project and
+stored in `compatibility/lsp-report.json`; the population is roughly 200 units against the tens
+of thousands of files the compiler corpus reaches.
+
+### Blind spot 27d — the projection drops response fields
+
+`lsp/normalize.mjs` drops `data` and `source` from every payload, compares a completion list as
+the **sorted** multiset of `label kind insertTextFormat`, and a hover as `range` plus flattened
+text. **[S]** So `detail`, `documentation`, `textEdit`/`insertText`, `sortText`, `filterText`,
+`commitCharacters`, `additionalTextEdits` and the **order** of a completion list are all
+unobserved — and ordering is what a user experiences as completion quality. Diagnostics are
+grouped by `source` before comparison, which puts the class in the key (`publishDiagnostics[ts]`
+vs `[rsvelte]`) but means a diagnostic that moves between sources reads as two divergences rather
+than one.
+
+### Blind spot 27e — nothing is resolved
+
+`completionItem/resolve`, `codeLens/resolve`, `codeAction/resolve` and inlay-hint resolution are
+never called. **[S]** The lazily-resolved half of a completion item is where its documentation
+and auto-import edits live, so the half of the feature a user acts on is outside the comparison.
+
+### Blind spot 27f — the request stream is a fixed list, and it contains no edit
+
+`DOCUMENT_METHODS` + `POSITION_METHODS` (`population.mjs`) are 13 methods. **[S]** Not in the
+stream: `references`, `implementation`, `signatureHelp`, `prepareRename`/`rename`, `codeAction`,
+`documentLink`, `linkedEditingRange`, `workspace/symbol`, the call-hierarchy family,
+`semanticTokens/range`, `rangeFormatting`, `executeCommand`, and rsvelte's four `$/` custom
+requests. Sharpest of all: a unit is opened once with `didOpen` and **never edited**.
+`textDocumentSync` is declared INCREMENTAL by both servers, so the entire incremental-update
+path — the one an editor exercises on every keystroke — is unmeasured here.
+`crates/rsvelte_language_server/tests/robustness.rs` drives edits, but against rsvelte alone with
+no oracle.
+
+### Blind spot 27g — one client-capability point, and `initialize` itself is not compared
+
+Both servers receive one fixed capability set. **[S]** rsvelte's `capabilities()`
+(`crates/rsvelte_language_server/src/server.rs:169`) branches on `apply_edit`,
+`pull_diagnostics`, `document_highlight` and the semantic-token legend, so the pull-diagnostics
+path, the `refactor` code-action kind and `executeCommand` are never taken. And the `initialize`
+**result** — the declared server capabilities, the thing every later behaviour is negotiated from
+— is discarded rather than diffed.
+
+### Blind spot 27h — one configuration point
+
+`lsp/client.mjs` answers `workspace/configuration` with `null` for every section, on both sides,
+so every setting sits at its default. **[S]** Upstream's `svelte.plugin.*` surface and rsvelte's
+`rsvelte.*` surface are unobserved; a setting wired to the wrong semantics on either side stays
+green.
+
+### Blind spot 27i — the two sides do not use the same TypeScript
+
+Official resolves the pinned `typescript` 6 from the shared `node_modules`; rsvelte resolves
+`@typescript/native` (TypeScript 7) because that is what `find_compiler(.., prefer_tsgo = true)`
+accepts (`crates/rsvelte_check/src/svelte_check/tsgo.rs:104`). **[S]** That asymmetry is the
+product's shipped configuration, not an artifact of the harness, but it means a TypeScript-backed
+divergence may be a TypeScript-version divergence rather than a server one. The alternative —
+running rsvelte on TS 6 — would measure a configuration the product does not ship.
+
+### Blind spot 27j — nothing about time is asserted
+
+A server that answers correctly and 100× slower is green. **[S]** `lsp-bench.mjs` measures cold
+start, time-to-first-diagnostic, hover/completion percentiles and peak RSS, and asserts nothing
+about any of them; there is no performance ratchet for the language server.
+
+### Blind spot 27k — partially closed: a pair that never came up is now an abort, not a ratchet
+
+The vacuous-green shape here is specific: if one server fails to start its TypeScript program,
+every TypeScript-backed method answers empty and the run produces a large, plausible-looking set
+of `only-official` entries. **[D]** `lsp-verify.mjs` now counts agreeing responses per project and
+`fail()`s a project that agrees on **nothing**, and refuses `--update` below `MIN_UNITS` compared
+units. What that does *not* catch is a partial failure — a tsgo that starts and then dies after
+the first file still leaves the native providers agreeing, so the project clears the guard while
+its TypeScript half is silently absent.
 
 ---
 

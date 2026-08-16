@@ -670,3 +670,60 @@ jobs:
           path: compatibility/matrix-artifacts
           if-no-files-found: ignore
           retention-days: 14
+
+  # LSP response parity — #1767 M6. Drives the real `svelte-language-server` and
+  # `rsvelte-language-server` over stdio with one identical request stream and
+  # diffs the responses. Upstream ships no end-to-end protocol test, so this is
+  # the only place either server is observed through the wire protocol a real
+  # editor speaks.
+  lsp-parity:
+    name: Language-server parity (official svelte-language-server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+
+      # The upstream fixture suites plus the four real-world repositories the
+      # corpus gates already pin; the LSP population is drawn from both.
+      - name: Checkout LSP corpus submodules (shallow)
+        run: |
+          git submodule update --init --depth 1 \
+            submodules/language-tools \
+            submodules/bits-ui \
+            submodules/flowbite-svelte \
+            submodules/melt-ui \
+            submodules/shadcn-svelte
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: ./.github/actions/setup-node-pnpm
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lsp-parity
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build rsvelte-language-server
+        run: cargo build --release -p rsvelte_language_server
+
+      # The oracle is the published `svelte-language-server`, pinned exactly, and
+      # its node_modules is symlinked into every materialised project so both
+      # servers resolve one dependency tree (including the tsgo rsvelte's
+      # TypeScript features need).
+      - name: Install LSP oracle (real svelte-language-server)
+        run: npm --prefix scripts/compat-corpus/lsp-oracle install --no-package-lock
+
+      - name: Verify LSP parity (ratchet against lsp-known-failures.json)
+        run: node scripts/compat-corpus/lsp-verify.mjs
+
+      - name: Upload LSP report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: corpus-lsp-report
+          path: compatibility/lsp-report.json
+          if-no-files-found: ignore
+          retention-days: 14

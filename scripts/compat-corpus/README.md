@@ -952,3 +952,65 @@ Read the `.md` before trusting the headline: of 118 units, 24 are compared only
 as "both backends reject", so the population that actually reaches a CSS
 comparison is 94. Both backends are version-pinned (`sass` 1.102.0, `grass`
 0.13.4) so the ratchet is reproducible; bumping either is expected to move it.
+
+## Language-server parity (`lsp-verify.mjs`, `lsp-bench.mjs`)
+
+The differential harness for `rsvelte-language-server` against the real
+`svelte-language-server`. Upstream ships **no** end-to-end protocol test — every
+`language-server` test in `submodules/language-tools` constructs a plugin class
+in-process — so both servers are driven here over stdio with the *same*
+`initialize` params, the *same* client capabilities and the *same* request
+stream, and their responses are diffed.
+
+```bash
+cargo build --release -p rsvelte_language_server
+pnpm run lsp-corpus:sync            # language-tools + the four real-world repos
+pnpm run lsp-corpus:oracle-install  # the pinned real svelte-language-server
+pnpm run lsp-corpus:verify          # gate
+pnpm run lsp-corpus:update          # rewrite the ratchet
+pnpm run lsp-corpus:bench           # benchmarks (asserts nothing)
+```
+
+**The population** is a list of *projects* (one server pair each) and *units*
+(one file each), built by `lsp/population.mjs`:
+
+| project | source | why |
+|---|---|---|
+| `fixtures/basic`, `fixtures/native` | `compatibility/lsp-fixtures/` | committed mini-projects; the only layer that needs no submodule |
+| `upstream/folding-range`, `upstream/inlay-hints`, `upstream/diagnostics` | `submodules/language-tools/.../typescript/features/*/fixtures` | the suites #1767 names; their `input.svelte` files are reused as inputs |
+| `upstream/testfiles` | `.../typescript/testfiles` | the 174 files upstream's TypeScript tests share as a workspace |
+| `upstream/svelte-plugin` | `.../svelte/testfiles` | the TS-independent Svelte-plugin fixtures |
+| `corpus/<repo>` | bits-ui, flowbite-svelte, melt-ui, shadcn-svelte | real-world components, evenly sampled |
+
+**What the ratchet stores** is `<unit>|<method>|<verdict>` — a *class*, not a
+payload. A payload key would churn on every TypeScript wording change; a
+`<unit>|<method>` key would let a divergence that changes kind reuse an existing
+entry. The verdicts are `only-official` / `only-rsvelte` (one side answered
+nothing), `count`, `differs:<fields>`, `error-official:<code>` /
+`error-rsvelte:<code>` / `error-both:…`.
+
+Diagnostics are compared **per `source`** (`publishDiagnostics[ts]`,
+`[svelte]`, `[rsvelte]`, …) rather than as one list: rsvelte's server also
+publishes its native linter's findings, which official has no counterpart for,
+and one flat key would mask every TypeScript divergence in the same file behind
+it.
+
+Three numbers define the population — `--positions` (identifiers sampled per
+file), `--max-units` (files per project) and `--corpus-limit` (files sampled per
+real-world repo). `--update` refuses to run when any of them is overridden, and
+refuses below a floor of compared units, because `--update` deletes every entry
+it did not measure.
+
+Upstream's TS-independent unit suites (`test/plugins/{svelte,html,css}/**`) contribute to this
+gate as **inputs** — their fixture directories are projects above, and the expectations come from
+the live official server rather than from transcribing upstream's inline assertions. The one
+exception is `test/plugins/html/getFoldingRange.test.ts`, ported case-for-case to
+`crates/rsvelte_language_server/tests/upstream_html_folding.rs`: its expectations are
+`vscode-html-languageservice`'s, not either server's, and they survive the trip through the
+protocol unchanged. Nine of its ten cases hold as upstream wrote them; the tenth (an unmatched
+close tag) is asserted as what rsvelte answers today, with upstream's expectation named beside it.
+
+`lsp-bench.mjs` measures cold start, time-to-first-diagnostic, hover/completion
+latency percentiles and peak RSS of the whole process tree (rsvelte's tsgo child
+is a separate process), for both servers in one invocation. It is a benchmark,
+not a gate: it asserts nothing.

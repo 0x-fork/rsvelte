@@ -1130,6 +1130,13 @@ jobs:
       - name: Check the known-failures doc count parser
         run: node scripts/dev/test-known-failures-md-check.mjs
 
+      # The LSP parity gate's comparison key. Pure module, so it needs neither
+      # server, the oracle install, nor the submodules the parity job does — and
+      # it is where a projection that silently drops the field under comparison
+      # (which already happened once, to semantic tokens) has to fail.
+      - name: Check the LSP parity comparison key
+        run: node scripts/dev/test-lsp-normalize.mjs
+
       # The CSS-prune sweep's comparison key. Same reason it lives here: the
       # comparator is a pure module, so it needs neither the NAPI binding nor
       # submodules that the sweep itself does.
