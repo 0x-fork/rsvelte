@@ -161,6 +161,7 @@ const RATCHETS = [
 	{ doc: 'scss-known-failures.md', key: 'scss-known-failures.json', jsons: ['scss-known-failures.json'] },
 	{ doc: 'check-known-failures.md', key: 'check-known-failures.json', jsons: ['check-known-failures.json'] },
 	{ doc: 'check-e2e-known-failures.md', key: 'check-e2e-known-failures.json', jsons: ['check-e2e-known-failures.json'] },
+	{ doc: 'lsp-known-failures.md', key: 'lsp-known-failures.json', jsons: ['lsp-known-failures.json'] },
 	{ doc: 'svelte2tsx-known-failures.md', key: 'svelte2tsx-known-failures.json', jsons: ['svelte2tsx-known-failures.json'] },
 	{ doc: 'svelte2tsx-map-known-failures.md', key: 'svelte2tsx-map-known-failures.json', jsons: ['svelte2tsx-map-known-failures.json'] },
 	{
@@ -188,6 +189,13 @@ const PARTITIONS = [
 	{ doc: 'lint-known-failures.md', key: 'lint-known-failures.json', label: 'direction' },
 	{ doc: 'lint-known-failures.md', key: 'lint-known-failures.json', label: 'repo' },
 	{ doc: 'scss-known-failures.md', key: 'scss-known-failures.json', label: 'cluster' },
+	{ doc: 'lsp-known-failures.md', key: 'lsp-known-failures.json', label: 'key kind' },
+	{
+		doc: 'lsp-known-failures.md',
+		key: 'lsp-known-failures.json',
+		prefix: 'aggregate:corpus/',
+		label: 'repository',
+	},
 	{ doc: 'matrix-known-failures.md', key: 'matrix-known-failures.json', label: 'family' },
 	{
 		doc: 'matrix-known-failures.md',

@@ -110,6 +110,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 24 | `await_waterfall` runtime parity | the `await_waterfall` warnings a **mounted** rsvelte-compiled component logs vs. official's, 3 cases | one warning code, one component shape; nothing else about the running component is observed | [D] |
 | 25 | Differential output-preservation corpus hash | per `.svelte` source × client/server/client-dev/server-dev hash from base-core vs merge-ref-core | changes outside `crates/rsvelte_core`; every PR without the maintainer-applied `output-preserving` label | [S] |
 | 26 | esrap generated-output corpus | parsed JS output × official/rsvelte tree × 4 targets; AST equivalence, comment kind/body sequence, code/map equality, map bounds/order | production synthetic AST spans and whether a mapping points at the corresponding source token | [S] |
+| 27 | LSP differential parity | normalized JSON response field per request against the pinned official server and selected upstream snapshots | **every server notification**; incremental edit and resolve sequences; **inside a corpus `(file, method)`, everything but the divergent-request count** | [S] [D] |
 
 Cross-cutting blind spots (**ratchet keys losing in both directions**, path filters, ratchet-doc
 drift, vacuity floors, the **performance**
@@ -157,6 +158,101 @@ the ordinary four-target official parity gate covers every compiler change, whil
 second full sweep on every docs-only PR would worsen the branch-update queue it is meant to make
 evidence robust against. **Evidence [S]:** the label condition and base archive command in
 `differential-corpus.yml` are the respective filters.
+
+---
+
+## 27. LSP differential parity — `scripts/compat-lsp/verify.mjs`
+
+**Unit.** The harness sends the same JSON-RPC request id and parameters to the pinned official
+language server and rsvelte, normalizes the two results, and records every differing JSON field.
+Completion items, diagnostics, locations, folding ranges and inlay hints are paired by a
+method-specific semantic identity before their fields are diffed (`diff.mjs`). The committed
+fixture population additionally compares rsvelte with the selected upstream expected snapshot.
+The real-project population requests hover, definition and completion at every lexically matched
+identifier position in the four pinned repositories.
+
+### Blind spot 27a — server notifications are discarded [S]
+
+`LspProcess.#dispatch` in `protocol.mjs` returns for every message carrying `method`; it answers a
+message with an `id`, but stores neither branch when the message has no `id`. Consequently
+`textDocument/publishDiagnostics`, progress, log messages and refresh notifications are outside
+the comparison even though both servers emit them during the measured session. Pull diagnostics
+are compared separately, so this is specifically the push/notification surface.
+
+### Blind spot 27b — each document has one immutable request phase [S]
+
+The case loop in `verify.mjs` sends `didOpen`, executes the case's requests, then sends `didClose`.
+It never sends `didChange`, configuration changes, watched-file notifications or workspace-folder
+changes, and it does not feed a completion/code-action/code-lens result into its corresponding
+resolve request. The robustness suite exercises malformed mid-edits and cancellation for rsvelte,
+but it is not differential and cannot reveal a state-transition difference from the official
+server.
+
+### Blind spot 27c — two response fields and machine paths are normalized away [S]
+
+`normalizeResponse` deletes `initialize.serverInfo` and pull-diagnostic `resultId` before the
+comparison. `replaceUris` rewrites the workspace prefix and the path prefix through
+`node_modules`. Version/name regressions in `serverInfo`, result-id stability, and a difference
+that exists only in the erased part of either absolute path therefore score equal by contract.
+
+### Blind spot 27d — collected projects run without executing their configuration [S]
+
+`verify.mjs` sets `initializationOptions.isTrusted` to false whenever the corpus suite is selected.
+This makes the four-repository sweep reproducible without installing or executing arbitrary
+`svelte.config.js` dependency graphs, but it also means a parity defect that requires one of those
+projects' preprocessors, aliases or default-language settings is outside that population. Trusted
+configuration and preprocess behavior is exercised by committed fixtures instead of the collected
+repositories.
+
+### Blind spot 27e — the per-request deadline decided the key, and had to stop [D]
+
+`requestBoth` converts a request that outlives its deadline into a stable transport-error object
+and cancels it. That object is then compared like a response, so **the deadline is part of the
+measurement**: at the original two seconds, one shard measured 2,304 timeouts in one run and 1,645
+in the next, and 201 of its 1,380 entries moved — 201 digests, 145 field counts and **53 divergent
+request counts**, with no entry appearing or disappearing. A wall-clock race against a loaded
+runner was being written into a shrink-only ratchet, so every later PR would have had to
+re-baseline. The deadline is now `--request-timeout-ms` (180 s), far above the response
+distribution — at 60 s the whole 1.9-million-request sweep produced 12 timeouts, against ~2,000
+per shard at 2 s — and **any** timeout fails the run after the artifact is written rather than
+being recorded as an observation. What remains outside the gate is a request that genuinely never
+answers: it now stops the sweep instead of scoring, which is louder but still not a comparison.
+
+### Blind spot 27f — the comparison is a property of the installed tree, not only of the sources [D]
+
+The `.svelte.tsx` shadow's TypeScript program reaches the repository root for ambient `@types`, so
+which symbols a template-position completion returns — and therefore the counts and digests this
+gate writes into its keys — depends on whether the workspace has been installed. Measured on one
+commit: the fixture suite yields **4380** ratchet keys with no root `node_modules` and **4397** with
+it (`fixtures/completion-at` alone moves from `count=1088` to `count=1095`), a +17-field /
+−2-request delta that reproduced exactly between the two CI jobs which ran this comparison in
+differently-provisioned checkouts — so only one of them could ever have satisfied the baseline the
+other wrote. Both jobs now install and `verify.mjs` refuses to run without it, which makes the
+dependence declared rather than latent; the gate still compares one provisioning of the tree, and a
+divergence that needs a different dependency graph is outside it.
+
+### Blind spot 27g — inside a corpus `(file, method)`, only the request count is observed [D]
+
+The corpus aggregate key was `divergentRequestCount` + raw field count + a digest over every sorted
+`(position, diff pointers)` observation, which reads as full sensitivity. It is not reproducible.
+Two complete nine-artifact sweeps of one revision, one language-tools revision and one corpus
+revision — measured after 27e removed the deadline race — disagree on **664 of 16,348 keys**: 661
+differ in the digest alone and 3 in the field count, while `divergentRequestCount` agrees on all
+664. The churn is not spread across methods: `textDocument/completion` owns 661 of the 664 (18.2%
+of its 3,632 keys) against **0 of 3,632** for `textDocument/definition` and 3 for
+`textDocument/hover`, so what varies is which completion items the two live servers return for the
+same position, not the harness. A shrink-only ratchet cannot hold a key that a re-run rewrites, so
+the field count and the digest are gone and the key is the request count alone; both sweeps then
+reproduce the committed baseline with 0 new and 0 stale.
+
+What that removes is real and is not recoverable from any other row: for a `(file, method)` already
+listed, a newly wrong field in an already-divergent response, a divergence moving to a different
+position, and a simultaneous fix-plus-regression are now all invisible. Only a change in **how many
+requests** diverge in that file is observed. The fixture and upstream suites are unaffected — they
+still key one normalized field each — so this is a corpus-population blind spot, not a gate-wide
+one. The unmeasured question is whether a stable projection of a completion response exists that
+would restore per-field sensitivity; nobody has looked, and n=2 sweeps bound the churn only from
+below.
 
 ---
 
@@ -2049,19 +2145,19 @@ fixture gate runs on every PR. `corpus-compat.yml` **is** path-filtered (`push:`
   documents and guards against. `capi.yml:26` carries the comment `# Unfiltered: see ci.yml.`
   immediately above a `paths:` filter (`:27-33`).
 
-### C2. Ratchet documentation is checked for 3 of 16 families
+### C2. Ratchet documentation coverage is declared, but the reasons are prose
 
-`known-failures-md-check.mjs` covers `known-failures.md` (`:37`), `warning-known-failures.md`
-(`:89`) and `matrix-known-failures.md` (`:153`). `ls compatibility/*.md` returns **16**.
+`known-failures-md-check.mjs` now enumerates every `*known-failures*`, `*excluded*` and
+`*not-comparable*` JSON on disk and fails if it is absent from `RATCHETS`. For every declaration
+it checks each count written beside the JSON filename, and `PARTITIONS` makes deletion or
+mis-summing of a declared cluster partition fail. This closes the former filename/count drift
+hole, including for the LSP ratchet.
 
-It runs from two places: `corpus-compat.yml:183` (path-filtered on both triggers, see C1) and
-`ci.yml`'s `ratchet-doc-guard` job (unfiltered). The second site exists because the assertion is
-over the **union** of two branches, which no `pull_request` run can observe — its merge ref is
-frozen when the event is created — so the only run that can decide it is the push to `main`, and
-the path filter meant most merges never started one.
-
-**[D] `compatibility/sourcemap-known-failures.md:158` says `| ratchet entries | 75 | **73** |`
-while `sourcemap-known-failures.json` has 74.** Already drifted, in an unchecked family.
+**[S] The checker never interprets a justification.** An accurate total beside a paragraph that
+explains none of its entries passes. A cluster assignment is exhaustive only when somebody first
+declares that partition in `PARTITIONS`; a new document with no partition line has no per-entry
+reason check. The remaining contract is therefore reviewable prose, not a machine-checked mapping
+from every ratchet key to a cause.
 
 ### C3. Population floors — who has one
 
@@ -2078,6 +2174,7 @@ while `sourcemap-known-failures.json` has 74.** Already drifted, in an unchecked
 | svelte2tsx fixtures | `total_tested >= 254`, absolute | `svelte2tsx_fixtures.rs:30,155` |
 | **css-prune sweep** | **none** | `css-prune-sweep.mjs:482` is a `console.log` |
 | check / check-e2e | scenarios > 0; **no diagnostic floor**, ratchets are `[]` | `check-verify.mjs:179`; gap at `:240` |
+| LSP differential | exact per-repository files, identifiers and requests; eight stable-hash shard union + one fixture artifact required to rebaseline | `corpus-population.json`; `artifacts.mjs`; `verify.mjs` postconditions |
 
 ### C7. An uninitialised corpus source shrinks the population silently, and no floor catches it
 
