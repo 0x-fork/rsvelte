@@ -719,10 +719,7 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
 
             let conv_object = {
                 {
-                    let __tmp = without_outer_source_span(
-                        convert_js_node(pa.get_js_node(*object), context),
-                        context,
-                    );
+                    let __tmp = convert_js_node(pa.get_js_node(*object), context);
                     context.arena.alloc_expr(__tmp)
                 }
             };
@@ -3680,7 +3677,7 @@ fn convert_block_statement(
     // Restore the shadow set to its state before this block was entered.
     context.state.shadowed_prop_names = saved_shadowed;
 
-    JsBlockStatement { body }
+    JsBlockStatement::with_body(body)
 }
 
 /// Add the top-level variable-declaration names from a JSON statement value to
@@ -3980,7 +3977,7 @@ fn convert_statement(stmt: &Value, context: &mut ComponentContext) -> Option<JsS
                 .get("block")
                 .and_then(|b| b.as_object())
                 .map(|b| convert_block_statement(b, context))
-                .unwrap_or_else(|| JsBlockStatement { body: Vec::new() });
+                .unwrap_or_else(|| JsBlockStatement::new());
             let handler = obj.get("handler").and_then(|h| {
                 let h_obj = h.as_object()?;
                 // Route the catch parameter through the full pattern converter so
@@ -3994,7 +3991,7 @@ fn convert_statement(stmt: &Value, context: &mut ComponentContext) -> Option<JsS
                     .get("body")
                     .and_then(|b| b.as_object())
                     .map(|b| convert_block_statement(b, context))
-                    .unwrap_or_else(|| JsBlockStatement { body: Vec::new() });
+                    .unwrap_or_else(|| JsBlockStatement::new());
                 Some(JsCatchClause { param, body })
             });
             let finalizer = obj
@@ -6241,7 +6238,7 @@ fn convert_block_statement_from_jsnode(
     // Restore the shadow set to its state before this block was entered.
     context.state.shadowed_prop_names = saved_shadowed;
 
-    JsBlockStatement { body }
+    JsBlockStatement::with_body(body)
 }
 
 /// Add the top-level variable-declaration names from a JsNode statement to
