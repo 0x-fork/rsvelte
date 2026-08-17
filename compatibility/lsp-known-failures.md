@@ -1,25 +1,26 @@
 # LSP differential known failures
 
-`lsp-known-failures.json` contains 32679 entries. Fixture and upstream entries identify one normalized
+`lsp-known-failures.json` contains 32673 entries. Fixture and upstream entries identify one normalized
 structural field for which `rsvelte-language-server` differs from the pinned official
 `svelte-language-server`, or from an upstream expected snapshot. A mismatched scalar key includes
 both value digests; a missing/extra field includes the present-side digest. Unmatched semantic
 array items are represented by their count and multiset digest.
 
-Partition of `lsp-known-failures.json` by key kind: `21792 + 10479 + 408` — real-world corpus
+Partition of `lsp-known-failures.json` by key kind: `21792 + 10473 + 408` — real-world corpus
 aggregates, per-field divergences against the pinned official server, and per-field divergences
 against an upstream expected snapshot. The three prefixes (`aggregate:corpus/`, `differential:`,
 `expected:`) are disjoint by construction in `merge-current.mjs`, which rejects an artifact
 carrying a key outside its suite's prefix.
 
-Partition of `lsp-known-failures.json` by request phase: `16348 + 16331`
+Partition of `lsp-known-failures.json` by request phase: `16342 + 16331`
 
 Opened-document keys and post-`didChange` keys. The edit phase re-runs the same request set, so the
-two addends differ by exactly the 17 session-level positive controls, which run once per session
-rather than once per unit; all 17 are `differential:` keys, and the corpus and upstream halves
-double exactly. The opened addend is unchanged from the pre-edit-phase baseline: the merge that
-introduced the second phase reported 16331 new entries and **0 stale**, so not one opened-phase key
-moved.
+two addends differ by exactly the session-level keys, which run once per session rather than once per
+unit; they are all `differential:` keys, and the corpus and upstream halves double exactly. There
+were 17 when the phase landed and there are 11 now, because six of them were `initialize` fields
+#3016 closed. The opened addend moved for the first time in that same PR: the merge that introduced
+the second phase reported 16331 new entries and **0 stale**, so until then not one opened-phase key
+had moved.
 
 Partition of `lsp-known-failures.json` entries under `aggregate:corpus/` by repository: `3696 + 7758 + 258 + 10080`
 
@@ -27,6 +28,20 @@ bits-ui, flowbite-svelte, melt-ui, shadcn-svelte, in that order. This is the cou
 that moves when a corpus submodule is bumped, and it is the reason the population floor is
 committed separately: a repository dropping out shrinks its cluster to zero and would otherwise
 read as a clean burndown.
+
+Ten entries sit under `differential:fixtures/capabilities|initialize|`, and they are the one cluster
+whose justification is per key rather than per class, because a declared capability is a promise a
+client acts on. Six of them are things this server does not do — no `codeAction/resolve` handler
+exists, and ten of upstream's eleven `executeCommandProvider` commands are tsgo refactors it does not
+offer plus the Svelte-4 migrator, which is out of scope — or additive declarations upstream simply
+omits: `positionEncoding`, `workspace.workspaceFolders`, `diagnosticProvider.identifier`, and the two
+`source.fixAll` code-action kinds. Two are the semantic-token legend, which stays narrowed to the
+token names the editor advertised because tsgo narrows its own legend the same way and its token data
+indexes the narrowed one; declaring upstream's legend here would misname every index past a dropped
+entry. The last two are `completionProvider.triggerCharacters`: rsvelte declares `" "` (upstream
+deliberately does not, and this server answers attribute completions there), and upstream's array
+lists `"@"` twice, which is a multiset a deduplicated list cannot match. The rest of that cluster
+was closed by #3016 rather than justified.
 
 The real-world corpus uses one compact entry per `(file, method)`, and its key records the divergent
 request count and nothing else. It carried a raw divergent-field count and a digest over every
