@@ -143,6 +143,9 @@ Ids are `pattern/issues/<file>`, `pattern/matrix/<axis>/<file>` and
 | `3044-const-fold-bigint-numeric.svelte` | [#3044](https://github.com/baseballyama/rsvelte/issues/3044) | Constant-folding gaps: `typeof` of a bigint const folds to `"bigint"`, numeric literals with separators/bases (`0b1010_1010`, `0o777`) fold, `1e-7` renders in JS spelling (`1e-7`, not `0.0000001`), and a `<svelte:head><title>` whose chunks all fold becomes a static string — a template-expression `1n` also used to become a phantom `unknown` identifier (an unparseable-at-runtime output) |
 | `3045-legacy-empty-reactive-void0.svelte` | [#3045](https://github.com/baseballyama/rsvelte/issues/3045) | Legacy byte-parity pair: `$: ;` still emits `$.legacy_pre_effect(() => {}, () => {})`, and under `<svelte:options immutable />` a `$:`-declared variable's backing source spells its default `void 0`, not `undefined` |
 | `3045-update-trailing-comments.svelte` | [#3045](https://github.com/baseballyama/rsvelte/issues/3045) | `x++; /* c */` keeps the comment INSIDE the rewritten call (`$.update(x /* c */)`) because upstream reuses the located argument node; a trailing `// c` after `x--;` forces the two-arg call multiline — and the printer must not count a trailing-comment newline as "multiline statement" when deciding blank-line margins |
+| `3055-server-string-escape.svelte` | [#3055](https://github.com/baseballyama/rsvelte/issues/3055) | A never-reassigned `$state('\\\'')` folded on the server by stripping the quotes RAW, so the template writer re-escaped the source spelling — `\'` rendered as three backslashes + quote. The fold now stores the cooked value, like every other constant site |
+| `3056-console-wrap-derived-by.svelte` | [#3056](https://github.com/baseballyama/rsvelte/issues/3056) | dev-mode `console.log(late)` where `late = $derived.by(() => expr)`: upstream evaluates the arrow's **expression body** (scope.js `case '$derived.by'`), so a body folding to a typed value does NOT get the `$.log_if_contains_state` wrap; rsvelte treated every `$derived.by` as unknown and wrapped. Semicolon-free on purpose — the statement boundaries come from ASI |
+| `3058-server-number-spelling.svelte` | [#3058](https://github.com/baseballyama/rsvelte/issues/3058) | Folded numbers must render in JS spelling: `$derived(1e-7)` / `$derived(1e21)` reached the SSR template as `0.0000001` / `1000000000000000000000` through `try_evaluate_with_constants`, which printed with Rust `Display` — the one fold path #3044 missed |
 
 ## `matrix/` — the axes around those repros
 
@@ -407,14 +410,22 @@ Themes (one directory per theme, one behaviour cluster per file):
 | `opaque-tokens/` | strings/comments/regexes carrying `console.`, `$.set(`/`$.prop(`, `$$async_hole`, `<script>`, `svelte-ignore`, `await`/`=>` — the tokens the phase-3 scanners search for | Scanner-bait: every token a raw byte-scan looks for, in a position where it is data |
 | `components/` | member/namespace/derived component instantiation, component-or-value dual use, spread events onto components, children whitespace forms | Component reference and instantiation forms |
 
-Files held back from this sweep (screened but **not** landed): four
+Files held back from this sweep (screened but **not** landed): five
 formatter-parity holds (`unicode-line-separators`, `nbsp-ideographic-space`,
-`regex-zoo`, `nested-script-style-elements`) blocked on rsvelte-fmt's
-U+2028/U+3000 handling (#3046), a wrap-width disagreement (#3047), and an oxfmt
-oracle crash respectively. The compiler divergences the sweep found (#3030–#3045)
-are all fixed and landed — each as a distilled repro in `issues/` plus, where the
-original zoo file carries more surface than the repro, the zoo file itself in a
-theme directory above.
+`regex-zoo`, `nested-script-style-elements`, `textarea-value-forms`) blocked on
+rsvelte-fmt's U+2028/U+3000 handling (#3046), a wrap-width disagreement (#3047),
+an oxfmt oracle crash, and unbroken whitespace-sensitive `<textarea>` tags
+(#3060) respectively; `comment-hostile-slots`, blocked on the rune-lowering
+comment-placement divergences it exposed (#3059 — a class the corpus gate
+deliberately ignores, `CommentPolicy::Ignore`); and the BigInt/number-mix shape,
+which crashes the OFFICIAL compiler with an uncoded TypeError (#3054,
+`upstream_issues/`). The compiler divergences the sweeps found (#3030–#3045,
+#3055–#3058) are all fixed and landed — each as a distilled repro in `issues/`
+plus, where the original zoo file carries more surface than the repro, the zoo
+file itself in a theme directory above. #3057 (a comment between an `{#each}`
+pattern and `}` compiled where official rejects) has no corpus repro by nature —
+its inputs are programs official rejects — and is pinned by
+`crates/rsvelte_core/tests/each_header_comments.rs` instead.
 
 ## Adding a file
 
