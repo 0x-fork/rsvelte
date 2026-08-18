@@ -703,8 +703,8 @@ impl<'a> Parser<'a> {
         match self.bytes[i] {
             b'/' => (
                 !matches!(self.bytes.get(i + 1), Some(b'*') | Some(b'/'))
-                    && !(self.options.reparse_leading_slash_expression
-                        && !self.block_close_shaped(i)),
+                    && (!self.options.reparse_leading_slash_expression
+                        || self.block_close_shaped(i)),
                 false,
             ),
             b':' => (
