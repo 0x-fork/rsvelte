@@ -474,6 +474,9 @@ fn visit_runes_mode_typed(
                                     None
                                 }
                             });
+                        if init_needs_expr_json(arg) {
+                            b.init_expr_json = Some(arg.to_json_string());
+                        }
                         b.initial_is_defined = is_expression_defined_typed(arg, arena);
                         b.initial_node_type = Some(arg.type_str().to_string());
                         if b.initial_node_type.as_deref() == Some("Identifier")
@@ -1043,6 +1046,10 @@ fn init_needs_expr_json(init: &JsNode) -> bool {
         | JsNode::UnaryExpression { .. }
         | JsNode::ConditionalExpression { .. }
         | JsNode::CallExpression { .. } => true,
+        // `const K = 1; let v = K` — upstream's `scope.evaluate` recurses
+        // through the alias into `K`'s own initializer, so the alias has to
+        // keep its init node.
+        JsNode::Identifier { name, .. } => name != "undefined",
         // A member read is UNKNOWN to `scope.evaluate` unless it is a
         // global-constant keypath (`Math.PI`); the consumers re-check that, and
         // asking here would miss a `Raw`-wrapped initializer. Matched by type
