@@ -944,7 +944,7 @@ impl<'a, 's> StateVarCollector<'a, 's> {
     /// |                    | non-reactive (in `non_reactive_vars`)        | reactive                                      |
     /// | `$state()` (empty) | `void 0`                                     | `$.state(void 0)`                             |
     /// | `$state(prim)`     | `prim`                                       | `$.state(prim)`                               |
-    /// | `$state(undefined)`| `void 0` (special case, matches text)        | `$.state(undefined)` (literal kept)           |
+    /// | `$state(undefined)`| `undefined` (source spelling kept, #3049)    | `$.state(undefined)` (literal kept)           |
     /// | `$state(obj/arr/…)`| `$.proxy(obj/arr/…)` if `should_proxy_ast`   | `$.state($.proxy(obj/arr/…))`                 |
     ///
     /// Proxy decision uses `should_proxy_ast(arg, &[])` — the text pipeline
@@ -977,18 +977,12 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         // Snapshot a few facts from the original argument AST *before* walking,
         // because the walk drains/replaces inner spans that we want to query
         // by node kind here (not by post-rewrite text).
-        let (needs_proxy, is_explicit_undefined) = if let Some(arg) = call.arguments.first() {
-            let arg_expr = arg.as_expression();
-            let needs_proxy = arg_expr
+        let needs_proxy = if let Some(arg) = call.arguments.first() {
+            arg.as_expression()
                 .map(|e| should_proxy_ast(e, self.non_proxy_vars, self.dev))
-                .unwrap_or(false);
-            let is_undef = matches!(
-                arg_expr,
-                Some(Expression::Identifier(id)) if id.name == "undefined"
-            );
-            (needs_proxy, is_undef)
+                .unwrap_or(false)
         } else {
-            (false, false)
+            false
         };
 
         // Walk the argument first so any inner state-var refs get `$.get(...)`
@@ -1013,13 +1007,9 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         let replacement = if is_non_reactive {
             if needs_proxy {
                 format!("$.proxy({})", arg_text)
-            } else if is_explicit_undefined {
-                // Special case from the old text path: in the non-reactive
-                // branch, `$state(undefined)` → `void 0` (not `undefined`).
-                // The reactive branch keeps the literal as-is, so we only
-                // apply this rewrite when non-reactive.
-                "void 0".to_string()
             } else {
+                // Upstream keeps the spelling the source used — an explicit
+                // `$state(undefined)` stays `undefined`, never `void 0` (#3049).
                 arg_text
             }
         } else if needs_proxy {
@@ -3319,6 +3309,26 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
             && self.is_active_rest_prop(obj.name.as_str())
         {
             self.rest_operand_member_starts.insert(member.span.start);
+        }
+
+        // --- Prop member updates (bindable props): `p.a++` →
+        // `p(p().a++, true)`, mirroring the assignment branch (#3048). ---
+        let member_object = match &expr.argument {
+            SimpleAssignmentTarget::StaticMemberExpression(m) => Some(&m.object),
+            SimpleAssignmentTarget::ComputedMemberExpression(m) => Some(&m.object),
+            _ => None,
+        };
+        if let Some(object) = member_object
+            && let Some(obj_name) = Self::extract_root_object_from_expr(object)
+            && self.is_active_prop_var(&obj_name)
+            && !self.non_bindable_prop_vars.contains(&obj_name)
+        {
+            let (full_start, full_end) = self.effective_span(expr.span.start, expr.span.end);
+            walk::walk_update_expression(self, expr);
+            let full_text = self.apply_and_drain_inner_replacements(full_start, full_end);
+            let replacement = format!("{}({}, true)", obj_name, full_text);
+            self.add_replacement(full_start, full_end, replacement);
+            return;
         }
 
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = &expr.argument {

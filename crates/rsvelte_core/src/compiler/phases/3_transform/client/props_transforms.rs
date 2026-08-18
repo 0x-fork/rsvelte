@@ -3635,7 +3635,12 @@ impl PropMutationSites {
                 continue;
             }
             if let Some((after, chain)) = scan_member_chain_names(source, chain_start)
-                && let Some(value_start) = mutation_value_start(source, after)
+                && let Some(value_start) = mutation_value_start(source, after).or_else(|| {
+                    // A PREFIX update (`--p.deep.c`) has its operator before
+                    // the identifier; the site's position stays the identifier.
+                    let head = source[..start].trim_end();
+                    (head.ends_with("++") || head.ends_with("--")).then_some(after)
+                })
             {
                 let (line, column) =
                     crate::compiler::phases::phase3_transform::utils::locate_in_source(
