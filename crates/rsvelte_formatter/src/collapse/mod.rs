@@ -135,10 +135,10 @@ pub fn collapse_pure_text_elements(
     }
     // Collapse is a best-effort post-pass over the already-formatted output. If
     // that output can't be re-parsed, skip collapse and return it as-is rather
-    // than failing the whole format — the JS formatter can legitimately emit
-    // markup that rsvelte's (Svelte-faithful) parser rejects but the oxfmt oracle
-    // accepts, e.g. stripping the parens off `{(/regex/).test(x)}` to a `{/…}`
-    // expression that looks like a block close.
+    // than failing the whole format. (The known-legal case — the JS formatter
+    // stripping the parens off `{(/regex/).test(x)}` to a `{/…}` expression that
+    // looks like a block close — is handled by `reparse_leading_slash_expression`
+    // below rather than skipped, so the width passes still run on it.)
     // Re-parse the formatted output in the same dialect the document was formatted
     // in. A TS document (incl. one that reached TS via the formatter's force-TS
     // fallback) emits TS, so a JS-only re-parse would fail and silently skip
@@ -155,6 +155,11 @@ pub fn collapse_pure_text_elements(
         // expressions (only their source spans, which survive on the lazy
         // variant), so defer the oxc script/CSS parse the re-parse never uses.
         defer_script_parse: true,
+        // The JS printer legally emits `{/^x/y.test(a)}` (parens stripped off a
+        // leading regex) — text the strict parser reads as a block close. The
+        // re-parse must still see the tree, or every width pass silently skips
+        // the file (#3047).
+        reparse_leading_slash_expression: true,
         ..ParseOptions::default()
     };
     // The children-port helpers rebuild elements without carrying `FormatOptions`;

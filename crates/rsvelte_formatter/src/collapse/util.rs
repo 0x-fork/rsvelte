@@ -21,6 +21,7 @@ pub(super) fn indent_config(options: &FormatOptions) -> (String, usize) {
 pub(super) fn parse_formatted(formatted: &str) -> Option<rsvelte_core::ast::template::Root<'_>> {
     let opts = ParseOptions {
         skip_non_css_lang_style: true,
+        reparse_leading_slash_expression: true,
         ..ParseOptions::default()
     };
     parse(formatted, &rsvelte_core::Allocator::default(), opts)

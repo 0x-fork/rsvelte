@@ -521,7 +521,12 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        if self.match_byte(b'/') && !self.match_str("/*") && !self.match_str("//") {
+        if self.match_byte(b'/')
+            && !self.match_str("/*")
+            && !self.match_str("//")
+            && !(self.options.reparse_leading_slash_expression
+                && !self.block_close_shaped(self.index))
+        {
             // Block close (but not JS comment) - should not happen at top level
             return Ok(None);
         }
