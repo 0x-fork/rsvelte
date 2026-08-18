@@ -420,8 +420,13 @@ fn visit_identifier_inner(
     // Corresponds to Svelte's Identifier.js L154-159
     if context.in_reactive_declaration {
         let binding = &context.analysis.root.bindings[binding_idx];
-        // Check if binding is in module scope (scope_index == 0) and is reassigned
-        if binding.scope_index == 0 && binding.reassigned {
+        // Upstream declares synthetic store subscriptions in the *instance* scope, so
+        // they never satisfy its `binding.scope === module.scope` test; rsvelte parks
+        // them in scope 0 alongside the real module-script declarations.
+        if binding.scope_index == 0
+            && binding.reassigned
+            && !matches!(binding.kind, BindingKind::StoreSub)
+        {
             // Route through emit_warning so a `svelte-ignore` in scope can
             // suppress it (H-118); a direct push bypasses the ignore stack.
             context.emit_warning(

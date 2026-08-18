@@ -34,8 +34,8 @@ compilers already run on every entry.
 
 ## Why the four per-target files are currently identical
 
-`warning-known-failures.<target>.json` holds the same 26 entries on all four,
-and `warning-position-known-failures.<target>.json` the same 4 entries. That is not a
+`warning-known-failures.<target>.json` holds the same 14 entries on all four,
+and `warning-position-known-failures.<target>.json` the same 1 entry. That is not a
 bug in the partitioning — almost every warning is produced in Phase 1/2 (parse
 and analyze), before the target is consulted, so a divergence shows up on all
 four targets at once. Only target-specific codes (`node_invalid_placement_ssr`
@@ -46,24 +46,24 @@ and stays sensitive to an entry that starts diverging on a second target while
 already listed for the first. Expect all eight files to move together in a
 burn-down PR.
 
-## Warning codes (`warning-known-failures.<target>.json`, 26 entries each)
+## Warning codes (`warning-known-failures.<target>.json`, 14 entries each)
 
 The multiset of warning **codes** differs: rsvelte warns where upstream does
 not, or stays silent where upstream warns. This is a semantic bug — a user sees
 noise they cannot suppress, or misses a diagnostic they should have seen.
 
-Not every entry is equally bad. Of the 26 entries that still diverge, **4 are
+Not every entry is equally bad. Of the 14 entries that still diverge, **4 are
 under-warnings** — rsvelte stays silent where upstream warns
 (`state_referenced_locally` ×2, `options_missing_custom_element` ×1, and
-`perf_avoid_nested_class` ×2). The other
-22 are noise the user cannot suppress — 81 tuples over four codes
-(`reactive_declaration_module_script_dependency` 62, `component_name_lowercase`
-10, `export_let_unused` 7, `state_referenced_locally` 2). Both are defects, but a
+`perf_avoid_nested_class` ×1). The other
+10 are noise the user cannot suppress — 19 tuples over three codes
+(`component_name_lowercase` 10, `export_let_unused` 7,
+`state_referenced_locally` 2). Both are defects, but a
 missing diagnostic and an extra one fail differently, and the ratchet count alone
 does not distinguish them; no entry diverges in both directions at once — which
 is what lets the two counts be added:
 
-Partition of `warning-known-failures.<target>.json` by direction: `4 + 22`
+Partition of `warning-known-failures.<target>.json` by direction: `4 + 10`
 
 The other three under-warnings were the whole of the
 `a11y_no_static_element_interactions` cluster
@@ -78,11 +78,21 @@ Clusters identified so far:
 
 - **`component_name_lowercase` over-warning** — rsvelte flags lowercase names
   that upstream accepts (seen across `svelte-maplibre` example routes).
-- **`reactive_declaration_module_script_dependency` over-warning** —
-  concentrated in the Svelte migrate fixtures, which are out of scope for
-  codegen but still compile here.
 
-The `svelte_self_deprecated` half of that last cluster is fixed: the warning is
+The **`reactive_declaration_module_script_dependency` over-warning** that used to
+head this list is gone, and its 62 tuples were one predicate, not the "migrate
+fixtures" story the clustering suggested. Upstream's rule is
+`binding.scope === analysis.module.scope && binding.reassigned` inside a `$:`
+statement, and it declares the synthetic `$store` subscription binding in
+`instance.scope` (`2-analyze/index.js`), so a store auto-subscription can never
+satisfy it. rsvelte parks that synthetic binding in scope 0 alongside the real
+module-script declarations, so **every** `$: $store = …` warned. That took 12
+entries off this ratchet — 8 of them real-world files (`layercake`,
+`svelte-form-builder`, four `svelte-ux` components, `svelthree`), which is why
+"concentrated in the migrate fixtures" was the wrong read: the fixtures were
+merely where the entries were counted from.
+
+The `svelte_self_deprecated` half of the old cluster is fixed: the warning is
 gated on `analysis.runes` upstream, and rsvelte emitted it in legacy mode too,
 where `<svelte:self>` is the supported spelling. That removed 19 entries from
 each of the three files, verified per entry against official 5.56.8 on all three
@@ -102,27 +112,28 @@ from where the entries happened to cluster in the corpus rather than from
 upstream's control flow — worth remembering when reading the clusters above,
 which were written the same way.
 
-## Warning positions (`warning-position-known-failures.<target>.json`, 4 entries each)
+## Warning positions (`warning-position-known-failures.<target>.json`, 1 entry each)
 
-The codes agree but a `(line, column)` does not. Four entries remain, all the
-same residual shape and all the same cause — rsvelte reports **no position at
+The codes agree but a `(line, column)` does not. One entry remains, the same
+residual shape as the three cleared before it — rsvelte reports **no position at
 all** (`?:?`) where upstream reports one:
 
 | entry | code |
 |---|---|
 | `svelte/…/migrate/samples/accessors/output.svelte` | `options_deprecated_immutable` |
-| `svelte/…/runtime-browser/custom-elements-samples/extended-builtin/main.svelte` | `attribute_avoid_is` |
-| `svelte/…/runtime-runes/samples/custom-element-attributes/main.svelte` | `attribute_avoid_is` |
-| `svelte/…/runtime-runes/samples/element-is-attribute/main.svelte` | `attribute_avoid_is` |
 
-Both codes are raised from sites that never received the span-attachment pass:
-`attribute_avoid_is` from the attribute walk in `regular_element.rs`, and
-`options_deprecated_immutable` from the `<svelte:options>` reader. Each is an
-attach-the-span fix at one emission site.
+It is raised from a site that never received the span-attachment pass: the
+`<svelte:options>` reader. An attach-the-span fix at one emission site.
+
+The three `attribute_avoid_is` entries were the same shape and are fixed:
+upstream passes the attribute node (`2-analyze/visitors/shared/element.js`), and
+the emission site in `2_analyze/visitors/shared/element.rs` already had
+`attr_start`/`attr_end` in hand from the enclosing attribute loop — the two
+neighbouring warnings raised from that same loop were already spanned.
 
 ### How the backlog was cleared
 
-This ratchet held **528** entries per target and now holds 4. Two systemic causes
+This ratchet held **528** entries per target and now holds 1. Two systemic causes
 were measured over the 625 entries listed before the a11y half was fixed, which
 carried 967 mismatching tuples between them:
 

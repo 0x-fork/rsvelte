@@ -133,7 +133,7 @@ pub fn validate_element(
 
                 // Warn about 'is' attribute
                 if attr.name == "is" {
-                    context.emit_warning(warnings::attribute_avoid_is());
+                    context.emit_warning(warnings::attribute_avoid_is().at(attr_start, attr_end));
                 }
 
                 // Check for React-style attributes
