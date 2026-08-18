@@ -5073,7 +5073,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
                     let value_start = derived_pos + derived_pattern.len();
                     let after_paren = &full_text[value_start..];
                     if let Some(value_end) = find_matching_paren_server(after_paren) {
-                        let value = after_paren[..value_end].to_string();
+                        let value = strip_trailing_arg_comma(&after_paren[..value_end]).to_string();
                         let sanitized_name = sanitize_identifier(&derived_field_name);
                         let private_name = if derived_field_is_private {
                             format!("#{}", sanitized_name)
@@ -5117,7 +5117,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
                     let value_start = sp + state_pattern.len();
                     let after_paren = &full_text[value_start..];
                     if let Some(value_end) = find_matching_paren_server(after_paren) {
-                        let value = after_paren[..value_end].trim();
+                        let value = strip_trailing_arg_comma(&after_paren[..value_end]).trim();
                         has_state_fields = true;
                         if value.is_empty() {
                             members.push(ClassMember::Field(state_field_name.clone()));
@@ -5386,7 +5386,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
                 let after_paren = &trimmed[value_start..];
 
                 if let Some(value_end) = find_matching_paren_server(after_paren) {
-                    let value = after_paren[..value_end].to_string();
+                    let value = strip_trailing_arg_comma(&after_paren[..value_end]).to_string();
                     let sanitized_name = sanitize_identifier(&name);
                     let private_name = if is_private {
                         format!("#{}", sanitized_name)
@@ -5440,7 +5440,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
             let after_paren = &trimmed[value_start..];
 
             if let Some(value_end) = find_matching_paren_server(after_paren) {
-                let value = after_paren[..value_end].trim();
+                let value = strip_trailing_arg_comma(&after_paren[..value_end]).trim();
                 has_state_fields = true;
                 if value.is_empty() {
                     members.push(ClassMember::Field(field_name.to_string()));
@@ -5527,7 +5527,8 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
                         let after_paren = &trimmed[value_start..];
 
                         if let Some(value_end) = find_matching_paren_server(after_paren) {
-                            let value = after_paren[..value_end].to_string();
+                            let value =
+                                strip_trailing_arg_comma(&after_paren[..value_end]).to_string();
                             let sanitized = sanitize_identifier(&name);
                             let private_ref = if is_private {
                                 format!("#{}", sanitized)
@@ -5584,7 +5585,7 @@ pub(crate) fn transform_class_fields_server(script: &str) -> String {
                     let after_paren = &trimmed[value_start..];
 
                     if let Some(value_end) = find_matching_paren_server(after_paren) {
-                        let value = after_paren[..value_end].trim();
+                        let value = strip_trailing_arg_comma(&after_paren[..value_end]).trim();
                         has_state_fields = true;
 
                         if value.is_empty() {
@@ -5978,6 +5979,25 @@ fn transform_private_derived_accesses_server(
     }
 
     result
+}
+
+/// Strip an argument-list trailing comma from an extracted rune-call argument
+/// (`$state(expr,)` → `expr`). The slice ends at the call's matching `)`, so a
+/// trailing CODE `,` can only be the argument list's, never part of the
+/// expression; without this the unwrapped field prints `expr,;`.
+fn strip_trailing_arg_comma(value: &str) -> &str {
+    let mut last_code: Option<(usize, u8)> = None;
+    for (i, c) in
+        crate::compiler::phases::phase3_transform::shared::js_scan::code_bytes(value.as_bytes())
+    {
+        if !c.is_ascii_whitespace() {
+            last_code = Some((i, c));
+        }
+    }
+    match last_code {
+        Some((i, b',')) => value[..i].trim_end(),
+        _ => value,
+    }
 }
 
 fn find_matching_paren_server(s: &str) -> Option<usize> {
