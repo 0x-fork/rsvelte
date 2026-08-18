@@ -408,13 +408,29 @@ fn visit_runes_mode_typed(
         }
         // For $state/$state.raw/$derived, extract the rune argument as
         // the binding's initial value
-        if matches!(rune_name.as_str(), "$state" | "$state.raw" | "$derived")
-            && let Some(init) = init_node
+        if matches!(
+            rune_name.as_str(),
+            "$state" | "$state.raw" | "$derived" | "$derived.by"
+        ) && let Some(init) = init_node
         {
             let rune_arg = match init {
                 JsNode::CallExpression { arguments, .. } => {
                     let args = arena.get_js_children(*arguments);
-                    args.first()
+                    if rune_name == "$derived.by" {
+                        // Upstream evaluates the arrow's EXPRESSION body
+                        // (scope.js `case '$derived.by'`); a block body stays
+                        // unknown, so store nothing for it.
+                        match args.first() {
+                            Some(JsNode::ArrowFunctionExpression {
+                                body,
+                                expression: true,
+                                ..
+                            }) => Some(arena.get_js_node(*body)),
+                            _ => None,
+                        }
+                    } else {
+                        args.first()
+                    }
                 }
                 _ => None,
             };
@@ -432,7 +448,7 @@ fn visit_runes_mode_typed(
                     if let Some(bi) = bi {
                         let b = &mut context.analysis.root.bindings[bi];
                         b.initial = extract_literal_string_typed(arg).or_else(|| {
-                            if rune_name == "$derived" {
+                            if rune_name == "$derived" || rune_name == "$derived.by" {
                                 Some(arg.to_json_string())
                             } else {
                                 None
