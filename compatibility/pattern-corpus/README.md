@@ -17,8 +17,9 @@ is where such a shape is written down once so it can never regress silently, and
 where the axes *around* it are enumerated so the neighbouring cases are covered
 too.
 
-Ids are `pattern/issues/<file>` and `pattern/matrix/<axis>/<file>`; run just this
-source with `node scripts/compat-corpus/compile.mjs --filter pattern/`.
+Ids are `pattern/issues/<file>`, `pattern/matrix/<axis>/<file>` and
+`pattern/adversarial/<theme>/<file>`; run just this source with
+`node scripts/compat-corpus/compile.mjs --filter pattern/`.
 
 ## Conventions
 
@@ -357,6 +358,43 @@ negative control that the decoding did not regress.
 | `unknown-escape-passthrough.svelte` | `\/`, `\@` and a **multi-byte** `\é` — the escape is dropped, the character kept |
 | `attribute-and-mixed-text.svelte` | the same value folded into an attribute, into a quasi between text, and twice in one chunk |
 | `module-script-const.svelte` | the const is declared in `<script module>` rather than the instance script |
+
+## `adversarial/` — proactive adversarial sweep
+
+Unlike `issues/` (one repro per **fixed** divergence) and `matrix/` (axes around
+those repros), everything under `adversarial/<theme>/` was written **before** any
+divergence was reported: a deliberate sweep of hostile-but-valid component shapes
+— exotic syntax, scanner-bait strings, shadowed globals, spec-corner CSS — each
+confirmed byte-equal on all four targets when it landed, so it pins behaviour the
+pinned repositories never exercise. The sweep that produced these files also
+surfaced ~20 real divergences; those files land in `issues/` with their fixes,
+not here. A file here is named for its shape, not for an issue number, because
+there is none.
+
+Themes (one directory per theme, one behaviour cluster per file):
+
+| Theme | Files | What the theme covers |
+|---|---|---|
+| `text-and-entities/` | unicode identifiers, emoji/ZWJ text, `&#123;` braces, expression/text adjacency, comment forms, explicit whitespace expressions, inline blocks splitting words | Text, character references and whitespace at markup level |
+| `control-flow/` | each over `{ length }`/`Array(n)`/ternary collections, itemless `{#each}`, deep else-if chains, all `{#await}` clause forms, nested await-in-each-in-if with shadowed names, `{#key}` over sequences, empty blocks, `{@const}` forms, comments between block clauses | Every block form, empty and nested, with shadowing |
+| `snippets/` | self-recursive snippet, `{@render}` callee forms (`?.()`, ternary, `??`), module-exported snippet, snippets as expression props, snippet declared inside `{#each}` closing over the item | Snippet declaration/reference topology |
+| `bindings/` | function bindings (`bind:value={get, set}`), `bind:this` into members/arrays, `bind:group` in nested each and with object values, media/dimension bindings, computed-member binding targets, per-type `bind:value` inputs, component bind combinations | Every binding form against every target shape |
+| `events-actions-transitions/` | legacy modifier stacks, action zoo, crossfade/flip/custom transitions, `onclickcapture`/intro-outro events, item-dependent transition params, `{@attach}` forms | Directives whose value is a function |
+| `runes/` | `$state.raw`/`$state.snapshot`/`$derived.by`/`$effect.pre`/`$props.id()`, `$bindable` defaults, `$inspect(...).with`/`$inspect.trace`, class rune fields, object-member getters/setters in `$state`, every compound assignment operator, `svelte/reactivity` builtins, reserved-word prop names, context/lifecycle imports | Rune member forms and mutation shapes |
+| `legacy/` | store exotica (`$store` writes, module-script stores), slot forwarding with `svelte:fragment`/`let:`, renamed exports (`export { a as b }`), `createEventDispatcher`/`beforeUpdate`, `$: $store =` writes, component bind chains, `svelte:self`, stores in handlers | Legacy-mode surface the runes corpus cannot reach |
+| `modules/` | `.svelte.(js\|ts)` classes (expressions, nested, default-export), multiline rune fields, getters/setters over module state, `$effect.root` factories, TS-stripped runes, rune-name tokens inside strings/regexes | The `compileModule` pipeline |
+| `css/` | nested at-rules (`@layer`/`@container`/`@supports`), `-global-` keyframes, `:global()` placements, Tailwind-style escaped selectors, selector zoo (`:not(a,b)`, `::marker`, `:dir`), `@font-face`/`@property`/mid-sheet `@charset`, strings containing `}`/`{`, custom-property values, scoped class merging, `--custom-prop` component passing | The CSS pruning/transform surface |
+| `elements/` | `<svelte:element>` directive stacks, `svelte:window`/`document`/`body`/`head` combos, `<svelte:boundary>`, `svelte:options` (runes/namespace/css-injected/preserveWhitespace), MathML, `foreignObject` namespace switching, `<template>`/`<noscript>`, dialog/popover/search, iframe/object security attrs, table structure, void elements, `<pre>`/`<textarea>` whitespace, custom elements in markup, srcset | Element-specific parser and codegen paths |
+| `attributes/` | spread clobbering, unusual attribute names (`xml:lang`, camelCase SVG), directive-named plain attributes (`bind={x}` as a prop), boolean attribute values (`disabled={0}`, `checked={NaN}`), `class` array/object forms, global attributes (`itemscope`, `popover`, `is`) | Attribute normalization and merging |
+| `expressions/` | optional-chain zoo, nested template literals, arrow/generator edge shapes, top-level `try`/`switch`/`do-while`/labels, hoisting order (use before declaration), module/instance interplay, rune-keyword-alike identifier names, shadowed `window`/`document`/`console`, markup syntax inside strings, TS erasure incl. `generics` attribute | The JS expression surface inside and around the template |
+| `opaque-tokens/` | strings/comments/regexes carrying `console.`, `$.set(`/`$.prop(`, `$$async_hole`, `<script>`, `svelte-ignore`, `await`/`=>` — the tokens the phase-3 scanners search for | Scanner-bait: every token a raw byte-scan looks for, in a position where it is data |
+| `components/` | member/namespace/derived component instantiation, component-or-value dual use, spread events onto components, children whitespace forms | Component reference and instantiation forms |
+
+Files held back from this sweep (screened but **not** landed): the ~20 confirmed
+compiler divergences (land with their fixes in `issues/`), and four formatter-parity
+holds (`unicode-line-separators`, `nbsp-ideographic-space`, `regex-zoo`,
+`nested-script-style-elements`) blocked on rsvelte-fmt's U+2028/U+3000 handling, a
+wrap-width disagreement, and an oxfmt oracle crash respectively.
 
 ## Adding a file
 
