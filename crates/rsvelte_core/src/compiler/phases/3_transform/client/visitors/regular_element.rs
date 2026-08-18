@@ -138,6 +138,37 @@ fn process_element_let_directives(
             // each_block.rs / snippet_block.rs). e.g. `let { data } = $props()`
             // outside + `<tbody slot="…" let:data>` must read `$.get(data)`.
             context.state.shadowed_prop_names.insert(name.clone());
+        } else if let Some((derived_name, binding_names, const_stmt)) =
+            crate::compiler::phases::phase3_transform::client::visitors::shared::component::build_destructured_let_directive(
+                let_dir, context,
+            )
+        {
+            // Destructured case (`let:cell={[first, ...rest]}`): emit the
+            // `$.derived` destructure const and route each extracted binding's
+            // reads through it (`$.get(cell).first`).
+            context.state.let_directives.push(const_stmt);
+            for binding_name in &binding_names {
+                let name = binding_name.to_string();
+                saved_transforms.push((name.clone(), context.state.transform.get(&name).cloned()));
+                context.state.transform.insert(
+                    name.clone(),
+                    crate::compiler::phases::phase3_transform::client::types::IdentifierTransform {
+                        read: Some(|arena, node| {
+                            b::call(arena, b::member_path(arena, "$.get"), vec![node])
+                        }),
+                        read_source: Some(derived_name.clone()),
+                        assign: None,
+                        mutate: None,
+                        update: None,
+                        skip_proxy: false,
+                        is_defined: false,
+                        is_reactive: true,
+                        replacement_id: None,
+                    },
+                );
+                context.state.transform_deep_read.insert(name.clone(), ());
+                context.state.shadowed_prop_names.insert(name);
+            }
         }
     }
 
