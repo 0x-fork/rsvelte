@@ -141,3 +141,18 @@ fn pre_block_reformat_survives_ts_in_plain_script() {
         "expected the block pass to run with the TS body intact:\n{out}"
     );
 }
+
+#[test]
+fn unicode_separators_in_text_are_content() {
+    // U+2028/U+2029/U+3000 are Unicode whitespace but NOT HTML whitespace
+    // (`[\t\n\f\r ]`): prettier keeps them verbatim, so collapsing or
+    // trimming them changes what the browser renders (#3046).
+    let src = "<p>a\u{2028}b</p>\n<p>c\u{2029}d</p>\n";
+    assert_eq!(fmt(src), "<p>a\u{2028}b</p>\n<p>c\u{2029}d</p>");
+}
+
+#[test]
+fn ideographic_space_at_text_edges_survives() {
+    let src = "<p>\u{3000}x\u{3000}</p>\n";
+    assert_eq!(fmt(src), "<p>\u{3000}x\u{3000}</p>");
+}

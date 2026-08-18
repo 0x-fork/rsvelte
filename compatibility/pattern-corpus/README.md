@@ -399,7 +399,7 @@ Themes (one directory per theme, one behaviour cluster per file):
 
 | Theme | Files | What the theme covers |
 |---|---|---|
-| `text-and-entities/` | unicode identifiers, emoji/ZWJ text, `&#123;` braces, expression/text adjacency, comment forms, explicit whitespace expressions, inline blocks splitting words | Text, character references and whitespace at markup level |
+| `text-and-entities/` | unicode identifiers, emoji/ZWJ text, `&#123;` braces, expression/text adjacency, comment forms, explicit whitespace expressions, inline blocks splitting words, U+2028/U+2029 separators and NBSP/U+3000 in text and attributes (non-HTML whitespace the formatter must keep — #3046) | Text, character references and whitespace at markup level |
 | `control-flow/` | each over `{ length }`/`Array(n)`/ternary collections, itemless `{#each}`, deep else-if chains, all `{#await}` clause forms, nested await-in-each-in-if with shadowed names, `{#key}` over sequences, empty blocks, `{@const}` forms, comments between block clauses | Every block form, empty and nested, with shadowing |
 | `snippets/` | self-recursive snippet, `{@render}` callee forms (`?.()`, ternary, `??`), module-exported snippet, snippets as expression props, snippet declared inside `{#each}` closing over the item | Snippet declaration/reference topology |
 | `bindings/` | function bindings (`bind:value={get, set}`), `bind:this` into members/arrays, `bind:group` in nested each and with object values, media/dimension bindings, computed-member binding targets, per-type `bind:value` inputs, component bind combinations | Every binding form against every target shape |
@@ -414,12 +414,13 @@ Themes (one directory per theme, one behaviour cluster per file):
 | `opaque-tokens/` | strings/comments/regexes carrying `console.`, `$.set(`/`$.prop(`, `$$async_hole`, `<script>`, `svelte-ignore`, `await`/`=>` — the tokens the phase-3 scanners search for | Scanner-bait: every token a raw byte-scan looks for, in a position where it is data |
 | `components/` | member/namespace/derived component instantiation, component-or-value dual use, spread events onto components, children whitespace forms | Component reference and instantiation forms |
 
-Files held back from this sweep (screened but **not** landed): five
-formatter-parity holds (`unicode-line-separators`, `nbsp-ideographic-space`,
-`regex-zoo`, `nested-script-style-elements`, `textarea-value-forms`) blocked on
-rsvelte-fmt's U+2028/U+3000 handling (#3046), a wrap-width disagreement (#3047),
+Files held back from this sweep (screened but **not** landed): three
+formatter-parity holds (`regex-zoo`, `nested-script-style-elements`,
+`textarea-value-forms`) blocked on a wrap-width disagreement (#3047),
 an oxfmt oracle crash, and unbroken whitespace-sensitive `<textarea>` tags
-(#3060) respectively; `comment-hostile-slots`, blocked on the rune-lowering
+(#3060) respectively (`unicode-line-separators` and `nbsp-ideographic-space`
+landed in `text-and-entities/` once #3046 fixed the formatter's whitespace
+class); `comment-hostile-slots`, blocked on the rune-lowering
 comment-placement divergences it exposed (#3059 — a class the corpus gate
 deliberately ignores, `CommentPolicy::Ignore`); and the BigInt/number-mix shape,
 which crashes the OFFICIAL compiler with an uncoded TypeError (#3054,

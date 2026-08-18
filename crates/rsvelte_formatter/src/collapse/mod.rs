@@ -59,10 +59,11 @@ use state::{build_orig_text_map, in_pre_content, orig_text_for, with_orig_text, 
 use util::{
     apply_edits, attribute_span, child_fragments, current_column, did_self_close,
     element_container, element_source_empty, ends_with_space_no_break, fragment_has_prose_word,
-    indent_config, is_block_display, is_component_tag, is_html_void_element, is_inline_block,
-    is_inline_node, is_inline_regular_element, is_whitespace_preserving, leading_linebreaks,
-    node_end, node_start, omit_softline_allowed, parse_formatted, starts_with_space_no_break,
-    text_end, text_start, trailing_linebreaks, trims_edge_whitespace,
+    indent_config, is_block_display, is_component_tag, is_html_void_element, is_html_ws,
+    is_inline_block, is_inline_node, is_inline_regular_element, is_whitespace_preserving,
+    leading_linebreaks, node_end, node_start, omit_softline_allowed, parse_formatted,
+    split_html_ws, starts_with_space_no_break, text_end, text_start, trailing_linebreaks,
+    trim_html_ws_end, trim_html_ws_start, trims_edge_whitespace,
 };
 
 pub use util::template_node_span;

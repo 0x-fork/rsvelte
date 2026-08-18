@@ -583,7 +583,7 @@ pub(super) fn try_collapse(
     let raw = out.get(content_start as usize..content_end as usize)?;
     let had_lead = raw.starts_with([' ', '\t', '\n', '\r']);
     let had_trail = raw.ends_with([' ', '\t', '\n', '\r']);
-    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = super::split_html_ws(raw).collect::<Vec<_>>().join(" ");
 
     // Components (`<Button>`, `<Foo.Bar>`, `<svelte:*>`) and block-display
     // elements are NOT whitespace-sensitive: boundary whitespace between the tag
@@ -805,7 +805,7 @@ pub(super) fn try_collapse(
             let mut fill_lines: Vec<String> = Vec::new();
             let mut cur = String::new();
             let avail_for = |n: usize| if n == 0 { first_avail } else { cont_avail };
-            for word in collapsed.split_whitespace() {
+            for word in super::split_html_ws(&collapsed) {
                 if cur.is_empty() {
                     cur.push_str(word);
                 } else if cur.visual_width(tw) + 1 + word.visual_width(tw)
@@ -892,7 +892,7 @@ pub(super) fn try_collapse(
                 let open_doc = node
                     .and_then(|n| build_open_attr_doc(out, n, tag, true))
                     .unwrap_or_else(|| Doc::Text(open_no_bracket.to_string()));
-                let words: Vec<&str> = collapsed.split_whitespace().collect();
+                let words: Vec<&str> = super::split_html_ws(&collapsed).collect();
                 if !words.is_empty() {
                     // Build Fill([word1, Line, word2, Line, …, wordN])
                     let mut fill_parts: Vec<Doc> = Vec::with_capacity(words.len() * 2 - 1);
