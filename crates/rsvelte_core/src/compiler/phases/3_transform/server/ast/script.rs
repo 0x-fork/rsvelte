@@ -1253,10 +1253,7 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
 /// nested classes pass through unchanged (the `value` of a method is a
 /// `Function`, not a `PropertyDefinition`, so it is untouched).
 fn lower_class_field_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransformState<'a>) {
-    let mut v = ClassFieldRuneLower {
-        b: state.b,
-        analysis: state.analysis,
-    };
+    let mut v = ClassFieldRuneLower { b: state.b };
     v.visit_statement(stmt);
 }
 
@@ -1267,12 +1264,11 @@ fn lower_class_field_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransform
 /// declared in a method body), and inside any other expression position —
 /// matching upstream's `PropertyDefinition.js` zimmerframe visitor, which fires
 /// on every `PropertyDefinition` in the tree.
-struct ClassFieldRuneLower<'a, 'b> {
+struct ClassFieldRuneLower<'a> {
     b: B<'a>,
-    analysis: &'b crate::compiler::phases::phase2_analyze::ComponentAnalysis,
 }
 
-impl<'a, 'b> ClassFieldRuneLower<'a, 'b> {
+impl<'a> ClassFieldRuneLower<'a> {
     /// Lower a `$state` / `$state.raw` / `$derived` / `$derived.by` property
     /// initializer in place: `count = $state(0)` → `count = 0`, etc. Returns the
     /// detected rune (so the caller can decide whether public-`$derived` needs
@@ -1288,19 +1284,15 @@ impl<'a, 'b> ClassFieldRuneLower<'a, 'b> {
         // state allocator — no re-parse).
         if let Some(OxcExpression::CallExpression(call)) = prop.value.take() {
             let mut call = call.unbox();
-            let mut arg: Option<OxcExpression<'a>> = call
+            // The emitted statement was already read-wrapped whole (the emit
+            // loop / declarator paths wrap before this lowering runs), so the
+            // argument must NOT be wrapped again — a derived read `e` is
+            // already `e()`, and re-wrapping makes it `e()()`.
+            let arg: Option<OxcExpression<'a>> = call
                 .arguments
                 .drain(..)
                 .next()
                 .and_then(|a| OxcExpression::try_from(a).ok());
-            if let Some(e) = arg.as_mut() {
-                super::read_wrap::wrap_reads(
-                    e,
-                    b,
-                    self.analysis,
-                    self.analysis.root.instance_scope_index,
-                );
-            }
             prop.value = match rune {
                 // `$state(x)` → `x`; no-arg `$state()` → bare field (`None`).
                 DeclRune::State => arg,
@@ -1333,19 +1325,13 @@ impl<'a, 'b> ClassFieldRuneLower<'a, 'b> {
             return None;
         };
         let mut call = call.unbox();
-        let mut arg: Option<OxcExpression<'a>> = call
+        // Already read-wrapped by the whole-statement pass — see
+        // `lower_property_init`.
+        let arg: Option<OxcExpression<'a>> = call
             .arguments
             .drain(..)
             .next()
             .and_then(|a| OxcExpression::try_from(a).ok());
-        if let Some(e) = arg.as_mut() {
-            super::read_wrap::wrap_reads(
-                e,
-                b,
-                self.analysis,
-                self.analysis.root.instance_scope_index,
-            );
-        }
         let lowered = match rune {
             // `$state(x)` → `x`; arg-less `$state()` → `void 0`.
             DeclRune::State => arg.unwrap_or_else(|| b.void0()),
@@ -1591,7 +1577,7 @@ fn ctor_target_name(target: &oxc_ast::ast::AssignmentTarget) -> Option<(String, 
     }
 }
 
-impl<'a, 'b> VisitMut<'a> for ClassFieldRuneLower<'a, 'b> {
+impl<'a> VisitMut<'a> for ClassFieldRuneLower<'a> {
     /// Rebuild a runes-mode class body so public `$derived` / `$derived.by`
     /// fields become a private backing field + `get`/`set` accessor pair (写经
     /// `3-transform/server/visitors/ClassBody.js`):
