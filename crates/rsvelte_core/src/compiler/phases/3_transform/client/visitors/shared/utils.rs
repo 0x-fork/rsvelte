@@ -3687,6 +3687,103 @@ pub(crate) fn get_literal_value(
 /// `Expression` from it, and then serialize that copy again on the next level —
 /// which is what the previous `serde_json::from_value::<Expression>(x.clone())`
 /// hops did, once per nesting level.
+/// Parse a JS numeric literal SOURCE (`1_000`, `0b1010_1010`, `0o777`, `0x1f`).
+fn parse_js_number_source(src: &str) -> Option<f64> {
+    let cleaned: String = src.chars().filter(|c| *c != '_').collect();
+    let t = cleaned.as_str();
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return u128::from_str_radix(h, 16).ok().map(|v| v as f64);
+    }
+    if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return u128::from_str_radix(o, 8).ok().map(|v| v as f64);
+    }
+    if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return u128::from_str_radix(b, 2).ok().map(|v| v as f64);
+    }
+    t.parse::<f64>().ok()
+}
+
+/// Decimal digits of a JS bigint literal SOURCE (`9_007n`, `0x1fn`) — the JS
+/// `String(bigint)` form. `None` if the text is not a bigint literal.
+fn parse_js_bigint_source(src: &str) -> Option<String> {
+    let t = src.trim().strip_suffix('n')?;
+    let cleaned: String = t.chars().filter(|c| *c != '_').collect();
+    let t = cleaned.as_str();
+    let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u128::from_str_radix(h, 16).ok()?
+    } else if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        u128::from_str_radix(o, 8).ok()?
+    } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        u128::from_str_radix(b, 2).ok()?
+    } else {
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        t.parse::<u128>().ok()?
+    };
+    Some(v.to_string())
+}
+
+/// Whether `typeof <jv>` is `"bigint"` under the same resolution rules the
+/// Identifier arm of `get_literal_value_json` folds with.
+fn json_folds_to_bigint(jv: &serde_json::Value, context: &ComponentContext) -> bool {
+    use crate::compiler::phases::phase2_analyze::scope::BindingKind;
+    match jv.get("type").and_then(|t| t.as_str()) {
+        Some("Literal") => jv.get("bigint").is_some(),
+        Some("UnaryExpression") => {
+            jv.get("operator").and_then(|o| o.as_str()) == Some("-")
+                && jv
+                    .get("argument")
+                    .is_some_and(|a| json_folds_to_bigint(a, context))
+        }
+        Some("Identifier") => {
+            let Some(name) = jv.get("name").and_then(|n| n.as_str()) else {
+                return false;
+            };
+            if context.state.transform.contains_key(name) {
+                return false;
+            }
+            if context
+                .state
+                .each_binding_context
+                .iter()
+                .any(|c| c.item_name == name || (!c.index_name.is_empty() && c.index_name == name))
+            {
+                return false;
+            }
+            let Some(binding) = context.state.get_binding(name) else {
+                return false;
+            };
+            if binding.is_updated()
+                || matches!(
+                    binding.kind,
+                    BindingKind::Prop | BindingKind::BindableProp | BindingKind::RestProp
+                )
+            {
+                return false;
+            }
+            if binding
+                .initial
+                .as_deref()
+                .is_some_and(|init| parse_js_bigint_source(init).is_some())
+            {
+                return true;
+            }
+            // `initial` may hold the init as AST JSON instead of source text.
+            if let Some(init_json) = binding.initial_json() {
+                return json_folds_to_bigint(init_json, context);
+            }
+            if binding.initial.is_none()
+                && let Some(init_json) = binding.init_expr_json_parsed()
+            {
+                return json_folds_to_bigint(init_json, context);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn get_literal_value_json(
     jv: &serde_json::Value,
     context: &ComponentContext,
@@ -3726,6 +3823,12 @@ fn get_literal_value_json(
 
         match expr_type {
             "Literal" => {
+                // A bigint literal's `value` serializes as null; render its
+                // decimal digits (JS `String(123n)` has no `n`). typeof is
+                // handled by `json_folds_to_bigint` before evaluation.
+                if let Some(digits) = jv.get("bigint").and_then(|b| b.as_str()) {
+                    return Some(Some(digits.to_string()));
+                }
                 // A regex literal serializes its `value` as `{}`, so the pattern
                 // and flags have to come from the `regex` entry.
                 if let Some(regex) = jv.get("regex") {
@@ -3737,11 +3840,7 @@ fn get_literal_value_json(
                     serde_json::Value::String(s) => Some(Some(s.clone())),
                     serde_json::Value::Number(n) => {
                         let n = n.as_f64()?;
-                        if n.fract() == 0.0 {
-                            Some(Some(format!("{}", n as i64)))
-                        } else {
-                            Some(Some(n.to_string()))
-                        }
+                        Some(Some(format_js_number(n)))
                     }
                     serde_json::Value::Bool(b_val) => Some(Some(b_val.to_string())),
                     serde_json::Value::Null => Some(None),
@@ -3856,12 +3955,13 @@ fn get_literal_value_json(
                 if is_string_literal && trimmed.len() >= 2 {
                     return Some(Some(cook_string_literal(&trimmed[1..trimmed.len() - 1])));
                 }
-                // Parse number literals
-                if let Ok(n) = trimmed.parse::<f64>() {
-                    if n.fract() == 0.0 {
-                        return Some(Some(format!("{}", n as i64)));
-                    }
-                    return Some(Some(n.to_string()));
+                // Parse number literals (separators and 0b/0o/0x bases included)
+                if let Some(n) = parse_js_number_source(trimmed) {
+                    return Some(Some(format_js_number(n)));
+                }
+                // A bigint init renders as its decimal digits (`String(9n)` → "9")
+                if let Some(digits) = parse_js_bigint_source(trimmed) {
+                    return Some(Some(digits));
                 }
                 // Handle boolean and null literals
                 match trimmed {
@@ -3897,11 +3997,7 @@ fn get_literal_value_json(
                                 }
                                 Some(v) if v.is_f64() || v.is_i64() || v.is_u64() => {
                                     let n = v.as_f64().unwrap();
-                                    if n.fract() == 0.0 {
-                                        Some(Some(format!("{}", n as i64)))
-                                    } else {
-                                        Some(Some(n.to_string()))
-                                    }
+                                    Some(Some(format_js_number(n)))
                                 }
                                 Some(v) if v.is_boolean() => {
                                     Some(Some(v.as_bool().unwrap().to_string()))
@@ -4104,19 +4200,7 @@ thread_local! {
 /// shortest float representation. Mirrors the value upstream's `scope.evaluate`
 /// stringifies into the template quasi when folding an arithmetic chunk.
 fn format_js_number(n: f64) -> String {
-    if n.is_nan() {
-        "NaN".to_string()
-    } else if n.is_infinite() {
-        if n > 0.0 {
-            "Infinity".to_string()
-        } else {
-            "-Infinity".to_string()
-        }
-    } else if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
-        format!("{}", n as i64)
-    } else {
-        n.to_string()
-    }
+    crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(n)
 }
 
 /// Handle complex expression types for get_literal_value that need JSON access.
@@ -4198,11 +4282,7 @@ fn get_literal_value_complex(
                         _ => return None,
                     };
 
-                    // Format result
-                    if result.fract() == 0.0 && result.abs() < i64::MAX as f64 {
-                        return Some(Some(format!("{}", result as i64)));
-                    }
-                    return Some(Some(result.to_string()));
+                    return Some(Some(format_js_number(result)));
                 }
 
                 // Fix C: $state.raw(arg) — MemberExpression callee with object=$state, property=raw
@@ -4309,6 +4389,12 @@ fn get_literal_value_complex(
         "UnaryExpression" => {
             let operator = obj.get("operator").and_then(|v| v.as_str())?;
             let argument = obj.get("argument")?;
+            // Folded values are strings here, so a bigint would be
+            // indistinguishable from a number below — classify the ARGUMENT
+            // before evaluating it (upstream evaluates to a real BigInt).
+            if operator == "typeof" && json_folds_to_bigint(argument, context) {
+                return Some(Some("bigint".to_string()));
+            }
             let arg_val = get_literal_value_json(argument, context)?;
 
             match operator {
@@ -4332,21 +4418,12 @@ fn get_literal_value_complex(
                 "-" => {
                     let val = arg_val?;
                     let n = val.parse::<f64>().ok()?;
-                    let res = -n;
-                    if res.fract() == 0.0 {
-                        Some(Some(format!("{}", res as i64)))
-                    } else {
-                        Some(Some(res.to_string()))
-                    }
+                    Some(Some(format_js_number(-n)))
                 }
                 "+" => {
                     let val = arg_val?;
                     let n = val.parse::<f64>().ok()?;
-                    if n.fract() == 0.0 {
-                        Some(Some(format!("{}", n as i64)))
-                    } else {
-                        Some(Some(n.to_string()))
-                    }
+                    Some(Some(format_js_number(n)))
                 }
                 "typeof" => match arg_val.as_deref() {
                     None => Some(Some("undefined".to_string())),
@@ -6169,7 +6246,23 @@ fn has_call_json(json_value: &serde_json::Value, context: &ComponentContext) -> 
     };
 
     match expr_type {
-        "CallExpression" | "TaggedTemplateExpression" => {
+        "TaggedTemplateExpression" => {
+            // Upstream TaggedTemplateExpression.js: has_call iff the TAG is not
+            // pure — unlike CallExpression there is NO dependencies term, so
+            // `String.raw`…${state}…`` stays unmemoized.
+            if let Some(tag) = obj.get("tag")
+                && !is_pure_json(tag, context)
+            {
+                return true;
+            }
+            if let Some(quasi) = obj.get("quasi")
+                && has_call_json(quasi, context)
+            {
+                return true;
+            }
+            false
+        }
+        "CallExpression" => {
             // Match official Svelte compiler (CallExpression.js lines 264-273):
             //   if (!is_pure(node.callee, context) || context.state.expression.dependencies.size > 0) {
             //       context.state.expression.has_call = true;
@@ -6632,8 +6725,8 @@ fn is_initial_value_literal_or_known(initial: &Option<String>) -> bool {
         return true;
     }
 
-    // Number literal: all digits (possibly with decimal)
-    if trimmed.parse::<f64>().is_ok() {
+    // Number literal (separators/bases included) or bigint literal
+    if parse_js_number_source(trimmed).is_some() || parse_js_bigint_source(trimmed).is_some() {
         return true;
     }
 

@@ -240,6 +240,7 @@ fn extract_literal_string_typed(node: &JsNode) -> Option<String> {
                         Some(n.to_string())
                     }
                 }
+                crate::ast::typed_expr::LiteralValue::BigInt(d) => Some(format!("{d}n")),
                 crate::ast::typed_expr::LiteralValue::Bool(b) => Some(b.to_string()),
                 crate::ast::typed_expr::LiteralValue::Null => Some("null".to_string()),
                 crate::ast::typed_expr::LiteralValue::Regex(_) => None,

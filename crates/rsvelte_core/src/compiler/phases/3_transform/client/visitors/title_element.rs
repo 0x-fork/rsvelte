@@ -345,6 +345,37 @@ fn build_title_content(
         }
     }
 
+    // Upstream evaluates the BUILT template (`scope.evaluate(value)`) and
+    // assigns `b.literal(evaluated.value)` when known, so a title whose every
+    // chunk folds becomes a static string assignment (a known-nullish chunk
+    // already carries `?? ''`, so it contributes nothing).
+    {
+        let mut folded = String::new();
+        let mut all_known = true;
+        for node in nodes {
+            match node {
+                TemplateNode::Text(text) => folded.push_str(&text.data),
+                TemplateNode::ExpressionTag(expr) => {
+                    match get_literal_value(&expr.expression, context) {
+                        Some(Some(v)) => folded.push_str(&v),
+                        Some(None) => {}
+                        None => {
+                            all_known = false;
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    all_known = false;
+                    break;
+                }
+            }
+        }
+        if all_known {
+            return (b::string(folded), false, memo_entries);
+        }
+    }
+
     // Multiple nodes: build a template literal
     let mut quasis: Vec<String> = Vec::new();
     let mut expressions: Vec<JsExpr> = Vec::new();

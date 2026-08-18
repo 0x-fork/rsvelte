@@ -663,6 +663,7 @@ fn get_name_node(node: &JsNode) -> Option<String> {
         JsNode::Literal { value, .. } => match value {
             LiteralValue::String(s) => Some(s.to_string()),
             LiteralValue::Number(n) => Some(n.to_string()),
+            LiteralValue::BigInt(d) => Some(d.to_string()),
             LiteralValue::Bool(b) => Some(b.to_string()),
             LiteralValue::Null => Some("null".to_string()),
             LiteralValue::Regex(r) => Some(format!("/{}/{}", r.pattern, r.flags)),

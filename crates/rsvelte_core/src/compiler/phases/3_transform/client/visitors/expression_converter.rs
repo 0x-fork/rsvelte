@@ -273,6 +273,11 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
                         })
                     }
                 }
+                LiteralValue::BigInt(d) => JsExpr::Literal(JsLiteral::BigInt(if raw.is_empty() {
+                    format!("{d}n").into()
+                } else {
+                    raw.clone()
+                })),
                 LiteralValue::Bool(b) => JsExpr::Literal(JsLiteral::Boolean(*b)),
                 LiteralValue::Null => {
                     // Check for regex
@@ -1335,6 +1340,11 @@ fn convert_property_key_from_node(
                     JsLiteral::String(s.to_string().into())
                 }
                 LiteralValue::Number(n) => JsLiteral::Number(*n),
+                LiteralValue::BigInt(d) => JsLiteral::BigInt(if raw.is_empty() {
+                    format!("{d}n").into()
+                } else {
+                    raw.clone()
+                }),
                 LiteralValue::Bool(b) => JsLiteral::Boolean(*b),
                 LiteralValue::Null => JsLiteral::Null,
                 LiteralValue::Regex(r) => JsLiteral::Regex {

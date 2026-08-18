@@ -3845,6 +3845,18 @@ fn convert_expression<'a>(
             let raw = num.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
             create_numeric_literal(num.value, raw, start, end, line_offsets)
         }
+        OxcExpression::BigIntLiteral(big) => {
+            let start = offset + big.span.start as usize - 1;
+            let end = offset + big.span.end as usize - 1;
+            let raw = big.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
+            create_literal(
+                LiteralValue::BigInt(big.value.as_str().into()),
+                raw,
+                start,
+                end,
+                line_offsets,
+            )
+        }
         OxcExpression::StringLiteral(str_lit) => {
             let start = offset + str_lit.span.start as usize - 1;
             let end = offset + str_lit.span.end as usize - 1;
@@ -8867,6 +8879,18 @@ fn convert_expression_for_program<'a>(
             let raw = num.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
             create_numeric_literal(num.value, raw, start, end, line_offsets)
         }
+        OxcExpression::BigIntLiteral(big) => {
+            let start = offset + big.span.start as usize;
+            let end = offset + big.span.end as usize;
+            let raw = big.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
+            create_literal(
+                LiteralValue::BigInt(big.value.as_str().into()),
+                raw,
+                start,
+                end,
+                line_offsets,
+            )
+        }
         OxcExpression::StringLiteral(str_lit) => {
             let start = offset + str_lit.span.start as usize;
             let end = offset + str_lit.span.end as usize;
@@ -11428,6 +11452,19 @@ fn convert_expression_with_adjustment(
             let end = doc_offset + lit.span.end as usize - prefix_len;
             let raw = lit.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
             create_numeric_literal_for_binding(lit.value, raw, start, end, line_offsets).to_value()
+        }
+        OxcExpression::BigIntLiteral(lit) => {
+            let start = doc_offset + lit.span.start as usize - prefix_len;
+            let end = doc_offset + lit.span.end as usize - prefix_len;
+            let raw = lit.raw.as_ref().map(|a| a.as_str()).unwrap_or("");
+            create_literal_for_binding(
+                LiteralValue::BigInt(lit.value.as_str().into()),
+                raw,
+                start,
+                end,
+                line_offsets,
+            )
+            .to_value()
         }
         OxcExpression::StringLiteral(lit) => {
             let start = doc_offset + lit.span.start as usize - prefix_len;

@@ -96,7 +96,10 @@ pub(crate) fn compute_eval_inputs(
                     constant_vars.insert(binding.name.clone(), n.to_string());
                 } else if let Ok(n) = trimmed.parse::<f64>() {
                     if n.is_finite() {
-                        constant_vars.insert(binding.name.clone(), n.to_string());
+                        constant_vars.insert(
+                            binding.name.clone(),
+                            crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(n),
+                        );
                     }
                 } else {
                     match trimmed {
@@ -1080,7 +1083,10 @@ fn try_insert_constant_value(
         true
     } else if let Ok(n) = value.parse::<f64>() {
         if n.is_finite() {
-            constants.insert(name.to_string(), n.to_string());
+            constants.insert(
+                name.to_string(),
+                crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(n),
+            );
             true
         } else {
             false
