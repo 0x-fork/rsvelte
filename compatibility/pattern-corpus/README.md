@@ -414,13 +414,13 @@ Themes (one directory per theme, one behaviour cluster per file):
 | `opaque-tokens/` | strings/comments/regexes carrying `console.`, `$.set(`/`$.prop(`, `$$async_hole`, `<script>`, `svelte-ignore`, `await`/`=>` — the tokens the phase-3 scanners search for | Scanner-bait: every token a raw byte-scan looks for, in a position where it is data |
 | `components/` | member/namespace/derived component instantiation, component-or-value dual use, spread events onto components, children whitespace forms | Component reference and instantiation forms |
 
-Files held back from this sweep (screened but **not** landed): three
-formatter-parity holds (`regex-zoo`, `nested-script-style-elements`,
-`textarea-value-forms`) blocked on a wrap-width disagreement (#3047),
-an oxfmt oracle crash, and unbroken whitespace-sensitive `<textarea>` tags
-(#3060) respectively (`unicode-line-separators` and `nbsp-ideographic-space`
-landed in `text-and-entities/` once #3046 fixed the formatter's whitespace
-class); `comment-hostile-slots`, blocked on the rune-lowering
+Files held back from this sweep (screened but **not** landed): two
+formatter-parity holds (`regex-zoo`, `nested-script-style-elements`) blocked
+on a wrap-width disagreement (#3047) and an oxfmt oracle crash respectively
+(`unicode-line-separators` and `nbsp-ideographic-space` landed in
+`text-and-entities/` once #3046 fixed the formatter's whitespace class, and
+`textarea-value-forms` in `elements/` once #3060 taught it prettier's
+textarea tag-breaking); `comment-hostile-slots`, blocked on the rune-lowering
 comment-placement divergences it exposed (#3059 — a class the corpus gate
 deliberately ignores, `CommentPolicy::Ignore`); and the BigInt/number-mix shape,
 which crashes the OFFICIAL compiler with an uncoded TypeError (#3054,

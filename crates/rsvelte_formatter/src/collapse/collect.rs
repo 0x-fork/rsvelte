@@ -6,7 +6,8 @@ use super::{
     indent_config, is_block_display, is_component_tag, is_whitespace_preserving, tab_width,
     text_end, text_start, trims_edge_whitespace, try_break_block_multiline_content,
     try_break_block_overflow, try_break_content_tag_block, try_break_pre_content_tag,
-    try_break_pre_own_attrs, try_children_port, try_fill_mixed, try_fix_pre_child_open_tags,
+    try_break_pre_own_attrs, try_break_textarea_tags, try_children_port, try_fill_mixed,
+    try_fix_pre_child_open_tags,
     try_hug_block_inline_body, try_hug_mixed, try_strip_trailing_slot_space,
 };
 
@@ -172,7 +173,23 @@ pub(super) fn collect(
                     // mutually exclusive — only the first that fires is used.
                     // Case 3 targets child sub-spans and is skipped when case 1 or
                     // 2 fires (to avoid overlapping edits).
-                    if matches!(elem.name.as_str(), "pre" | "textarea") {
+                    // `<textarea>` gets prettier's inline-content tag breaking
+                    // (attrs stay on the open line, `>` drops); the `<pre>` chain
+                    // below would break its attrs per line instead.
+                    if elem.name.as_str() == "textarea" {
+                        if let Some(edit) = try_break_textarea_tags(
+                            out,
+                            elem.start,
+                            elem.end,
+                            &elem.fragment,
+                            line_width,
+                            options,
+                        ) {
+                            edits.push(edit);
+                        }
+                        continue;
+                    }
+                    if elem.name.as_str() == "pre" {
                         if let Some(edit) = try_break_pre_content_tag(
                             out,
                             elem.start,
