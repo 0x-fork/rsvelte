@@ -388,6 +388,18 @@ fn build_title_content(
                 current_text.push_str(&text.data);
             }
             TemplateNode::ExpressionTag(expr) => {
+                // Upstream inlines a chunk whose evaluation is known into the
+                // quasi text (`Zoo — ${name}`, not `${site} — ${name}`); a
+                // known-nullish chunk contributes nothing (its `?? ''`).
+                match get_literal_value(&expr.expression, context) {
+                    Some(Some(v)) => {
+                        current_text.push_str(&v);
+                        continue;
+                    }
+                    Some(None) => continue,
+                    None => {}
+                }
+
                 if expression_has_reactive_state(&expr.expression, context) {
                     has_state = true;
                 }
