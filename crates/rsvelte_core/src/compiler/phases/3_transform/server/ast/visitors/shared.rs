@@ -1736,16 +1736,14 @@ fn check_ns_walk(node: &TemplateNode, ns: &mut NsCheck) {
             // calls `next()`).
             check_ns_element(el.metadata.svg, el.metadata.mathml, ns);
         }
-        // `<svelte:element>` has no statically-resolved svg/mathml metadata in
-        // rsvelte (upstream reads `node.metadata.svg`, which we cannot recover
-        // here). Treat it as INCONCLUSIVE rather than forcing `html`: forcing
-        // html would wrongly flip a fragment whose namespace comes from
-        // `<svelte:options namespace="svg">` (e.g. `<svelte:element this="svg">`
-        // siblings of a real `<svg>`), keeping whitespace upstream removes. A
-        // real `<svg>` / `<div>` RegularElement sibling still drives the verdict;
-        // absent one, the shallow direct-child fallback inherits the parent
-        // namespace — matching upstream's element loop, which skips SvelteElement.
-        TemplateNode::SvelteElement(_) => {}
+        // 写经 upstream `check_nodes_for_namespace`, whose walker handles
+        // `SvelteElement` with the same handler as `RegularElement`: phase 2
+        // resolves its svg/mathml metadata (xmlns attribute → ancestor chain →
+        // component namespace option), so a plain root-level `<svelte:element>`
+        // decides `html` even when an `<svg>` sibling follows.
+        TemplateNode::SvelteElement(el) => {
+            check_ns_element(el.metadata.svg, el.metadata.mathml, ns);
+        }
         // Mirrors upstream Text handler: any non-whitespace text is inconclusive
         // (`maybe_html`), deferring to the shallow direct-child inference.
         TemplateNode::Text(t) if !is_svelte_whitespace_only(&t.data) => {
