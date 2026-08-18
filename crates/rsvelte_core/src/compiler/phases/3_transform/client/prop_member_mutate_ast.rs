@@ -709,11 +709,13 @@ mod tests {
     }
 
     #[test]
-    fn update_expression_left_alone() {
-        // `prop.x++` is NOT this pass's concern.
-        assert!(
-            transform_prop_member_mutate_ast("prop.x++;", &ssv(&["prop"]), &[], &nm()).is_none()
-        );
+    fn update_expression_is_wrapped() {
+        let out =
+            transform_prop_member_mutate_ast("prop.x++;", &ssv(&["prop"]), &[], &nm()).unwrap();
+        assert_eq!(out, "prop(prop().x++, true);");
+        let out =
+            transform_prop_member_mutate_ast("--prop.x;", &ssv(&["prop"]), &[], &nm()).unwrap();
+        assert_eq!(out, "prop(--prop().x, true);");
     }
 
     #[test]
