@@ -2155,13 +2155,28 @@ fn is_value_known_defined(
         // Known defined literals: numbers, strings, booleans, regex
         JsExpr::Literal(JsLiteral::Number(_)) => true,
         JsExpr::Literal(JsLiteral::String(_)) => true,
+        JsExpr::Literal(JsLiteral::RawString { .. }) => true,
+        JsExpr::Literal(JsLiteral::RawNumber { .. }) => true,
         JsExpr::Literal(JsLiteral::Boolean(_)) => true,
         JsExpr::Literal(JsLiteral::Regex { .. }) => true,
-        // Arrays and objects are always defined
-        JsExpr::Array(_) => true,
-        JsExpr::Object(_) => true,
+        // Arrays and objects evaluate to UNKNOWN upstream (`scope.evaluate`
+        // cannot represent objects), so official KEEPS the `?? ""` guard on
+        // `<option value={{ id: 2 }}>` / `<select value={['a']}>`.
+        JsExpr::Array(_) => false,
+        JsExpr::Object(_) => false,
         // Template literals are always strings (defined)
         JsExpr::TemplateLiteral(_) => true,
+        // A raw source fragment: classify the trivially-literal spellings the
+        // way `scope.evaluate` would (string/number/boolean literals are
+        // defined; object/array literals and everything else are UNKNOWN).
+        JsExpr::Raw(text) => {
+            let t = text.trim();
+            (t.starts_with('\'') || t.starts_with('"'))
+                || t.parse::<f64>().is_ok()
+                || t == "true"
+                || t == "false"
+                || (t.starts_with('`') && !t.contains("${"))
+        }
         JsExpr::Call(call) => js_expr_keypath(arena.get_expr(call.callee), arena)
             .as_deref()
             .is_some_and(is_known_defined_global_call),
