@@ -83,15 +83,16 @@ pub(crate) fn compute_eval_inputs(
             {
                 let trimmed = init.trim();
                 // Parse the initial value as a constant
-                if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-                    || (trimmed.starts_with('"') && trimmed.ends_with('"'))
-                {
-                    if trimmed.len() >= 2 {
-                        constant_vars.insert(
-                            binding.name.clone(),
-                            trimmed[1..trimmed.len() - 1].to_string(),
-                        );
-                    }
+                if is_whole_string_literal(trimmed) {
+                    // A folded constant holds the COOKED value (upstream's
+                    // `scope.evaluate`); the emitter re-escapes it for the quasi.
+                    // Raw quote-stripping double-escaped `'\\\''` (#3055).
+                    constant_vars.insert(
+                        binding.name.clone(),
+                        crate::compiler::phases::phase3_transform::client::visitors::shared::utils::cook_string_literal(
+                            &trimmed[1..trimmed.len() - 1],
+                        ),
+                    );
                 } else if let Ok(n) = trimmed.parse::<i64>() {
                     constant_vars.insert(binding.name.clone(), n.to_string());
                 } else if let Ok(n) = trimmed.parse::<f64>() {
