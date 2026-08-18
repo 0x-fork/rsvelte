@@ -6,7 +6,7 @@ entirely (neither matched nor failed). Each entry carries a `"class"`
 (`oracle-bug` | `invalid-input` | `migrate` | `engine-divergence`) and a
 `"reason"`; this file records the class-level rationale.
 
-**Current baseline: `fmt-oracle-excluded.json`, 24 entries.**
+**Current baseline: `fmt-oracle-excluded.json`, 25 entries.**
 
 `fmt-verify.mjs` warns if an excluded id is no longer in the parity set (can be
 deleted) and notices if an excluded id now matches byte-for-byte (the oracle bug
@@ -43,6 +43,14 @@ correct; file upstream at `oxformatter/oxfmt` or `prettier/prettier-plugin-svelt
   (`css-vars`); emits a single space before `{` after an escaped-unicode selector
   (`unicode-identifier`); wraps a deeply-nested `calc(...)` differently
   (`svelte.dev .../docs/[topic]/[...path]/+layout.svelte`).
+- **oxfmt formats embedded CSS differently from standalone CSS.** For
+  `--arr: [1, 2]` / `--sel: a > b ~ c`, `oxfmt x.css` prints `[1 , 2]` /
+  `a > b ~ c` while `oxfmt --svelte` prints `[1, 2]` / `a > b ~c` — the same tool
+  disagreeing with itself, because the svelte path uses prettier's CSS printer
+  and the `.css` path the oxc engine. rsvelte-fmt reproduces oxfmt's own `.css`
+  output byte-for-byte, so parity against the svelte path is undefined here (and
+  the svelte path's `~c` changes the token stream the value substitutes). —
+  `pattern/adversarial/css/css-custom-property-values`.
 - **Cross-platform non-determinism.** oxfmt produces different output on macOS vs
   Linux for the same input (an overflowing self-closing component inside `<pre>` is
   collapsed on macOS, attribute-wrapped on Linux), so byte-parity is undefined. —

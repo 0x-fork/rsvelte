@@ -1049,8 +1049,13 @@ pub(super) fn try_break_textarea_tags(
                 .to_string();
         }
     }
-    let open_break = !content.starts_with('\n');
-    let close_break = !content.ends_with('\n');
+    // prettier borrows the parent's `>` only when the first child is
+    // leading-space-sensitive AND has no leading spaces at all
+    // (`needsToBorrowParentOpeningTagEndMarker`), and the closing tag's `<`
+    // only when the last child has no trailing spaces — ANY whitespace, not
+    // just a newline, keeps that tag glued.
+    let open_break = !content.starts_with(super::is_html_ws);
+    let close_break = !content.ends_with(super::is_html_ws);
     if !open_break && !close_break {
         return None;
     }
