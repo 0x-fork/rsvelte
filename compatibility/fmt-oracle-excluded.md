@@ -6,7 +6,7 @@ entirely (neither matched nor failed). Each entry carries a `"class"`
 (`oracle-bug` | `invalid-input` | `migrate` | `engine-divergence`) and a
 `"reason"`; this file records the class-level rationale.
 
-**Current baseline: `fmt-oracle-excluded.json`, 22 entries.**
+**Current baseline: `fmt-oracle-excluded.json`, 24 entries.**
 
 `fmt-verify.mjs` warns if an excluded id is no longer in the parity set (can be
 deleted) and notices if an excluded id now matches byte-for-byte (the oracle bug
@@ -24,6 +24,11 @@ correct; file upstream at `oxformatter/oxfmt` or `prettier/prettier-plugin-svelt
   `await-then-destruct-array-nested-rest`.
 - **`{@const x = (h = 0)}` closing paren dropped** → `{@const x = (h = 0}`, invalid
   Svelte. — `block-expression-assign`.
+- **Nested object destructure with a default loses its key.** In an `{#each}`
+  context, `{ id, meta: { tags: […] } = {} }` is emitted as
+  `{ id, { tags: … } = { } }` — the `meta:` key vanishes and the output is not
+  JavaScript. — `pattern/issues/3035-destructure-defaults`,
+  `pattern/adversarial/control-flow/each-destructure-exotic`.
 - **`<textarea>` whitespace collapse.** Whitespace-significant body (`\n  A\n  B\n`)
   collapsed to `A B`, with inconsistent per-case rules. — `textarea-content`,
   `textarea-end-tag` (adversarial split close-tags).
