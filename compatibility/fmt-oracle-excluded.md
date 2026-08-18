@@ -42,6 +42,11 @@ correct; file upstream at `oxformatter/oxfmt` or `prettier/prettier-plugin-svelt
   Linux for the same input (an overflowing self-closing component inside `<pre>` is
   collapsed on macOS, attribute-wrapped on Linux), so byte-parity is undefined. —
   `shadcn-svelte .../theme-customizer-code.svelte`.
+- **Nested object-destructure default in `{#each}` loses its key.**
+  `{#each xs as { id, meta: { tags: [t = 'x'] } = {} }}` is mangled to
+  `{ id, { tags: [t = 'x'] } = { } }` — the `meta:` property key is dropped,
+  which is not JavaScript. — `pattern/issues/3035-destructure-defaults.svelte`,
+  `pattern/adversarial/control-flow/each-destructure-exotic.svelte`.
 
 ## invalid-input — the input is invalid and rsvelte correctly rejects it
 
