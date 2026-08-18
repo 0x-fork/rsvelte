@@ -447,13 +447,33 @@ fn visit_runes_mode_typed(
                         .or_else(|| context.analysis.root.find_binding_any_scope(&path.name));
                     if let Some(bi) = bi {
                         let b = &mut context.analysis.root.bindings[bi];
-                        b.initial = extract_literal_string_typed(arg).or_else(|| {
-                            if rune_name == "$derived" || rune_name == "$derived.by" {
-                                Some(arg.to_json_string())
-                            } else {
-                                None
-                            }
-                        });
+                        b.initial = extract_literal_string_typed(arg)
+                            .or_else(|| {
+                                // `$state(void 0)` is a known undefined — the
+                                // value is undefined whatever the (pure) literal
+                                // operand is, and the lowering re-reads the
+                                // argument from its source span, never from here.
+                                if let JsNode::UnaryExpression {
+                                    operator, argument, ..
+                                } = arg
+                                    && operator == "void"
+                                    && matches!(
+                                        arena.get_js_node(*argument),
+                                        JsNode::Literal { .. }
+                                    )
+                                {
+                                    Some("void 0".to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .or_else(|| {
+                                if rune_name == "$derived" || rune_name == "$derived.by" {
+                                    Some(arg.to_json_string())
+                                } else {
+                                    None
+                                }
+                            });
                         b.initial_is_defined = is_expression_defined_typed(arg, arena);
                         b.initial_node_type = Some(arg.type_str().to_string());
                         if b.initial_node_type.as_deref() == Some("Identifier")

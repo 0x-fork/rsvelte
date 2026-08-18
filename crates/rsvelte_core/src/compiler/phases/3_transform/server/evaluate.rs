@@ -648,7 +648,7 @@ fn parse_literal_text(text: &str) -> Option<EvalValue> {
         "true" => return Some(EvalValue::Bool(true)),
         "false" => return Some(EvalValue::Bool(false)),
         "null" => return Some(EvalValue::Null),
-        "undefined" => return Some(EvalValue::Undefined),
+        "undefined" | "void 0" => return Some(EvalValue::Undefined),
         _ => {}
     }
     if t.len() >= 2 {

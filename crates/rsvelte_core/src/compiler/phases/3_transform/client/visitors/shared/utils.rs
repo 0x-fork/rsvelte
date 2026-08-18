@@ -3967,7 +3967,7 @@ fn get_literal_value_json(
                 match trimmed {
                     "true" => Some(Some("true".to_string())),
                     "false" => Some(Some("false".to_string())),
-                    "null" | "undefined" => Some(None),
+                    "null" | "undefined" | "void 0" => Some(None),
                     _ => {
                         // Check for a JSON `Literal` node form (from binding.initial,
                         // e.g. a `{const x = 'nested'}` DeclarationTag whose initial is
@@ -6730,8 +6730,8 @@ fn is_initial_value_literal_or_known(initial: &Option<String>) -> bool {
         return true;
     }
 
-    // Boolean/null literals
-    if matches!(trimmed, "true" | "false" | "null" | "undefined") {
+    // Boolean/null literals (`void 0` is the undefined a builder spells)
+    if matches!(trimmed, "true" | "false" | "null" | "undefined" | "void 0") {
         return true;
     }
 
