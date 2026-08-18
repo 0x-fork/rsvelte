@@ -691,10 +691,9 @@ fn flush_sequence<'a>(sequence: &[SeqNode<'_>], state: &mut ServerTransformState
                 // binding's value (`let count = 42`). Upstream resolves `count` to
                 // the slot scope parameter (an opaque runtime value), so it stays
                 // `$.escape(count)`. This wins over the `constant_vars` /
-                // `scope.evaluate` folds. (A SNIPPET parameter is NOT in this set —
-                // upstream DOES fold a snippet-param read whose component argument
-                // is statically known, so `slot_let_shadows` is kept distinct from
-                // the snippet-param `shadowed_names`.)
+                // `scope.evaluate` folds. Each-item and snippet parameters are in
+                // this set too — all three are runtime values whose reads must
+                // not fold to a same-named outer binding's literal.
                 if !state.slot_let_shadows.is_empty()
                     && let Some(src) = state.expr_source(expr)
                     && is_plain_identifier(src.trim())

@@ -75,6 +75,12 @@ pub fn visit_snippet_block<'a>(node: &SnippetBlock<'a>, state: &mut ServerTransf
     for param in &node.parameters {
         collect_param_pattern_names(param, &mut shadow);
     }
+    // Push to BOTH shadow sets (mirroring the each-block visitor): a snippet
+    // parameter is a runtime value, so a body read of a param that shadows a
+    // same-named component binding must NOT constant-fold to the outer
+    // binding's value (`{#snippet row(count)}` + instance `count = $state('x')`
+    // rendered `x` for every `{@render row(…)}`).
+    state.slot_let_shadows.push(shadow.clone());
     state.shadowed_names.push(shadow);
 
     // Body: render the fragment as a `{ ... }` block, then reuse its statements
@@ -92,6 +98,7 @@ pub fn visit_snippet_block<'a>(node: &SnippetBlock<'a>, state: &mut ServerTransf
     let fn_body = b.body(body_block);
 
     state.shadowed_names.pop();
+    state.slot_let_shadows.pop();
 
     let fn_decl = b.function_declaration(&name, params, fn_body, false);
 
