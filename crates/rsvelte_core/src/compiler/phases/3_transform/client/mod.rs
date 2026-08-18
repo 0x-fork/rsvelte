@@ -1159,7 +1159,7 @@ pub(crate) fn transform_client(
             if matches!(binding.kind, BindingKind::LegacyReactive) {
                 let args = if analysis.immutable {
                     vec![
-                        b::id("undefined"),
+                        b::undefined(&context.arena),
                         b::literal(super::js_ast::nodes::JsLiteral::Boolean(true)),
                     ]
                 } else {

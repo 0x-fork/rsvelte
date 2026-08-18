@@ -305,7 +305,8 @@ pub(super) fn transform_reactive_statement(
     let body = body.trim_end_matches(';').trim();
 
     if body.is_empty() {
-        return String::new();
+        // `$: ;` still emits an (empty) effect upstream.
+        return "$.legacy_pre_effect(() => {}, () => {});".to_string();
     }
 
     // Extract locally-declared variables from the body (e.g., `for (let i = 0; ...)`)

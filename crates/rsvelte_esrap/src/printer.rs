@@ -4253,7 +4253,13 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                 ctx.newline();
             }
             self.print_argument(arg, ctx);
+            // esrap flushes the trailing comment into a child context nothing
+            // is written to afterwards, so its `newline()` never reaches the
+            // `)` write — the statement is NOT multiline and gets no blank-line
+            // margins. Isolate the flush the same way.
+            let scope = ctx.begin_scope();
             self.flush_trailing_comments(ctx, arg.span().end, Some(call_end));
+            ctx.end_scope(scope);
             if wrap {
                 ctx.dedent();
                 ctx.newline();

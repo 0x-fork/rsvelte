@@ -198,6 +198,16 @@ where
 
 /// A replacement to apply to the source text.
 #[derive(Debug)]
+/// See [`StateVarCollector::trailing_update_comment`].
+struct TrailingUpdateComment {
+    comment: String,
+    is_line: bool,
+    new_end: u32,
+    indent: String,
+    line_start: u32,
+    stmt_starts_line: bool,
+}
+
 struct Replacement {
     /// Byte offset start (inclusive) in the original source.
     start: u32,
@@ -735,6 +745,89 @@ impl<'a, 's> StateVarCollector<'a, 's> {
             return false;
         }
         member.property.name == "by"
+    }
+
+    /// A same-line comment trailing a whole-statement `x++;` / `x--;`.
+    /// Upstream rewrites the update by REUSING the argument node (with loc),
+    /// so esrap's comment cursor pulls the trailing comment INSIDE the
+    /// `$.update(...)` call; the text splice has to reproduce that placement.
+    fn trailing_update_comment(&self, start: u32, end: u32) -> Option<TrailingUpdateComment> {
+        let src = self.source.as_bytes();
+        // Forward from `end`: horizontal ws, `;`, horizontal ws, then a comment
+        // that is the last thing on the line.
+        let mut j = end as usize;
+        while j < src.len() && matches!(src[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j >= src.len() || src[j] != b';' {
+            return None;
+        }
+        j += 1;
+        while j < src.len() && matches!(src[j], b' ' | b'\t') {
+            j += 1;
+        }
+        let (comment, is_line, mut new_end) = if self.source[j..].starts_with("//") {
+            let line_end = memchr::memchr(b'\n', &src[j..]).map_or(src.len(), |p| j + p);
+            (
+                self.source[j..line_end].trim_end().to_string(),
+                true,
+                line_end,
+            )
+        } else if self.source[j..].starts_with("/*") {
+            let close = memchr::memmem::find(&src[j + 2..], b"*/")? + j + 4;
+            let line_end = memchr::memchr(b'\n', &src[close..]).map_or(src.len(), |p| close + p);
+            if !self.source[close..line_end].trim().is_empty() {
+                return None;
+            }
+            (self.source[j..close].to_string(), false, close)
+        } else {
+            return None;
+        };
+        if is_line {
+            new_end = new_end.min(src.len());
+        }
+        // Statement position: the last CODE byte before `start` (comment- and
+        // string-aware) must end a statement or open a block. Run only after
+        // the forward check succeeded — the prefix scan is O(prefix).
+        let mut last_code: Option<u8> = None;
+        for (_, c) in crate::compiler::phases::phase3_transform::shared::js_scan::code_bytes(
+            &src[..start as usize],
+        ) {
+            if !c.is_ascii_whitespace() {
+                last_code = Some(c);
+            }
+        }
+        if !matches!(last_code, None | Some(b'{') | Some(b'}') | Some(b';')) {
+            return None;
+        }
+        let line_start = memchr::memrchr(b'\n', &src[..start as usize]).map_or(0, |p| p + 1);
+        let prefix = &self.source[line_start..start as usize];
+        let indent: String = prefix
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        Some(TrailingUpdateComment {
+            comment,
+            is_line,
+            new_end: new_end as u32,
+            indent,
+            line_start: line_start as u32,
+            stmt_starts_line: prefix.trim().is_empty(),
+        })
+    }
+
+    /// Whether a blank line separates well: previous non-ws char before
+    /// `line_start` opens a block or the previous line is already blank.
+    fn margin_before_allowed(&self, line_start: u32) -> bool {
+        let head = self.source[..line_start as usize].trim_end();
+        !head.ends_with('{') && !self.source[head.len()..line_start as usize].contains("\n\n")
+    }
+
+    fn margin_after_allowed(&self, new_end: u32) -> bool {
+        let tail = &self.source[new_end as usize..];
+        let after_line = tail.strip_prefix('\n').unwrap_or(tail);
+        let next = after_line.trim_start();
+        !next.starts_with('}') && !next.is_empty() && !after_line.starts_with('\n')
     }
 
     /// Add a replacement.
@@ -3234,32 +3327,45 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
 
             // --- State variable updates ---
             if self.is_any_state_var(name) {
-                match (expr.prefix, expr.operator) {
-                    (true, UpdateOperator::Increment) => {
-                        self.add_replacement(
-                            full_start,
-                            full_end,
-                            format!("$.update_pre({})", name),
-                        );
-                    }
-                    (true, UpdateOperator::Decrement) => {
-                        self.add_replacement(
-                            full_start,
-                            full_end,
-                            format!("$.update_pre({}, -1)", name),
-                        );
-                    }
-                    (false, UpdateOperator::Increment) => {
-                        self.add_replacement(full_start, full_end, format!("$.update({})", name));
-                    }
-                    (false, UpdateOperator::Decrement) => {
-                        self.add_replacement(
-                            full_start,
-                            full_end,
-                            format!("$.update({}, -1)", name),
-                        );
-                    }
+                let callee = if expr.prefix {
+                    "$.update_pre"
+                } else {
+                    "$.update"
+                };
+                let decrement = expr.operator == UpdateOperator::Decrement;
+                if let Some(tc) = self.trailing_update_comment(full_start, full_end) {
+                    let text = match (decrement, tc.is_line) {
+                        (false, false) => format!("{callee}({name} {});", tc.comment),
+                        (true, false) => format!("{callee}({name}, {} -1);", tc.comment),
+                        (false, true) => {
+                            format!("{callee}({name} {}\n{});", tc.comment, tc.indent)
+                        }
+                        (true, true) => {
+                            // Multiline argument list; esrap puts a blank line
+                            // on each side of a multiline statement.
+                            if tc.stmt_starts_line && self.margin_before_allowed(tc.line_start) {
+                                self.add_replacement(tc.line_start, tc.line_start, "\n".into());
+                            }
+                            let margin_after = if self.margin_after_allowed(tc.new_end) {
+                                "\n"
+                            } else {
+                                ""
+                            };
+                            format!(
+                                "{callee}(\n{i}\t{name}, {}\n{i}\t-1\n{i});{margin_after}",
+                                tc.comment,
+                                i = tc.indent
+                            )
+                        }
+                    };
+                    self.add_replacement(full_start, tc.new_end, text);
+                    return;
                 }
+                let text = match decrement {
+                    false => format!("{callee}({name})"),
+                    true => format!("{callee}({name}, -1)"),
+                };
+                self.add_replacement(full_start, full_end, text);
                 return;
             }
 
