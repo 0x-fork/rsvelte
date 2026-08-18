@@ -170,6 +170,67 @@ pub fn visit<'a, 'b: 'a>(
     Ok(())
 }
 
+/// Fixed-point pass over the ROOT fragment's snippets: a snippet blocked ONLY
+/// by references to sibling root snippets becomes hoistable when those
+/// siblings are — upstream's `can_hoist_snippet` recursion with a `visited`
+/// set makes MUTUALLY recursive snippets hoistable, while the in-order walk
+/// above can only see snippets declared earlier. Optimistically assume every
+/// still-unhoisted root snippet is hoistable, then evict any that fails under
+/// that assumption until the set is stable (the greatest fixed point, matching
+/// the cycle-tolerant `visited` semantics).
+pub fn promote_mutual_snippet_hoists<'a, 'b: 'a>(
+    nodes: &mut [TemplateNode<'b>],
+    context: &mut VisitorContext<'a>,
+) {
+    let mut candidates: Vec<(usize, String)> = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let TemplateNode::SnippetBlock(b) = node
+            && !b.metadata.can_hoist
+            && let Some(name) = super::shared::snippets::get_snippet_name(b)
+        {
+            candidates.push((i, name));
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    for (_, name) in &candidates {
+        context
+            .analysis
+            .template
+            .hoisted_snippets
+            .insert(name.clone());
+    }
+    loop {
+        let failed = candidates.iter().position(|(i, _)| {
+            let TemplateNode::SnippetBlock(b) = &nodes[*i] else {
+                return false;
+            };
+            !can_hoist_snippet(b, context)
+        });
+        match failed {
+            Some(k) => {
+                let (_, name) = candidates.remove(k);
+                context.analysis.template.hoisted_snippets.remove(&name);
+            }
+            None => break,
+        }
+    }
+    for (i, name) in candidates {
+        if let TemplateNode::SnippetBlock(b) = &mut nodes[i] {
+            b.metadata.can_hoist = true;
+        }
+        if let Some(binding_idx) = context.analysis.root.find_binding_any_scope(&name) {
+            context
+                .analysis
+                .root
+                .scope
+                .declarations
+                .insert(name, binding_idx);
+        }
+    }
+}
+
 fn visit_parameter_expressions(
     node: &JsNode,
     context: &mut VisitorContext,

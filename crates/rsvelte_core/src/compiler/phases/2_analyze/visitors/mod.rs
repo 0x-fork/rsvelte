@@ -692,6 +692,7 @@ pub fn analyze_template(
     let mut context = VisitorContext::new(analysis, parse_arena);
     context.scope = instance_scope_index;
     fragment::analyze(&mut ast.fragment, &mut context)?;
+    snippet_block::promote_mutual_snippet_hoists(&mut ast.fragment.nodes, &mut context);
 
     // Check for mixed event handler syntaxes (on:event and onevent mixed)
     if let Some(ref event_name) = context.event_directive_node
