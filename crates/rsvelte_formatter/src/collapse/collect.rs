@@ -7,8 +7,8 @@ use super::{
     text_end, text_start, trims_edge_whitespace, try_break_block_multiline_content,
     try_break_block_overflow, try_break_content_tag_block, try_break_pre_content_tag,
     try_break_pre_own_attrs, try_break_textarea_tags, try_children_port, try_fill_mixed,
-    try_fix_pre_child_open_tags,
-    try_hug_block_inline_body, try_hug_mixed, try_strip_trailing_slot_space,
+    try_fix_pre_child_open_tags, try_hug_block_inline_body, try_hug_mixed,
+    try_strip_trailing_slot_space,
 };
 
 /// Pass 1.6: targeted `try_collapse` sweep on inline/component pure-text

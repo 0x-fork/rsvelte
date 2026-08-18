@@ -653,10 +653,9 @@ pub(super) fn try_fill_mixed(
     // source blank line or a newline between two non-text nodes). Otherwise such
     // content stays on one line / is hugged, so leave it to the hug / indent
     // passes (prettier doesn't prose-fill space-separated mustaches that fit).
-    let has_text_word = fragment
-        .nodes
-        .iter()
-        .any(|n| matches!(n, TemplateNode::Text(t) if super::split_html_ws(&t.data).next().is_some()));
+    let has_text_word = fragment.nodes.iter().any(
+        |n| matches!(n, TemplateNode::Text(t) if super::split_html_ws(&t.data).next().is_some()),
+    );
     match flat_mixed_decision(
         tag,
         &fragment.nodes,

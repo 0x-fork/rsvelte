@@ -662,7 +662,8 @@ impl<'a> Parser<'a> {
             j += 1;
         }
         let word_start = j;
-        while j < self.bytes.len() && (self.bytes[j].is_ascii_alphanumeric() || self.bytes[j] == b'_')
+        while j < self.bytes.len()
+            && (self.bytes[j].is_ascii_alphanumeric() || self.bytes[j] == b'_')
         {
             j += 1;
         }

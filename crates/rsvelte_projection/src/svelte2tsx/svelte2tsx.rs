@@ -473,6 +473,7 @@ pub fn svelte2tsx(
         lenient_script: false,
         skip_non_css_lang_style: false,
         capture_comments: false,
+        reparse_leading_slash_expression: false,
     };
     let mut ast = phase1_parse::parse_script_ts(&parse_source, parse_options)?;
     let parsed_scripts = super::script::ParsedScripts::new(&mut ast);
