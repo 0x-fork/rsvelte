@@ -928,10 +928,19 @@ pub(super) fn process_derived_object_pattern(
             let value_pattern = prop[colon_pos + 1..].trim();
             let prop_access = derived_prop_access(base_expr, member_base, key);
             if value_pattern.starts_with('[') || value_pattern.starts_with('{') {
-                let (nested_pattern, _default_val) = split_nested_pattern_default(value_pattern);
+                // The pattern's default must survive into the helper's base
+                // (`sizes: [x] = []` → `$.to_array($.fallback(o.sizes, () => [],
+                // true))`) — the second pass builds the same effective access for
+                // the element declarations.
+                let (nested_pattern, default_val) = split_nested_pattern_default(value_pattern);
+                let effective_access = if let Some(dv) = default_val {
+                    build_fallback_string(&prop_access, dv)
+                } else {
+                    prop_access
+                };
                 collect_array_helpers_only(
                     nested_pattern,
-                    &prop_access,
+                    &effective_access,
                     declarations,
                     insert_label,
                     array_temp_prefix,
