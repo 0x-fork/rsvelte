@@ -1172,6 +1172,9 @@ impl<'a> ScopeBuilder<'a> {
                     ) {
                         self.bindings[idx].initial_is_function = true;
                     }
+                    if let Some(rune) = self.rune_call_callee(init_node) {
+                        self.bindings[idx].init_rune = Some(rune);
+                    }
                 }
             }
             JsNode::ObjectPattern { properties, .. } => {
@@ -1437,6 +1440,39 @@ impl<'a> ScopeBuilder<'a> {
             }
             // MemberExpression, etc. - not implicit declarations
             _ => {}
+        }
+    }
+
+    /// The rune keypath of a CallExpression init (`$host()` → `"$host"`,
+    /// `$derived.by(…)` → `"$derived.by"`), or `None` when the callee is not a
+    /// rune or the rune name is shadowed by a real binding — upstream's
+    /// `get_rune(declaration.initial, scope)` / `get_global_keypath`.
+    fn rune_call_callee(&self, expr: &JsNode) -> Option<String> {
+        use crate::compiler::phases::phase2_analyze::visitors::shared::function::is_rune;
+        let JsNode::CallExpression { callee, .. } = expr else {
+            return None;
+        };
+        match self.arena.get_js_node(*callee) {
+            JsNode::Identifier { name, .. } => {
+                let name = name.as_str();
+                (is_rune(name) && self.find_binding_in_scope_chain(name).is_none())
+                    .then(|| name.to_string())
+            }
+            JsNode::MemberExpression {
+                object, property, ..
+            } => {
+                let JsNode::Identifier { name: obj, .. } = self.arena.get_js_node(*object) else {
+                    return None;
+                };
+                let JsNode::Identifier { name: prop, .. } = self.arena.get_js_node(*property)
+                else {
+                    return None;
+                };
+                let keypath = format!("{}.{}", obj.as_str(), prop.as_str());
+                (is_rune(&keypath) && self.find_binding_in_scope_chain(obj.as_str()).is_none())
+                    .then_some(keypath)
+            }
+            _ => None,
         }
     }
 
@@ -2677,9 +2713,13 @@ impl<'a> ScopeBuilder<'a> {
             if let Attribute::LetDirective(let_dir) = attr {
                 if let Some(ref expression) = let_dir.expression {
                     // Destructured let directive: let:x={{ a, b }}
-                    // Extract identifiers from the destructuring pattern
+                    // 写经 upstream `extract_identifiers_from_destructuring`:
+                    // object property values and object rest arguments recurse;
+                    // an ARRAY rest (`[a, ...rest]`) and a default
+                    // (`[a = 1]`, an AssignmentExpression) hit the switch
+                    // default and declare NOTHING — their reads stay raw.
                     let node = expression.as_node();
-                    self.declare_bindings_from_pattern_node(&node, BindingKind::Let, false);
+                    self.declare_let_directive_pattern_bindings(&node);
                 } else {
                     // Simple let directive: let:bar
                     self.declare_binding(
@@ -2690,6 +2730,47 @@ impl<'a> ScopeBuilder<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// 写经 upstream `extract_identifiers_from_destructuring` for `let:`
+    /// directive values: Identifier declares; ObjectExpression recurses into
+    /// property values and rest arguments; ArrayExpression recurses into
+    /// elements (a SpreadElement or AssignmentExpression element falls through
+    /// and declares nothing).
+    fn declare_let_directive_pattern_bindings(&mut self, node: &JsNode) {
+        match node {
+            JsNode::Identifier { name, .. } => {
+                self.declare_binding(
+                    name.to_string(),
+                    BindingKind::Let,
+                    DeclarationKind::Const,
+                    None,
+                );
+            }
+            JsNode::ObjectExpression { properties, .. } => {
+                let properties = *properties;
+                for prop in self.arena.get_js_children(properties) {
+                    match prop {
+                        JsNode::Property { value, .. } => {
+                            let value_node = self.arena.get_js_node(*value);
+                            self.declare_let_directive_pattern_bindings(value_node);
+                        }
+                        JsNode::SpreadElement { argument, .. }
+                        | JsNode::RestElement { argument, .. } => {
+                            let arg_node = self.arena.get_js_node(*argument);
+                            self.declare_let_directive_pattern_bindings(arg_node);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            JsNode::ArrayExpression { elements, .. } => {
+                for el in elements.iter().flatten() {
+                    self.declare_let_directive_pattern_bindings(el);
+                }
+            }
+            _ => {}
         }
     }
 

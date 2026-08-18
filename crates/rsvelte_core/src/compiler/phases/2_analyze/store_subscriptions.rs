@@ -219,6 +219,21 @@ pub fn detect_store_subscriptions(
                     continue;
                 }
 
+                // Upstream skips the store sub whenever `get_rune(init, scope)`
+                // is non-null — i.e. for ANY rune-call initializer, not only the
+                // $state/$derived family the binding KIND records. `const host =
+                // $host()` leaves a Normal binding, but `$host` is still the
+                // rune. `$props` inits are excluded here: the
+                // `is_props_rune_init` special case below owns that rule
+                // (`let state = $props()` must still make `$state` a store sub).
+                if binding
+                    .init_rune
+                    .as_deref()
+                    .is_some_and(|r| r != "$props" && r != "$props.id")
+                {
+                    continue;
+                }
+
                 // Special case from official compiler (2-analyze/index.js L366-368):
                 // "rune-like names received as props are valid too (but we have to protect
                 //  against $props as store)"
