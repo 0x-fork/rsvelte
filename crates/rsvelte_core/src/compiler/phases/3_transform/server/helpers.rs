@@ -1117,7 +1117,9 @@ pub(crate) fn try_evaluate_with_constants(
     if let Ok(n) = trimmed.parse::<f64>()
         && n.is_finite()
     {
-        return Some(n.to_string());
+        return Some(
+            crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(n),
+        );
     }
     if !trimmed.starts_with('`') && is_whole_string_literal(trimmed) {
         return Some(crate::compiler::phases::phase3_transform::client::visitors::shared::utils::cook_string_literal(
@@ -1144,7 +1146,9 @@ pub(crate) fn try_evaluate_with_constants(
                 if result == (result as i64) as f64 {
                     return Some((result as i64).to_string());
                 }
-                return Some(result.to_string());
+                return Some(
+                    crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(result),
+                );
             }
         }
     }
@@ -1169,7 +1173,9 @@ pub(crate) fn try_evaluate_with_constants(
                 if result == (result as i64) as f64 {
                     return Some((result as i64).to_string());
                 }
-                return Some(result.to_string());
+                return Some(
+                    crate::compiler::phases::phase3_transform::server::evaluate::js_number_to_string(result),
+                );
             }
             // String concatenation
             return Some(format!("{}{}", l, r));
