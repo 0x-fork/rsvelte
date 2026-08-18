@@ -547,6 +547,15 @@ fn transform_script<'a>(
         // Set by every branch that re-parses the statement WHOLE from a source
         // range, to that range.
         let mut verbatim: Option<Span> = None;
+        // Comment-carry for a rune-lowered VariableDeclaration: worth doing only
+        // when the statement (or its trailing line) actually holds a comment.
+        let trailing_end = trailing_comment_end(src, &ret.program.comments, stmt_span.end);
+        let carry_wanted = ret
+            .program
+            .comments
+            .iter()
+            .any(|c| c.span.start >= stmt_span.start && c.span.end <= trailing_end);
+        let mut carried = false;
 
         'emit: {
             match stmt {
@@ -564,8 +573,15 @@ fn transform_script<'a>(
                     }
                 }
                 Statement::VariableDeclaration(vd) => {
-                    let lowered =
-                        lower_variable_declaration(vd, src, is_instance, state, &mut verbatim);
+                    let lowered = lower_variable_declaration(
+                        vd,
+                        src,
+                        is_instance,
+                        state,
+                        &mut verbatim,
+                        carry_wanted,
+                        &mut carried,
+                    );
                     if verbatim.is_none() {
                         count_non_reparse(&ret.program.comments, vd.span);
                     }
@@ -599,6 +615,8 @@ fn transform_script<'a>(
                                 is_instance,
                                 state,
                                 &mut verbatim,
+                                carry_wanted,
+                                &mut carried,
                             );
                             if verbatim.is_none() {
                                 count_non_reparse(&ret.program.comments, vd.span);
@@ -785,6 +803,25 @@ fn transform_script<'a>(
         if !into_sink && anchor.is_none() {
             continue;
         }
+        if carried {
+            // Every emitted statement's spans are source-absolute, so the whole
+            // region shifts onto the chunk like a verbatim re-parse — including
+            // the statement's interior comments.
+            if let Some(base) = register_comment_region(
+                &mut state.comments,
+                src,
+                &ret.program.comments,
+                region_start,
+                trailing_end,
+            ) {
+                let mut place = comments::Place::Shift(base - region_start);
+                for emitted in out.iter_mut().skip(out_len) {
+                    place.visit_statement(emitted);
+                }
+            }
+            region_start = trailing_end;
+            continue;
+        }
         // Anchor the region on the first statement this source statement emitted
         // that can carry one.
         let mut place = place_on_region(
@@ -809,7 +846,6 @@ fn transform_script<'a>(
                 place.visit_statement(first);
             }
         }
-        let trailing_end = trailing_comment_end(src, &ret.program.comments, stmt_span.end);
         region_start = if verbatim.is_some() || trailing_end > stmt_span.end {
             trailing_end
         } else {
@@ -1891,6 +1927,8 @@ fn lower_variable_declaration<'a>(
     is_instance: bool,
     state: &mut ServerTransformState<'a>,
     verbatim: &mut Option<Span>,
+    carry: bool,
+    carried: &mut bool,
 ) -> Vec<Statement<'a>> {
     if vd
         .declarations
@@ -1901,6 +1939,11 @@ fn lower_variable_declaration<'a>(
         *verbatim = Some(vd.span);
         return vec![stmt];
     }
+    // Comment-carry mode: every re-parsed piece is shifted onto its source
+    // offset, so the whole statement can be [`comments::Place::Shift`]ed onto
+    // its region like a verbatim re-parse — synthesized wrappers stay
+    // location-less, which is exactly upstream's node shape.
+    let mut poisoned = !carry;
 
     let b = state.b;
     let kind = match vd.kind {
@@ -1940,7 +1983,18 @@ fn lower_variable_declaration<'a>(
                 // `let x = d()`). Mirrors upstream's tree-wide server visitors,
                 // which visit every non-rune `VariableDeclarator` init.
                 let slice = &src[d.span.start as usize..d.span.end as usize];
-                if let Some((pat, mut init)) = state.reparse_declarator(slice, kind) {
+                if let Some((mut pat, mut init)) = state.reparse_declarator(slice, kind) {
+                    if carry {
+                        // `reparse_declarator` wraps as `let <slice>;`, so the
+                        // parsed piece starts at offset 4.
+                        let mut shift = ShiftBy {
+                            delta: i64::from(d.span.start) - 4,
+                        };
+                        shift.visit_binding_pattern(&mut pat);
+                        if let Some(e) = init.as_mut() {
+                            shift.visit_expression(e);
+                        }
+                    }
                     if let Some(e) = init.as_mut() {
                         super::read_wrap::wrap_reads(
                             e,
@@ -1963,6 +2017,13 @@ fn lower_variable_declaration<'a>(
                 let Some(mut pat) = state.reparse_pattern(pat_slice) else {
                     continue;
                 };
+                if carry {
+                    // `reparse_pattern` wraps as `let <slice> = 0;` (offset 4).
+                    ShiftBy {
+                        delta: i64::from(pat_span.start) - 4,
+                    }
+                    .visit_binding_pattern(&mut pat);
+                }
                 // Strip `$bindable(<d>)` defaults: `{ x = $bindable() }` →
                 // `{ x = void 0 }`, `{ x = $bindable(5) }` → `{ x = 5 }`
                 // (写经 `VariableDeclaration.js:42-52` AssignmentPattern walk).
@@ -1972,12 +2033,19 @@ fn lower_variable_declaration<'a>(
             }
             Some(rune) => {
                 // Lower the init from the rune; keep the binding pattern verbatim.
-                let new_init = lower_decl_init(&rune, d.init.as_ref(), src, state);
+                let new_init =
+                    lower_decl_init(&rune, d.init.as_ref(), src, state, carry, &mut poisoned);
                 let pat_span = d.id.span();
                 let pat_slice = &src[pat_span.start as usize..pat_span.end as usize];
-                let Some(pat) = state.reparse_pattern(pat_slice) else {
+                let Some(mut pat) = state.reparse_pattern(pat_slice) else {
                     continue;
                 };
+                if carry {
+                    ShiftBy {
+                        delta: i64::from(pat_span.start) - 4,
+                    }
+                    .visit_binding_pattern(&mut pat);
+                }
                 // A destructured `$state` / `$state.raw` init expands via
                 // `create_state_declarators` into a `tmp` temp + (for array
                 // patterns) a `$$array = $.to_array(tmp, N)` insert + one leaf
@@ -2023,15 +2091,41 @@ fn lower_variable_declaration<'a>(
             if combine_module_derived {
                 combined_decls.extend(decls);
             } else {
-                out.push(b.var_decl_from_pairs(kind, decls));
+                let mut stmt = b.var_decl_from_pairs(kind, decls);
+                if carry && let Statement::VariableDeclaration(v) = &mut stmt {
+                    v.span = d.span;
+                }
+                out.push(stmt);
             }
         }
     }
     if !combined_decls.is_empty() {
-        out.push(b.var_decl_from_pairs(kind, combined_decls));
+        let mut stmt = b.var_decl_from_pairs(kind, combined_decls);
+        if carry && let Statement::VariableDeclaration(v) = &mut stmt {
+            v.span = vd.span;
+        }
+        out.push(stmt);
     }
 
+    *carried = !poisoned && !out.is_empty();
     out
+}
+
+/// Shift every located span of a re-parsed piece by `delta`, so its
+/// coordinates become source-absolute for the comment carry-over. The `0,0`
+/// SPAN placeholder of a synthesized node stays location-less.
+struct ShiftBy {
+    delta: i64,
+}
+
+impl VisitMut<'_> for ShiftBy {
+    fn visit_span(&mut self, span: &mut Span) {
+        if (span.start == 0 && span.end == 0) || span.end == u32::MAX {
+            return;
+        }
+        span.start = (i64::from(span.start) + self.delta) as u32;
+        span.end = (i64::from(span.end) + self.delta) as u32;
+    }
 }
 
 /// Port of upstream `create_state_declarators` (`VariableDeclaration.js:229-247`)
@@ -2591,33 +2685,48 @@ fn lower_decl_init<'a>(
     init: Option<&OxcExpression>,
     src: &str,
     state: &ServerTransformState<'a>,
+    carry: bool,
+    poisoned: &mut bool,
 ) -> Option<OxcExpression<'a>> {
     let b = state.b;
     if matches!(rune, DeclRune::Props) {
         return Some(b.id("$$props"));
     }
 
-    // First call argument's source slice (if any).
-    let first_arg_slice: Option<&str> = match init {
+    // First call argument's source slice (if any) and its source offset.
+    let first_arg_slice: Option<(&str, u32)> = match init {
         Some(OxcExpression::CallExpression(call)) => call
             .arguments
             .first()
             .and_then(|a| a.as_expression())
             .map(|e| {
                 let s = e.span();
-                &src[s.start as usize..s.end as usize]
+                (&src[s.start as usize..s.end as usize], s.start)
             }),
         _ => None,
     };
 
-    let arg_expr = |state: &ServerTransformState<'a>| -> OxcExpression<'a> {
+    let arg_expr = |state: &ServerTransformState<'a>, poisoned: &mut bool| -> OxcExpression<'a> {
         match first_arg_slice {
-            Some(slice) => {
+            Some((slice, slice_start)) => {
                 let rewritten = (matches!(rune, DeclRune::Derived) && state.eval_inputs.use_async)
                     .then(|| wrap_await_with_save_in_async_derived(slice));
                 let mut e = state
                     .reparse_slice_owned(rewritten.as_deref().unwrap_or(slice))
                     .unwrap_or_else(|| state.b.void0());
+                if carry {
+                    if rewritten.as_deref().is_some_and(|r| r != slice) {
+                        // The async rewrite changes the text, so its spans no
+                        // longer map onto the source region.
+                        *poisoned = true;
+                    } else {
+                        // `reparse_slice_owned` wraps as `(<slice>)` (offset 1).
+                        ShiftBy {
+                            delta: i64::from(slice_start) - 1,
+                        }
+                        .visit_expression(&mut e);
+                    }
+                }
                 // Read-wrap the init/thunk body so derived/store reads inside a
                 // `$state(...)` / `$derived(...)` initializer become getters
                 // (e.g. `$derived(a + 1)` thunk → `() => a() + 1`). Mirrors
@@ -2635,7 +2744,7 @@ fn lower_decl_init<'a>(
     };
 
     match rune {
-        DeclRune::State => Some(arg_expr(state)),
+        DeclRune::State => Some(arg_expr(state, poisoned)),
         DeclRune::Derived => {
             // Async `$derived(await EXPR)` lowering (写经
             // `3-transform/server/visitors/VariableDeclaration.js:87-96`): when the
@@ -2648,7 +2757,7 @@ fn lower_decl_init<'a>(
             // thunk `async` (`async () => …`); otherwise it is an ordinary
             // `() => …` thunk. Without an await — or in sync mode — it stays the
             // plain synchronous `$.derived(() => <value>)` shape (UNCHANGED).
-            let mut e = arg_expr(state);
+            let mut e = arg_expr(state, poisoned);
             // Async iff the derived argument carries a TOP-LEVEL `await` ANYWHERE
             // (not just as the direct arg) — `$derived(await foo)` AND
             // `$derived(cond ? await foo : null)` both become async deriveds. A
@@ -2670,7 +2779,7 @@ fn lower_decl_init<'a>(
                 Some(b.call("$.derived", vec![b.thunk(e, false)]))
             }
         }
-        DeclRune::DerivedBy => Some(b.call("$.derived", vec![arg_expr(state)])),
+        DeclRune::DerivedBy => Some(b.call("$.derived", vec![arg_expr(state, poisoned)])),
         DeclRune::Props | DeclRune::PropsId => None,
     }
 }

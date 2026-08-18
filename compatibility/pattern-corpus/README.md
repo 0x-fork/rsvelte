@@ -421,9 +421,10 @@ oracle crash (the other four landed once their formatter fixes shipped:
 after #3046, `textarea-value-forms` in `elements/` after #3060, and
 `regex-zoo` in `expressions/` after #3047 — whose mechanism was the collapse
 re-parse silently skipping any file where the JS printer's paren-stripping
-produced a `{/regex…}` tag); `comment-hostile-slots`, blocked on the rune-lowering
-comment-placement divergences it exposed (#3059 — a class the corpus gate
-deliberately ignores, `CommentPolicy::Ignore`); and the BigInt/number-mix shape,
+produced a `{/regex…}` tag); `comment-hostile-slots`, whose rune-lowering
+comment placements #3059 fixed on every target but which is still held on a
+formatter-parity divergence (rsvelte keeps the `{#each … as [,]}` elision
+where the oxfmt oracle prints `[]`); and the BigInt/number-mix shape,
 which crashes the OFFICIAL compiler with an uncoded TypeError (#3054,
 `upstream_issues/`). The compiler divergences the sweeps found (#3030–#3045,
 #3055–#3058) are all fixed and landed — each as a distilled repro in `issues/`
