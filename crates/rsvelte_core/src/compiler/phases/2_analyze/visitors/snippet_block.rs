@@ -80,6 +80,7 @@ pub fn visit<'a, 'b: 'a>(
 
     // Increment block depth for child analysis
     context.block_depth += 1;
+    context.svelte_self_parent_depth += 1;
 
     // Push fragment owner type for const_tag placement validation
     let snippet_name = super::shared::snippets::get_snippet_name(block).unwrap_or_default();
@@ -138,6 +139,7 @@ pub fn visit<'a, 'b: 'a>(
 
     // Decrement block depth
     context.block_depth -= 1;
+    context.svelte_self_parent_depth -= 1;
 
     // Determine if the snippet can be hoisted to module level.
     // A snippet can be hoisted if:
@@ -696,9 +698,34 @@ fn check_hoistable(
                 }
             }
 
-            // `<svelte:element>` (runtime tag) and `<svelte:self>` (recursive)
-            // conservatively prevent hoisting (not exercised by the in-scope fixtures).
-            TemplateNode::SvelteElement(_) | TemplateNode::SvelteSelf(_) => return false,
+            // Upstream decides hoisting from the snippet scope's REFERENCES, and
+            // neither of these contributes one of its own: `<svelte:element>`
+            // reaches instance state only through its `this` expression, and
+            // `<svelte:self>` names the module's own component.
+            TemplateNode::SvelteElement(el) => {
+                if !expr_only_uses_params(&el.tag, param_names, context) {
+                    return false;
+                }
+                for attr in &el.attributes {
+                    if !check_attribute_hoistable(attr, param_names, context) {
+                        return false;
+                    }
+                }
+                if !check_hoistable(&el.fragment.nodes, param_names, context) {
+                    return false;
+                }
+            }
+
+            TemplateNode::SvelteSelf(el) => {
+                for attr in &el.attributes {
+                    if !check_attribute_hoistable(attr, param_names, context) {
+                        return false;
+                    }
+                }
+                if !check_hoistable(&el.fragment.nodes, param_names, context) {
+                    return false;
+                }
+            }
 
             // Components - check attributes/props for instance-level references
             TemplateNode::Component(comp) => {
