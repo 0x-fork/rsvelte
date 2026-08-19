@@ -161,6 +161,23 @@ fn record_first_error(
     }
 }
 
+/// A comment where a compound selector should begin. Upstream's `read_selector`
+/// tolerates one only immediately before `,`, `{` or `)`; anywhere else the loop
+/// falls through to `read_identifier`, which rejects the `/`.
+fn record_selector_comment_error(
+    cell: &std::cell::Cell<Option<crate::error::ParseError>>,
+    pos: usize,
+) {
+    record_first_error(
+        cell,
+        crate::error::ParseError::svelte(
+            "css_expected_identifier",
+            "Expected a valid CSS identifier",
+            (pos, pos),
+        ),
+    );
+}
+
 // ============================================================================
 // Parser implementation for style tags
 // ============================================================================
@@ -993,8 +1010,10 @@ impl<'a> CssParser<'a> {
         while i < bytes.len() {
             let c = bytes[i];
 
-            // Skip CSS comments
+            // Leading and trailing comments were stripped before this scan, so one
+            // reached here starts a compound — where upstream reads an identifier.
             if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                record_selector_comment_error(&self.error, base_offset + i);
                 i += 2; // skip /*
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                     i += 1;
@@ -1105,6 +1124,7 @@ impl<'a> CssParser<'a> {
                 }
                 // Also skip comments in look-ahead
                 while j + 1 < bytes.len() && bytes[j] == b'/' && bytes[j + 1] == b'*' {
+                    record_selector_comment_error(&self.error, base_offset + j);
                     j += 2; // skip /*
                     while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
                         j += 1;
@@ -2413,7 +2433,9 @@ impl<'a> SelectorParser<'a> {
                     }
                 }
 
-                let trailing_ws = content.len() - content.trim_end_ws().len();
+                // Upstream ends the list at the last selector, so a comment before
+                // the `)` belongs to the enclosing pseudo-class, not to the list.
+                let trailing_ws = CssParser::css_safe_trailing_ws_and_comments_len(content);
                 let trimmed_start = args_start + leading_skip;
                 let trimmed_end = self.offset + content_end - trailing_ws;
 
@@ -2603,6 +2625,20 @@ impl<'a> SelectorParser<'a> {
 
         while i < bytes.len() {
             let c = bytes[i];
+
+            // Leading and trailing comments were stripped before this scan, so one
+            // reached here starts a compound — where upstream reads an identifier.
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                record_selector_comment_error(&self.error, base_offset + i);
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    i += 2;
+                }
+                continue;
+            }
 
             // Skip content in parentheses
             if c == b'(' {
