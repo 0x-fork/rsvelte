@@ -251,7 +251,9 @@ fn emit_element_body<'a>(
 
     // -- children -----------------------------------------------------------
     if !is_void {
-        let namespace = if node.metadata.svg {
+        let namespace = if node.name.as_str() == "foreignObject" {
+            "html"
+        } else if node.metadata.svg {
             "svg"
         } else if node.metadata.mathml {
             "mathml"
@@ -278,12 +280,7 @@ fn emit_element_body<'a>(
             }
             // Content bind: render the bound value as the body when truthy,
             // otherwise fall back to the element's own (trimmed) children.
-            // Mirrors upstream RegularElement.js lines 178-198 + the text
-            // oracle's `TextareaBody` / `ContentEditableBody` split: a
-            // `<textarea>` suppresses the fallback children (its content IS the
-            // value), while a contenteditable element renders them in the else.
-            let is_textarea = name == "textarea";
-            emit_content_body(node, content, namespace, is_textarea, state);
+            emit_content_body(node, content, namespace, state);
         } else {
             let mut leading_debug = 0;
             let mut has_debug = false;
@@ -510,18 +507,13 @@ fn emit_content_body<'a>(
     node: &RegularElement<'a>,
     content: OxcExpression<'a>,
     namespace: &str,
-    suppress_children: bool,
     state: &mut ServerTransformState<'a>,
 ) {
     use super::shared::build_template;
 
     // Build the inner-children template into a SEPARATE buffer (the `else`
-    // branch body). Upstream uses a fresh `inner_state.template`. For
-    // `<textarea>` the children are SUPPRESSED (the value is the content), so
-    // the else branch is empty — matching the text oracle's `TextareaBody`.
-    let else_body = if suppress_children {
-        Vec::new()
-    } else {
+    // branch body). Upstream uses a fresh `inner_state.template`.
+    let else_body = {
         let saved = std::mem::take(&mut state.template);
         process_children(&node.fragment.nodes, Some(node), namespace, state);
         let inner_entries = std::mem::replace(&mut state.template, saved);
@@ -1734,7 +1726,9 @@ fn render_children_body<'a>(
     state: &mut ServerTransformState<'a>,
 ) -> Vec<Statement<'a>> {
     use super::shared::build_template;
-    let namespace = if node.metadata.svg {
+    let namespace = if node.name.as_str() == "foreignObject" {
+        "html"
+    } else if node.metadata.svg {
         "svg"
     } else if node.metadata.mathml {
         "mathml"
