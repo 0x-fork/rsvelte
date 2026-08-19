@@ -347,9 +347,8 @@ impl<'a> ComponentContext<'a> {
 
             // Determine which path to use for attributes, matching the official
             // SvelteElement.js (lines 76-94):
-            // 1. Single text class attribute (no directives) -> fast $.set_class
-            // 2. Single text class attribute + class directives -> build_set_class
-            // 3. Any other attributes/directives -> build_attribute_effect
+            // 1. Single text class attribute -> build_set_class
+            // 2. Any other attributes/directives -> build_attribute_effect
             let is_single_text_class = attributes.len() == 1
                 && style_directives.is_empty()
                 && matches!(&attributes[0], Attribute::Attribute(a)
@@ -360,47 +359,7 @@ impl<'a> ComponentContext<'a> {
                     }
                 );
 
-            if is_single_text_class && class_directives.is_empty() {
-                // Fast path: single static class attribute, no class directives
-                // Build $.set_class call directly
-                let css_hash = self.state.analysis.css.hash.clone();
-                let is_scoped = elem.metadata.scoped && !css_hash.is_empty();
-
-                if let Attribute::Attribute(attr) = &attributes[0] {
-                    // Extract the text value
-                    let mut text_value = String::new();
-                    if let crate::ast::template::AttributeValue::Sequence(parts) = &attr.value {
-                        for part in parts {
-                            if let crate::ast::template::AttributeValuePart::Text(t) = part {
-                                text_value.push_str(&t.data);
-                            }
-                        }
-                    }
-
-                    // Concatenate CSS hash if scoped
-                    let class_str = if is_scoped && !css_hash.is_empty() {
-                        if text_value.is_empty() {
-                            css_hash.clone()
-                        } else {
-                            format!("{} {}", text_value, css_hash)
-                        }
-                    } else {
-                        text_value
-                    };
-
-                    // $.set_class(element_id, is_html ? 1 : 0, class_value)
-                    let set_class_call = b::call(
-                        &self.arena,
-                        b::member_path(&self.arena, "$.set_class"),
-                        vec![
-                            b::id(&element_id_name),
-                            b::number(0.0), // is_html=false for svelte:element
-                            b::string(class_str),
-                        ],
-                    );
-                    self.state.init.push(b::stmt(&self.arena, set_class_call));
-                }
-            } else if is_single_text_class {
+            if is_single_text_class {
                 // Single text class attribute WITH class directives -> build_set_class
                 // This matches the official SvelteElement.js line 82:
                 //   build_set_class(node, element_id, attributes[0], class_directives, inner_context, false)

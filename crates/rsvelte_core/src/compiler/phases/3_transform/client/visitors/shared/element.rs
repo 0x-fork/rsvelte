@@ -913,7 +913,11 @@ pub fn build_set_class(
                 if s.is_empty() {
                     class_value = b::string(css_hash);
                 } else {
-                    class_value = b::string(format!("{} {}", s, css_hash));
+                    class_value = b::string(format!(
+                        "{} {}",
+                        crate::compiler::phases::phase3_transform::shared::template::escape_attr(s),
+                        css_hash
+                    ));
                 }
             }
             // A quote-preserving string literal (`class={"draggable"}`) is just as
@@ -929,7 +933,13 @@ pub fn build_set_class(
                 if value.is_empty() {
                     class_value = b::string(css_hash);
                 } else {
-                    class_value = b::string(format!("{} {}", value, css_hash));
+                    class_value = b::string(format!(
+                        "{} {}",
+                        crate::compiler::phases::phase3_transform::shared::template::escape_attr(
+                            value
+                        ),
+                        css_hash
+                    ));
                 }
             }
             _ => {
