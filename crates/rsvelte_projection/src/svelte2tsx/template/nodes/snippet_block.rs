@@ -275,6 +275,7 @@ pub fn handle_snippet_block_inner(
         // enclosing component's slot scope, so a `let:`/`slot=` inside the body
         // is a plain attribute rather than a `$$slot_def` consumer.
         let saved_slot = counter.slot_inst.take();
+        hoist_snippet_blocks(&block.body, source, str);
         process_fragment_trimmed(&block.body.nodes, source, options, str, counter, 0);
         counter.slot_inst = saved_slot;
 

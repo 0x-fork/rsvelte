@@ -274,6 +274,7 @@ pub fn handle_each_block(
         str.overwrite(body_end, fallback_start, "}");
 
         // Process fallback
+        hoist_snippet_blocks(fallback, source, str);
         process_fragment_trimmed(&fallback.nodes, source, options, str, counter, depth);
 
         let fallback_end = if fallback.nodes.is_empty() {
