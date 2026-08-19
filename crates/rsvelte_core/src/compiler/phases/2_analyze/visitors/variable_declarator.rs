@@ -311,9 +311,10 @@ fn is_expression_defined_typed(node: &JsNode, arena: &crate::ast::arena::ParseAr
             is_expression_defined_typed(arena.get_js_node(*consequent), arena)
                 && is_expression_defined_typed(arena.get_js_node(*alternate), arena)
         }
-        JsNode::ArrayExpression { .. }
-        | JsNode::ObjectExpression { .. }
-        | JsNode::ArrowFunctionExpression { .. }
+        // Upstream's `evaluate` has a case for the function forms and for a
+        // template literal, and none for an array or object — those fall through
+        // to UNKNOWN, which includes nullish (scope.js L560, L530).
+        JsNode::ArrowFunctionExpression { .. }
         | JsNode::FunctionExpression { .. }
         | JsNode::TemplateLiteral { .. } => true,
         // See the JSON variant above — Svelte 5.53.3 `f67d03df5` treats
