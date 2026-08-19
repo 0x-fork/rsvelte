@@ -403,6 +403,88 @@ pub(crate) fn split_class_members_onto_lines(class_body: &str) -> std::borrow::C
     std::borrow::Cow::Owned(out)
 }
 
+/// The offset of the `class` keyword in a top-level `export default class …`,
+/// read from code bytes only so the words cannot come from a comment or string.
+fn export_default_class_keyword(bytes: &[u8]) -> Option<usize> {
+    // The three keywords must be consecutive identifier runs.
+    const WORDS: [&[u8]; 3] = [b"export", b"default", b"class"];
+    let mut matched = 0usize;
+    let mut run_start: Option<usize> = None;
+    let mut prev_end = 0usize;
+    for (i, byte) in js_scan::code_bytes(bytes) {
+        if let Some(start) = run_start
+            && (i != prev_end || !js_scan::is_ident_byte(byte))
+        {
+            run_start = None;
+            let word = &bytes[start..prev_end];
+            if word == WORDS[matched] {
+                matched += 1;
+                if matched == WORDS.len() {
+                    return Some(start);
+                }
+            } else {
+                matched = 0;
+            }
+        }
+        prev_end = i + 1;
+        if js_scan::is_ident_byte(byte) {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else if !byte.is_ascii_whitespace() {
+            matched = 0;
+        }
+    }
+    if let Some(start) = run_start
+        && matched + 1 == WORDS.len()
+        && &bytes[start..prev_end] == WORDS[matched]
+    {
+        return Some(start);
+    }
+    None
+}
+
+/// Terminate a module's `export default class … }` with the `;` upstream prints:
+/// esrap emits the default export's class through its expression path, so the
+/// statement ends in `};` even for a plain class with no runes.
+pub(crate) fn terminate_export_default_class(code: &str) -> Option<String> {
+    let bytes = code.as_bytes();
+    let keyword = export_default_class_keyword(bytes)?;
+    let header = find_class_header(&code[keyword..])?;
+    let brace = keyword + header.body_brace;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, byte) in js_scan::code_bytes_from(bytes, brace) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    // A `;` the source already wrote lands as its own statement; upstream folds
+    // it into the class's terminator instead of printing an empty statement.
+    let next_code = js_scan::code_bytes_from(bytes, close + 1)
+        .find(|(_, b)| !b.is_ascii_whitespace())
+        .filter(|(_, b)| *b == b';')
+        .map(|(i, _)| i);
+    if next_code == Some(close + 1) {
+        return None;
+    }
+    let tail = next_code.map_or(close + 1, |i| i + 1);
+    let mut out = String::with_capacity(code.len() + 1);
+    out.push_str(&code[..=close]);
+    out.push(';');
+    out.push_str(&code[tail..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{brace_opens_class_body, find_class_header, split_class_members_onto_lines};
@@ -528,86 +610,4 @@ mod tests {
             assert!(!brace_opens_class_body(prefix), "{prefix:?}");
         }
     }
-}
-
-/// The offset of the `class` keyword in a top-level `export default class …`,
-/// read from code bytes only so the words cannot come from a comment or string.
-fn export_default_class_keyword(bytes: &[u8]) -> Option<usize> {
-    // The three keywords must be consecutive identifier runs.
-    const WORDS: [&[u8]; 3] = [b"export", b"default", b"class"];
-    let mut matched = 0usize;
-    let mut run_start: Option<usize> = None;
-    let mut prev_end = 0usize;
-    for (i, byte) in js_scan::code_bytes(bytes) {
-        if let Some(start) = run_start
-            && (i != prev_end || !js_scan::is_ident_byte(byte))
-        {
-            run_start = None;
-            let word = &bytes[start..prev_end];
-            if word == WORDS[matched] {
-                matched += 1;
-                if matched == WORDS.len() {
-                    return Some(start);
-                }
-            } else {
-                matched = 0;
-            }
-        }
-        prev_end = i + 1;
-        if js_scan::is_ident_byte(byte) {
-            if run_start.is_none() {
-                run_start = Some(i);
-            }
-        } else if !byte.is_ascii_whitespace() {
-            matched = 0;
-        }
-    }
-    if let Some(start) = run_start
-        && matched + 1 == WORDS.len()
-        && &bytes[start..prev_end] == WORDS[matched]
-    {
-        return Some(start);
-    }
-    None
-}
-
-/// Terminate a module's `export default class … }` with the `;` upstream prints:
-/// esrap emits the default export's class through its expression path, so the
-/// statement ends in `};` even for a plain class with no runes.
-pub(crate) fn terminate_export_default_class(code: &str) -> Option<String> {
-    let bytes = code.as_bytes();
-    let keyword = export_default_class_keyword(bytes)?;
-    let header = find_class_header(&code[keyword..])?;
-    let brace = keyword + header.body_brace;
-    let mut depth = 0i32;
-    let mut close = None;
-    for (i, byte) in js_scan::code_bytes_from(bytes, brace) {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close = close?;
-    // A `;` the source already wrote lands as its own statement; upstream folds
-    // it into the class's terminator instead of printing an empty statement.
-    let next_code = js_scan::code_bytes_from(bytes, close + 1)
-        .find(|(_, b)| !b.is_ascii_whitespace())
-        .filter(|(_, b)| *b == b';')
-        .map(|(i, _)| i);
-    if next_code == Some(close + 1) {
-        return None;
-    }
-    let tail = next_code.map_or(close + 1, |i| i + 1);
-    let mut out = String::with_capacity(code.len() + 1);
-    out.push_str(&code[..=close]);
-    out.push(';');
-    out.push_str(&code[tail..]);
-    Some(out)
 }
