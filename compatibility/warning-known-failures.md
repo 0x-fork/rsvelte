@@ -34,8 +34,8 @@ compilers already run on every entry.
 
 ## Why the four per-target files are currently identical
 
-`warning-known-failures.<target>.json` holds the same @CODES@ entries on all four,
-and `warning-position-known-failures.<target>.json` the same @POS@. That is not a
+`warning-known-failures.<target>.json` holds the same 10 entries on all four,
+and `warning-position-known-failures.<target>.json` the same 1 entry. That is not a
 bug in the partitioning — almost every warning is produced in Phase 1/2 (parse
 and analyze), before the target is consulted, so a divergence shows up on all
 four targets at once. Only target-specific codes (`node_invalid_placement_ssr`
@@ -46,18 +46,24 @@ and stays sensitive to an entry that starts diverging on a second target while
 already listed for the first. Expect all eight files to move together in a
 burn-down PR.
 
-## Warning codes (`warning-known-failures.<target>.json`, @CODES@ entries each)
+## Warning codes (`warning-known-failures.<target>.json`, 10 entries each)
 
 The multiset of warning **codes** differs: rsvelte warns where upstream does
 not, or stays silent where upstream warns. This is a semantic bug — a user sees
 noise they cannot suppress, or misses a diagnostic they should have seen.
 
-@PARA@
+Not every entry is equally bad. Of the 10 entries that still diverge, **3 are
+under-warnings** — rsvelte stays silent where upstream warns
+(`state_referenced_locally` ×1, `perf_avoid_nested_class` ×2, and
+`options_missing_custom_element` ×1). The other
+7 are noise the user cannot suppress — 14 tuples over three codes
+(`component_name_lowercase` 10, `state_referenced_locally` 2,
+`export_let_unused` 2). Both are defects, but a
 missing diagnostic and an extra one fail differently, and the ratchet count alone
 does not distinguish them; no entry diverges in both directions at once — which
 is what lets the two counts be added:
 
-Partition of `warning-known-failures.<target>.json` by direction: `@PARTITION@`
+Partition of `warning-known-failures.<target>.json` by direction: `3 + 7`
 
 Four entries left in #3027, and they are one cause in both directions: phase 2's
 `UpdateExpression` visitor never walked its argument, so `x++` recorded no
@@ -67,7 +73,7 @@ whose only read of a `$derived` is `linked.current++`, was **missing** the
 `state_referenced_locally` upstream raises — the same omission over- and
 under-warning at once, which is why the two directions moved together.
 
-The other three under-warnings were the whole of the
+Three earlier under-warnings were the whole of the
 `a11y_no_static_element_interactions` cluster
 (`runtime-legacy/samples/dynamic-element-{event-handler1,event-handler2,pass-props}`),
 removed by #2523: the a11y pass had no call site in `svelte_element.rs`, so
