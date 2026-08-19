@@ -952,20 +952,33 @@ impl<'a, 's> StateVarCollector<'a, 's> {
         while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
             j += 1;
         }
-        if j < bytes.len() && bytes[j] == b';' {
+        let end = if j < bytes.len() && bytes[j] == b';' {
             replacement.push(';');
-            for &(start, end) in spans {
-                replacement.push(' ');
-                replacement.push_str(&self.source[start as usize..end as usize]);
-            }
             (j + 1) as u32
         } else {
-            for &(start, end) in spans {
-                replacement.push(' ');
-                replacement.push_str(&self.source[start as usize..end as usize]);
-            }
             call_end
+        };
+        // A comment the source put on its own line becomes a leading comment of
+        // the next statement, so esrap prints it after the statement break.
+        let indent = self.line_indent(call_end);
+        for &(start, cend) in spans {
+            if starts_its_own_line(bytes, start as usize) {
+                replacement.push_str("\n\n");
+                replacement.push_str(indent);
+            } else {
+                replacement.push(' ');
+            }
+            replacement.push_str(&self.source[start as usize..cend as usize]);
         }
+        end
+    }
+
+    /// The leading whitespace of the line `offset` sits on.
+    fn line_indent(&self, offset: u32) -> &str {
+        let head = &self.source[..offset as usize];
+        let line_start = head.rfind('\n').map_or(0, |p| p + 1);
+        let rest = &self.source[line_start..];
+        &rest[..rest.len() - rest.trim_start_matches([' ', '\t']).len()]
     }
 
     /// Whether a blank line separates well: previous non-ws char before
@@ -5163,6 +5176,21 @@ fn collect_state_var_replacements_without_semantic_scan(
         }
     }
     collector.replacements
+}
+
+/// Is the byte at `at` the first non-whitespace on its line?
+fn starts_its_own_line(bytes: &[u8], at: usize) -> bool {
+    let mut i = at;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'\n' {
+            return true;
+        }
+        if !bytes[i].is_ascii_whitespace() {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
