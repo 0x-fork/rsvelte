@@ -693,7 +693,8 @@ fn check_hoistable(
                         return false;
                     }
                 }
-                if !check_hoistable(&comp.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&comp.attributes, param_names);
+                if !check_hoistable(&comp.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -711,7 +712,8 @@ fn check_hoistable(
                         return false;
                     }
                 }
-                if !check_hoistable(&el.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&el.attributes, param_names);
+                if !check_hoistable(&el.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -722,7 +724,8 @@ fn check_hoistable(
                         return false;
                     }
                 }
-                if !check_hoistable(&el.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&el.attributes, param_names);
+                if !check_hoistable(&el.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -743,7 +746,8 @@ fn check_hoistable(
                     }
                 }
                 // Check children
-                if !check_hoistable(&comp.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&comp.attributes, param_names);
+                if !check_hoistable(&comp.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -864,7 +868,8 @@ fn check_hoistable(
                         return false;
                     }
                 }
-                if !check_hoistable(&elem.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&elem.attributes, param_names);
+                if !check_hoistable(&elem.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -948,7 +953,8 @@ fn check_hoistable(
                         return false;
                     }
                 }
-                if !check_hoistable(&elem.fragment.nodes, param_names, context) {
+                let inner = with_let_names(&elem.attributes, param_names);
+                if !check_hoistable(&elem.fragment.nodes, &inner, context) {
                     return false;
                 }
             }
@@ -1031,6 +1037,32 @@ fn check_svelte_directive_hoistable(
 ///
 /// The match is exhaustive on purpose: a silent `_ => true` arm is what let
 /// `{@attach …}` expressions escape the free-variable walk (issue #1982).
+/// The names a node's `let:` directives declare for its own children. Upstream
+/// resolves them through the scope chain, where they sit at or below the
+/// snippet's own depth and so never block hoisting.
+fn with_let_names(
+    attributes: &[crate::ast::template::Attribute],
+    param_names: &FxHashSet<String>,
+) -> FxHashSet<String> {
+    let mut out = param_names.clone();
+    for attr in attributes {
+        if let crate::ast::template::Attribute::LetDirective(d) = attr {
+            match d.expression.as_ref() {
+                Some(expr) => {
+                    for n in extract_pattern_names_for_expr(expr).unwrap_or_default() {
+                        out.insert(n);
+                    }
+                }
+                // `let:v` with no value binds the directive's own name.
+                None => {
+                    out.insert(d.name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn check_attribute_hoistable(
     attr: &crate::ast::template::Attribute,
     param_names: &FxHashSet<String>,
