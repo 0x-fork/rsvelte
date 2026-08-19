@@ -27,4 +27,8 @@
 <details bind:open={checked}><summary>s</summary>b</details>
 <div contenteditable="true" bind:innerHTML={text}></div>
 <div bind:this={el}></div>
-<p>{text}{num}{checked}{group.length}{radio}{files ? 1 : 0}{sel}{multi.length}{dim}{time}{el ? 1 : 0}</p>
+<p>{text}{num}{checked}</p>
+<p>{group.length}{radio}</p>
+<p>{files ? 1 : 0}{sel}</p>
+<p>{multi.length}{dim}{time}</p>
+<p>{el ? 1 : 0}</p>
