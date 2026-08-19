@@ -1399,154 +1399,44 @@ impl<'a> ComponentContext<'a> {
                     );
                     // Let directive bindings are template-kind.
                     self.state.transform_deep_read.insert(name.clone(), ());
-                } else {
-                    // Destructured case: let:x={{y, z}} or let:x={[a, b]}
-                    // Generates: const derived_name = $.derived(() => { let {y, z} = $$slotProps.x; return {y, z}; })
-                    // And registers transforms: y -> $.get(derived_name).y, z -> $.get(derived_name).z
-                    if let Some(expr) = &let_dir.expression {
-                        {
-                            let expr_type = expr.node_type().unwrap_or("");
-                            // Extract binding names from the expression
-                            let mut binding_names: Vec<compact_str::CompactString> = Vec::new();
-                            let node = expr.as_node();
-                            match &*node {
-                                crate::ast::typed_expr::JsNode::ObjectExpression {
-                                    properties,
-                                    ..
-                                } => {
-                                    // Object destructuring: {y, z}
-                                    for prop in self.state.parse_arena.get_js_children(*properties)
-                                    {
-                                        if let Some(key_id) = prop.key() {
-                                            let key = self.state.parse_arena.get_js_node(key_id);
-                                            if let Some(name) = key.name() {
-                                                binding_names.push(name.into());
-                                            }
-                                        }
-                                    }
-                                }
-                                crate::ast::typed_expr::JsNode::ArrayExpression {
-                                    elements,
-                                    ..
-                                } => {
-                                    for elem in elements.iter().flatten() {
-                                        if let Some(name) = elem.name() {
-                                            binding_names.push(name.into());
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
+                } else if let Some((derived_name, binding_names, const_stmt)) =
+                    crate::compiler::phases::phase3_transform::client::visitors::shared::component::build_destructured_let_directive(
+                        let_dir, self,
+                    )
+                {
+                    // Destructured case: the pattern, the names it binds and the
+                    // derived it reads through are the component path's, so a
+                    // rename / nesting / rest / default behaves the same here.
+                    let_names.push(derived_name.clone().into());
+                    saved_transforms.push((
+                        derived_name.clone(),
+                        self.state.transform.get(&derived_name).cloned(),
+                    ));
 
-                            if !binding_names.is_empty() {
-                                // Generate unique name for the derived variable
-                                let derived_name = self.state.memoizer.generate_id(prop_name);
-                                let_names.push(derived_name.clone().into());
-                                // Save existing transform for derived_name (if any) before it could be shadowed
-                                saved_transforms.push((
-                                    derived_name.clone(),
-                                    self.state.transform.get(&derived_name).cloned(),
-                                ));
-
-                                // Register transforms for each binding:
-                                // binding_name -> $.get(derived_name).binding_name
-                                for binding_name in &binding_names {
-                                    let derived_name_clone = derived_name.clone();
-                                    let_names.push(binding_name.clone());
-                                    // Save existing transform before overwriting
-                                    saved_transforms.push((
-                                        binding_name.to_string(),
-                                        self.state.transform.get(binding_name.as_str()).cloned(),
-                                    ));
-                                    self.state.transform.insert(
-                                        binding_name.to_string(),
-                                        IdentifierTransform {
-                                            read: Some(|arena, node| {
-                                                // The node is the identifier (e.g., `num`)
-                                                // We need to produce: $.get(derived_name).num
-                                                // But we can't capture derived_name in a fn pointer.
-                                                // Instead we use read_source which is checked
-                                                // in apply_transforms_to_expression.
-                                                b::call(
-                                                    arena,
-                                                    b::member_path(arena, "$.get"),
-                                                    vec![node],
-                                                )
-                                            }),
-                                            read_source: Some(derived_name_clone),
-                                            assign: None,
-                                            mutate: None,
-                                            update: None,
-                                            skip_proxy: false,
-                                            is_defined: false,
-                                            is_reactive: true,
-                                            replacement_id: None,
-                                        },
-                                    );
-                                    // Destructured let directive binding is template-kind.
-                                    self.state
-                                        .transform_deep_read
-                                        .insert(binding_name.to_string(), ());
-                                }
-
-                                // Build the destructuring pattern
-                                let destructuring_pat = if expr_type == "ObjectExpression" {
-                                    b::object_pattern(
-                                        binding_names
-                                            .iter()
-                                            .map(|n| JsObjectPatternProperty::Property {
-                                                key: JsPropertyKey::Identifier(n.clone()),
-                                                value: b::id_pattern(n.clone()),
-                                                computed: false,
-                                                shorthand: true,
-                                            })
-                                            .collect(),
-                                    )
-                                } else {
-                                    b::array_pattern(
-                                        binding_names
-                                            .iter()
-                                            .map(|n| Some(b::id_pattern(n.clone())))
-                                            .collect(),
-                                    )
-                                };
-
-                                // Build the return object: { a, b }
-                                let return_obj_expr = b::object(
-                                    binding_names
-                                        .iter()
-                                        .map(|n| b::prop(&self.arena, n.clone(), b::id(n.clone())))
-                                        .collect(),
-                                );
-
-                                // Generate: const derived_name = $.derived(() => {
-                                //   let { y, z } = $$slotProps.prop_name;
-                                //   return { y, z };
-                                // })
-                                // Note: destructured case always uses $.derived (not $.derived_safe_equal)
-                                let inner_let = b::var_decl_pattern(
-                                    &self.arena,
-                                    JsVariableKind::Let,
-                                    destructuring_pat,
-                                    Some(b::member(
-                                        &self.arena,
-                                        b::id("$$slotProps"),
-                                        prop_name.to_string(),
-                                    )),
-                                );
-                                let inner_return = b::return_value(&self.arena, return_obj_expr);
-                                let_stmts.push(b::const_decl(
-                                    &self.arena,
-                                    &derived_name,
-                                    b::call(
-                                        &self.arena,
-                                        b::member_path(&self.arena, "$.derived"),
-                                        vec![b::arrow_block(vec![], vec![inner_let, inner_return])],
-                                    ),
-                                ));
-                            }
-                        }
+                    for binding_name in &binding_names {
+                        let name = binding_name.to_string();
+                        let_names.push(binding_name.clone());
+                        saved_transforms.push((name.clone(), self.state.transform.get(&name).cloned()));
+                        self.state.transform.insert(
+                            name.clone(),
+                            IdentifierTransform {
+                                read: Some(|arena, node| {
+                                    b::call(arena, b::member_path(arena, "$.get"), vec![node])
+                                }),
+                                read_source: Some(derived_name.clone()),
+                                assign: None,
+                                mutate: None,
+                                update: None,
+                                skip_proxy: false,
+                                is_defined: false,
+                                is_reactive: true,
+                                replacement_id: None,
+                            },
+                        );
+                        self.state.transform_deep_read.insert(name, ());
                     }
+
+                    let_stmts.push(const_stmt);
                 }
             }
         }

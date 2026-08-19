@@ -889,9 +889,6 @@ pub(in crate::compiler::phases::phase3_transform::client) fn build_destructured_
     let expr_json = expr.as_json();
     let mut binding_names: Vec<compact_str::CompactString> = Vec::new();
     extract_let_binding_names(expr_json, &mut binding_names);
-    if binding_names.is_empty() {
-        return None;
-    }
 
     // Generate unique name for the derived variable
     let derived_name = context.state.memoizer.generate_id(prop_name);
@@ -995,7 +992,9 @@ fn expression_to_let_pattern(
                 .and_then(|n| n.as_str())
                 .unwrap_or("$$unknown"),
         ),
-        Some("ObjectExpression") => {
+        // A nested default (`{ a: { b } = {} }`) parses its left as a PATTERN node,
+        // so the pattern spellings alias the expression ones here.
+        Some("ObjectExpression") | Some("ObjectPattern") => {
             let mut properties = Vec::new();
             if let Some(props) = obj.get("properties").and_then(|p| p.as_array()) {
                 for prop in props {
@@ -1047,7 +1046,7 @@ fn expression_to_let_pattern(
             }
             b::object_pattern(properties)
         }
-        Some("ArrayExpression") => {
+        Some("ArrayExpression") | Some("ArrayPattern") => {
             let mut elements = Vec::new();
             if let Some(els) = obj.get("elements").and_then(|e| e.as_array()) {
                 for el in els {
@@ -1060,7 +1059,7 @@ fn expression_to_let_pattern(
             }
             b::array_pattern(elements)
         }
-        Some("SpreadElement") => JsPattern::Rest(Box::new(
+        Some("SpreadElement") | Some("RestElement") => JsPattern::Rest(Box::new(
             obj.get("argument")
                 .map(|a| expression_to_let_pattern(a, context))
                 .unwrap_or_else(|| b::id_pattern("$$unknown")),

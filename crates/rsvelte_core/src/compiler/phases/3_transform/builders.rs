@@ -500,8 +500,110 @@ impl<'a> B<'a> {
                 }
                 BindingPattern::new_array_pattern(SPAN, out, rest, &self.ab())
             }
-            Expression::AssignmentExpression(_) => self.id_pat(default_name),
+            // `let:x={y = 1}` / `[y = 1]` parses as an assignment; as a pattern it
+            // is the default-value form, so the left side keeps the bound name.
+            Expression::AssignmentExpression(assign)
+                if assign.operator == AssignmentOperator::Assign =>
+            {
+                let assign = assign.unbox();
+                let left = self.target_to_pattern(assign.left, default_name);
+                BindingPattern::new_assignment_pattern(SPAN, left, assign.right, &self.ab())
+            }
             _ => self.id_pat(default_name),
+        }
+    }
+
+    /// The left of a reinterpreted assignment: oxc already parsed it as an
+    /// assignment target, which is the same tree a binding pattern needs.
+    fn target_to_pattern(
+        self,
+        target: AssignmentTarget<'a>,
+        default_name: &str,
+    ) -> BindingPattern<'a> {
+        use oxc_ast::ast::AssignmentTargetProperty as ATP;
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => self.id_pat(&id.name),
+            AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                let arr = arr.unbox();
+                let mut out = ArenaVec::with_capacity_in(arr.elements.len(), &self.ab());
+                for el in arr.elements {
+                    out.push(el.map(|e| self.maybe_default_to_pattern(e, "undefined")));
+                }
+                let rest = arr.rest.map(|r| {
+                    let inner = self.target_to_pattern(r.unbox().target, "undefined");
+                    BindingRestElement::boxed(SPAN, inner, &self.ab())
+                });
+                BindingPattern::new_array_pattern(SPAN, out, rest, &self.ab())
+            }
+            AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                let obj = obj.unbox();
+                let mut props = ArenaVec::with_capacity_in(obj.properties.len(), &self.ab());
+                for prop in obj.properties {
+                    let (key, value, shorthand, computed) = match prop {
+                        ATP::AssignmentTargetPropertyIdentifier(p) => {
+                            let p = p.unbox();
+                            let name = self.str(&p.binding.name);
+                            let mut value = self.id_pat(&p.binding.name);
+                            if let Some(init) = p.init {
+                                value = BindingPattern::new_assignment_pattern(
+                                    SPAN,
+                                    value,
+                                    init,
+                                    &self.ab(),
+                                );
+                            }
+                            (
+                                PropertyKey::StaticIdentifier(IdentifierName::boxed(
+                                    SPAN,
+                                    name,
+                                    &self.ab(),
+                                )),
+                                value,
+                                true,
+                                false,
+                            )
+                        }
+                        ATP::AssignmentTargetPropertyProperty(p) => {
+                            let p = p.unbox();
+                            let value = self.maybe_default_to_pattern(p.binding, "undefined");
+                            (p.name, value, false, p.computed)
+                        }
+                    };
+                    props.push(BindingProperty::new(
+                        SPAN,
+                        key,
+                        value,
+                        shorthand,
+                        computed,
+                        &self.ab(),
+                    ));
+                }
+                let rest = obj.rest.map(|r| {
+                    let inner = self.target_to_pattern(r.unbox().target, "undefined");
+                    BindingRestElement::boxed(SPAN, inner, &self.ab())
+                });
+                BindingPattern::new_object_pattern(SPAN, props, rest, &self.ab())
+            }
+            _ => self.id_pat(default_name),
+        }
+    }
+
+    fn maybe_default_to_pattern(
+        self,
+        target: oxc_ast::ast::AssignmentTargetMaybeDefault<'a>,
+        default_name: &str,
+    ) -> BindingPattern<'a> {
+        use oxc_ast::ast::AssignmentTargetMaybeDefault as MD;
+        match target {
+            MD::AssignmentTargetWithDefault(d) => {
+                let d = d.unbox();
+                let left = self.target_to_pattern(d.binding, default_name);
+                BindingPattern::new_assignment_pattern(SPAN, left, d.init, &self.ab())
+            }
+            other => match AssignmentTarget::try_from(other) {
+                Ok(t) => self.target_to_pattern(t, default_name),
+                Err(_) => self.id_pat(default_name),
+            },
         }
     }
 
