@@ -152,7 +152,14 @@ pub fn validate_element(
             Attribute::AnimateDirective(_directive) => {
                 // Check that we're directly inside an EachBlock using the each_block_stack
                 // The top of the stack should be Some(EachBlockContext) if we're a direct child
-                match context.each_block_stack.last() {
+                // Reference: shared/element.js L93 — the test is on the element's
+                // immediate parent, so a block between it and the `{#each}` counts
+                // (`each_block_stack` is only cleared by an intervening element).
+                let parent_is_each = matches!(
+                    context.fragment_owner_stack.last(),
+                    Some(super::super::FragmentOwnerType::EachBlock)
+                );
+                match context.each_block_stack.last().filter(|_| parent_is_each) {
                     Some(Some(each_ctx)) => {
                         if !each_ctx.has_key {
                             return Err(errors::animation_missing_key().at(attr_start, attr_end));

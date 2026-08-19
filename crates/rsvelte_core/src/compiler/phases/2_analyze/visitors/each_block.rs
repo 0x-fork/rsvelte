@@ -160,13 +160,15 @@ pub fn visit<'a, 'b: 'a>(
     // Visit the body and fallback
     fragment::analyze(&mut block.body, context)?;
 
-    // Pop EachBlock context
-    context.each_block_stack.pop();
-
-    // Fallback is still in the each block's scope (same scope as body)
+    // Fallback is still in the each block's scope (same scope as body), and
+    // upstream's `animate:` rule reads the parent's key and BODY child count for
+    // a fallback element too — so the frame stays pushed across it.
     if let Some(ref mut fallback) = block.fallback {
         fragment::analyze(fallback, context)?;
     }
+
+    // Pop EachBlock context
+    context.each_block_stack.pop();
 
     // Restore scope
     context.scope = old_scope;
