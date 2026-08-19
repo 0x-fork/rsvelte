@@ -18,14 +18,14 @@ pub fn visit(
 ) -> Result<(), AnalysisError> {
     // Check for duplicate
     if context.has_svelte_window {
-        return Err(errors::svelte_meta_duplicate("svelte:window").at(window.start, window.end));
+        return Err(errors::svelte_meta_duplicate("svelte:window").at(window.start, window.start));
     }
     context.has_svelte_window = true;
 
     // Validate placement (must be at top level)
     if context.is_inside_element_or_block() {
         return Err(
-            errors::svelte_meta_invalid_placement("svelte:window").at(window.start, window.end)
+            errors::svelte_meta_invalid_placement("svelte:window").at(window.start, window.start)
         );
     }
 

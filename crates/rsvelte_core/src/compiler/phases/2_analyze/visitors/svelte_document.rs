@@ -19,7 +19,7 @@ pub fn visit(
     // Check for duplicate
     if context.has_svelte_document {
         return Err(
-            errors::svelte_meta_duplicate("svelte:document").at(document.start, document.end)
+            errors::svelte_meta_duplicate("svelte:document").at(document.start, document.start)
         );
     }
     context.has_svelte_document = true;
@@ -27,7 +27,7 @@ pub fn visit(
     // Validate placement (must be at top level)
     if context.is_inside_element_or_block() {
         return Err(errors::svelte_meta_invalid_placement("svelte:document")
-            .at(document.start, document.end));
+            .at(document.start, document.start));
     }
 
     // svelte:document cannot have children
