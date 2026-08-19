@@ -996,6 +996,12 @@ impl<'a> ScopeBuilder<'a> {
                         let param = *param;
                         let body = *body;
                         let old_scope = self.push_scope();
+                        // Keyed by the clause start, so the Phase-2 visitor can
+                        // enter it and see the parameter shadow an outer binding
+                        // of the same name.
+                        if let Some(cstart) = node_start(handler_node) {
+                            self.function_scope_map.insert(cstart, self.current_scope);
+                        }
                         // Declare catch parameter if present. Upstream declares it
                         // `let` (scope.js CatchClause), so `catch (e) { e = ... }`
                         // is legal and must not report `constant_assignment`.
@@ -4243,6 +4249,7 @@ fn node_start(node: &JsNode) -> Option<u32> {
         | JsNode::UpdateExpression { start, .. }
         | JsNode::LogicalExpression { start, .. }
         | JsNode::NewExpression { start, .. }
+        | JsNode::CatchClause { start, .. }
         | JsNode::TemplateLiteral { start, .. } => Some(*start),
         _ => None,
     }
