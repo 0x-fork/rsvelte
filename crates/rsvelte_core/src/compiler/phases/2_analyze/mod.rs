@@ -802,7 +802,16 @@ pub(crate) fn analyze_prepared_component_with_retained(
         && (analysis.uses_slots
             || (analysis.custom_element.is_none() && !analysis.slot_names.is_empty()))
     {
-        return Err(errors::slot_snippet_conflict());
+        // Reference: 2-analyze/index.js L861 — the position is the FIRST `<slot>`,
+        // falling back to wherever `$$slot` is mentioned when there is no element.
+        let err = errors::slot_snippet_conflict();
+        return Err(match analysis.slot_names.values().next() {
+            Some(&(start, end)) => err.at(start, end),
+            None => match memchr::memmem::find(analysis.source.as_bytes(), b"$$slot") {
+                Some(pos) => err.at(pos as u32, pos as u32),
+                None => err,
+            },
+        });
     }
 
     // Analyze CSS if present

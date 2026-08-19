@@ -1699,8 +1699,8 @@ pub struct ComponentAnalysis {
     /// Maps from (key, bindings) to the generated identifier
     pub binding_groups: FxHashMap<String, String>,
 
-    /// Slot names mapped to their SlotElement nodes
-    pub slot_names: indexmap::IndexMap<String, String, rustc_hash::FxBuildHasher>,
+    /// Slot names mapped to their `<slot>` element's span
+    pub slot_names: indexmap::IndexMap<String, (u32, u32), rustc_hash::FxBuildHasher>,
 
     /// Every render tag/component and whether it could be definitively resolved
     pub snippet_renderers: FxHashMap<String, bool>,
