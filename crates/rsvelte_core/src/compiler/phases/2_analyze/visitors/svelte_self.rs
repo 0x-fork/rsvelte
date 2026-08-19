@@ -116,7 +116,12 @@ pub fn visit<'a, 'b: 'a>(
     }
 
     // Analyze children
-    fragment::analyze(&mut self_.fragment, context)?;
+    context
+        .fragment_owner_stack
+        .push(super::FragmentOwnerType::SvelteSelf);
+    let result = fragment::analyze(&mut self_.fragment, context);
+    context.fragment_owner_stack.pop();
+    result?;
 
     Ok(())
 }

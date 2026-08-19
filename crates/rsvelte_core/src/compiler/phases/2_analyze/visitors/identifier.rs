@@ -615,7 +615,9 @@ fn check_const_tag_snippet_reference(
                 snippet_scope = Some(*scope);
                 snippet_name = Some(sname.clone());
             }
-            super::FragmentOwnerType::Component if found_snippet => {
+            super::FragmentOwnerType::Component | super::FragmentOwnerType::SvelteSelf
+                if found_snippet =>
+            {
                 // For components, all named snippets trigger this check
                 if snippet_scope == Some(binding_scope) {
                     return Err(errors::const_tag_invalid_reference(name));
