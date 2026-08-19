@@ -614,6 +614,14 @@ fn check_hoistable(
         let declaration = match node {
             TemplateNode::ConstTag(tag) => &tag.declaration,
             TemplateNode::DeclarationTag(tag) => &tag.declaration,
+            // A nested snippet binds its name in this same fragment, so
+            // rendering it is a local reference, not an instance-level one.
+            TemplateNode::SnippetBlock(b) => {
+                if let Some(name) = super::shared::snippets::get_snippet_name(b) {
+                    local_params.insert(name);
+                }
+                continue;
+            }
             _ => continue,
         };
         let json = declaration.as_json();
@@ -793,8 +801,18 @@ fn check_hoistable(
                 return false;
             }
 
-            // Nested snippet - has its own scope, don't check internals
-            TemplateNode::SnippetBlock(_) => {}
+            // A nested snippet resolves its own parameters, but a reference it
+            // makes to anything outside still propagates to this snippet's
+            // scope and blocks hoisting.
+            TemplateNode::SnippetBlock(b) => {
+                let mut inner_params = param_names.clone();
+                inner_params.extend(b.parameters.iter().flat_map(extract_all_param_names));
+                if !check_hoistable(&b.body.nodes, &inner_params, context)
+                    || !check_params_hoistable(&b.parameters, &inner_params, context)
+                {
+                    return false;
+                }
+            }
 
             // Regular elements - check attributes and children
             TemplateNode::RegularElement(elem) => {
