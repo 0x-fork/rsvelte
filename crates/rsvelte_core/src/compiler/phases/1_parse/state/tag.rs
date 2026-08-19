@@ -1848,33 +1848,6 @@ impl<'a> Parser<'a> {
             let params_end = self.index;
             let params_content = &self.source[params_start..params_end];
 
-            // Check for rest parameters (snippets don't support them)
-            // Look for ... at top level (not inside nested parens/brackets).
-            // svelte raises this in the 2-analyze SnippetBlock visitor, NOT the
-            // parser — so svelte2tsx (parse-only) still COMPILES a snippet with
-            // a rest param. rsvelte keeps the parse-time check for the compiler
-            // (the compiler-errors fixture needs its position), but skips it in
-            // svelte2tsx mode (`script_ts`, set only by `parse_script_ts`).
-            if !self.script_ts {
-                let trimmed = params_content.trim_ws();
-                let mut depth = 0;
-                for (byte_offset, c) in trimmed.char_indices() {
-                    if c == '(' || c == '[' || c == '{' {
-                        depth += 1;
-                    } else if c == ')' || c == ']' || c == '}' {
-                        depth -= 1;
-                    } else if depth == 0 && c == '.' && trimmed[byte_offset..].starts_with("...") {
-                        // Found rest parameter
-                        let rest_start = params_start + byte_offset;
-                        return Err(crate::error::ParseError::svelte(
-                            "snippet_invalid_rest_parameter",
-                            "Snippets do not support rest parameters; use an array instead",
-                            (rest_start, rest_start + 7), // approximate end
-                        ));
-                    }
-                }
-            }
-
             // Parse parameters with TypeScript type annotations
             if !params_content.trim_ws().is_empty() {
                 // Upstream parses `${params} => {}` with `parse_expression_at`

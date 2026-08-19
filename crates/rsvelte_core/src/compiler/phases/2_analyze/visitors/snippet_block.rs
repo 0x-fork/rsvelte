@@ -59,6 +59,22 @@ pub fn visit<'a, 'b: 'a>(
         context.emit_warning(warning);
     }
 
+    // Reference: SnippetBlock.js L19 — a rest parameter is rejected here, not in
+    // the parser, so `parse()` still accepts one for the formatter and the LSP.
+    for parameter in &block.parameters {
+        let Expression::Typed(expression) = parameter else {
+            panic!("Expression::Lazy must be resolved before analysis");
+        };
+        if let crate::ast::typed_expr::JsNode::RestElement { start, end, .. } = &expression.node {
+            return Err(AnalysisError::validation_at(
+                "snippet_invalid_rest_parameter",
+                "Snippets do not support rest parameters; use an array instead",
+                *start,
+                *end,
+            ));
+        }
+    }
+
     // Note: snippet_shadowing_prop validation is done in component.rs since the path
     // is not properly maintained during visitor traversal.
 
