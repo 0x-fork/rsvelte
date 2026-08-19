@@ -5151,6 +5151,27 @@ fn is_known_primitive_json(value: Option<&Value>) -> bool {
             let name = get_identifier_name_from_json(value);
             name == Some("undefined")
         }
+        // A call to one of the `globals` upstream knows yields NUMBER/STRING,
+        // and a function value is not UNKNOWN either.
+        "CallExpression" => {
+            let no_spread = value
+                .get("arguments")
+                .and_then(|a| a.as_array())
+                .is_some_and(|args| {
+                    args.iter()
+                        .all(|a| a.get("type").and_then(|t| t.as_str()) != Some("SpreadElement"))
+                });
+            no_spread
+                && value
+                    .get("callee")
+                    .and_then(super::shared::utils::json_keypath)
+                    .as_deref()
+                    .is_some_and(super::shared::utils::is_known_defined_global_call)
+        }
+        "MemberExpression" => super::shared::utils::json_keypath(value)
+            .as_deref()
+            .is_some_and(super::shared::utils::is_global_constant),
+        "ArrowFunctionExpression" | "FunctionExpression" => true,
         // Everything else is not known to be primitive
         _ => false,
     }
@@ -5165,6 +5186,28 @@ fn sanitized_location_filename(context: &ComponentContext) -> String {
         .replace('/', "/\u{200b}")
 }
 
+/// Dotted name of an identifier / non-computed member chain, or `None`.
+fn jsnode_keypath(node: &JsNode, pa: &ParseArena) -> Option<String> {
+    match node {
+        JsNode::Identifier { name, .. } => Some(name.to_string()),
+        JsNode::MemberExpression {
+            object,
+            property,
+            computed: false,
+            ..
+        } => {
+            let JsNode::Identifier { name, .. } = pa.get_js_node(*property) else {
+                return None;
+            };
+            Some(format!(
+                "{}.{name}",
+                jsnode_keypath(pa.get_js_node(*object), pa)?
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Typed twin of `is_known_primitive_json`, mirroring `scope.evaluate(right).is_primitive`.
 fn is_known_primitive_jsnode(node: &JsNode, pa: &ParseArena) -> bool {
     match node {
@@ -5174,6 +5217,20 @@ fn is_known_primitive_jsnode(node: &JsNode, pa: &ParseArena) -> bool {
             is_known_primitive_jsnode(pa.get_js_node(*expression), pa)
         }
         JsNode::Identifier { name, .. } => name.as_str() == "undefined",
+        JsNode::CallExpression {
+            callee, arguments, ..
+        } => {
+            pa.get_js_children(*arguments)
+                .iter()
+                .all(|a| !matches!(a, JsNode::SpreadElement { .. }))
+                && jsnode_keypath(pa.get_js_node(*callee), pa)
+                    .as_deref()
+                    .is_some_and(super::shared::utils::is_known_defined_global_call)
+        }
+        JsNode::MemberExpression { .. } => jsnode_keypath(node, pa)
+            .as_deref()
+            .is_some_and(super::shared::utils::is_global_constant),
+        JsNode::ArrowFunctionExpression { .. } | JsNode::FunctionExpression { .. } => true,
         _ => matches!(
             node.node_type(),
             Some("Literal" | "UnaryExpression" | "BinaryExpression" | "TemplateLiteral")
