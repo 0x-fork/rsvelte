@@ -3993,11 +3993,9 @@ fn structural_ancestors_satisfy_links(
 
 fn structural_simple_selector_is_evaluable(sel: &Value) -> bool {
     match sel.get("type").and_then(|t| t.as_str()) {
-        // Escape sequences (`#\31 `) are compared un-decoded — bail on them.
-        Some("TypeSelector") | Some("ClassSelector") | Some("IdSelector") => sel
-            .get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|n| !n.contains('\\')),
+        Some("TypeSelector") | Some("ClassSelector") | Some("IdSelector") => {
+            sel.get("name").and_then(|n| n.as_str()).is_some()
+        }
         Some("AttributeSelector") => {
             // Only the parsed shape (separate name/matcher/value); the legacy
             // raw shape stuffs the whole content into `name`.
@@ -4053,7 +4051,15 @@ fn structural_element_matches_compound(
         return false;
     };
     sels.iter().all(|sel| {
-        let name = sel.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let raw = sel.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        // A template's class/id/tag carries the character an escape stands for.
+        let decoded;
+        let name = if raw.contains('\\') {
+            decoded = decode_css_escape(raw);
+            decoded.as_str()
+        } else {
+            raw
+        };
         match sel.get("type").and_then(|t| t.as_str()) {
             Some("TypeSelector") => {
                 name == "*" || el.is_dynamic_tag || el.tag_name.eq_ignore_ascii_case(name)
