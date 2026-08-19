@@ -594,7 +594,14 @@ pub fn handle_named_slot_svelte_fragment(
                 ) || matches!(a, Attribute::LetDirective(_))
             })
             .count();
-        " ".repeat(stripped_count.max(1))
+        // A self-closing tag's ` /` is one more source column the emission
+        // preserves, and it lands inside the braces rather than after them.
+        let width = if has_closing_tag {
+            stripped_count.max(1)
+        } else {
+            stripped_count + 1
+        };
+        " ".repeat(width)
     } else {
         attrs_str
     };
@@ -603,7 +610,7 @@ pub fn handle_named_slot_svelte_fragment(
 
     if !has_closing_tag {
         // Self-closing `<svelte:fragment slot="x" />` — body has no nodes.
-        let combined = format!("{opener} }}}}");
+        let combined = format!("{opener}}}}}");
         str.overwrite(el.start, el.end, &combined);
         return;
     }
