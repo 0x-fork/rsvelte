@@ -104,6 +104,7 @@ pub fn visit<'a, 'b: 'a>(
 
     // Increment block depth for child analysis
     context.block_depth += 1;
+    context.svelte_self_parent_depth += 1;
 
     // Count non-empty children for animate: validation
     let child_count = block
@@ -194,6 +195,7 @@ pub fn visit<'a, 'b: 'a>(
 
     // Decrement block depth
     context.block_depth -= 1;
+    context.svelte_self_parent_depth -= 1;
 
     // In Svelte 4 (non-runes mode), handle legacy reactivity
     // Reference: svelte/packages/svelte/src/compiler/phases/2-analyze/visitors/EachBlock.js L47-76

@@ -382,6 +382,10 @@ pub struct VisitorContext<'a> {
     pub element_depth: usize,
     /// Depth inside control flow blocks (for placement validation).
     pub block_depth: usize,
+    /// Depth of the ancestors upstream's `SvelteSelf` visitor accepts as a parent —
+    /// `{#if}`, `{#each}`, `{#snippet}` and a `Component`, so neither an `{#await}`
+    /// nor a `<svelte:component>` counts.
+    pub svelte_self_parent_depth: usize,
     /// Depth inside component elements (for placement validation).
     pub component_depth: usize,
     /// Whether we've seen svelte:window.
@@ -556,6 +560,7 @@ impl<'a> VisitorContext<'a> {
             dom_element_stack: Vec::new(),
             element_depth: 0,
             block_depth: 0,
+            svelte_self_parent_depth: 0,
             component_depth: 0,
             has_svelte_window: false,
             has_svelte_body: false,

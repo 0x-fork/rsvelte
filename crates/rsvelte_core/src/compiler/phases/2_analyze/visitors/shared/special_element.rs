@@ -31,10 +31,10 @@ pub fn validate_special_element_placement(
                 ));
             }
         "svelte:self"
-            // svelte:self must be inside a conditional, loop, snippet, or component.
-            // The official Svelte checks context.path for IfBlock, EachBlock, Component, or SnippetBlock.
-            // We check block_depth (IfBlock, EachBlock, AwaitBlock, SnippetBlock) and component_depth (Component).
-            if context.block_depth == 0 && context.component_depth == 0 => {
+            // Upstream accepts exactly IfBlock / EachBlock / SnippetBlock / Component
+            // as a parent, so neither `block_depth` (it counts an `{#await}`) nor
+            // `component_depth` (it counts a `<svelte:component>`) can stand in.
+            if context.svelte_self_parent_depth == 0 => {
                 return Err(super::super::super::errors::svelte_self_invalid_placement()
                     .at(span.0, span.1));
             }
