@@ -397,6 +397,27 @@ observability while 1a stands.
 `CommentPolicy::Meaningful` filters JSDoc `@type` as prose (`lib.rs:259-269`), so flipping the
 flag does not close the flowbite case.
 
+### Blind spot 1e — a redundant semicolon, on 100% of the corpus
+
+`verify.mjs` normalizes both trees with oxfmt before comparing, and oxfmt deletes an
+empty statement. So `export default class C { … }` vs `export default class C { … };` —
+and `}` followed by a separately-printed `;` vs `};` — compare equal on every entry,
+on every target.
+
+**Evidence [D].** #3069: upstream prints a module's default-exported class through esrap's
+expression path and terminates it with `;`; rsvelte did not, for any class, runes or not.
+`compileModule('export default class Outer { n = 0; }')` differed raw on `client` and
+`server`, and the corpus gate scored the same file `match`. What reported it is the
+**mutation-fuzz** gate (#8 below), whose normalizer removes only comments, whitespace and
+trailing commas — it listed 8 entries for this one cause, all of which passed once the
+terminator landed.
+
+The general form is worth stating separately from the instance: **the corpus gate's
+normalizer is a strictly stronger eraser than the mutation gate's**, so any divergence
+oxfmt absorbs is visible to the mutation gate alone — and the mutation gate only sees a
+seed it has a mutant for. A shape that no corpus file contains is therefore invisible to
+both, which is what the pattern corpus is for.
+
 ### Blind spot 1b — comment ordering, not position
 
 `ast_equiv/src/lib.rs:234` compares comments as an ordered `Vec<String>`. A meaningful comment
