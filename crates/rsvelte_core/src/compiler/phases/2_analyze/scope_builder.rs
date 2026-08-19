@@ -482,6 +482,9 @@ impl<'a> ScopeBuilder<'a> {
                         }
                     }
                 }
+                if let Some(rest) = &arr.rest {
+                    self.collect_assignment_lhs_identifiers(&rest.target);
+                }
             }
             oxc_ast::ast::AssignmentTarget::ObjectAssignmentTarget(obj) => {
                 for prop in &obj.properties {
@@ -502,6 +505,9 @@ impl<'a> ScopeBuilder<'a> {
                             }
                         }
                     }
+                }
+                if let Some(rest) = &obj.rest {
+                    self.collect_assignment_lhs_identifiers(&rest.target);
                 }
             }
             _ => {
@@ -1443,6 +1449,12 @@ impl<'a> ScopeBuilder<'a> {
             JsNode::AssignmentPattern { left, .. } => {
                 let left_node = self.arena.get_js_node(*left);
                 self.collect_assignment_lhs_identifiers_typed(left_node);
+            }
+            // An array pattern carries its rest as the last element, so this
+            // arm is what reaches `[a, ...rest]`.
+            JsNode::RestElement { argument, .. } | JsNode::SpreadElement { argument, .. } => {
+                let arg_node = self.arena.get_js_node(*argument);
+                self.collect_assignment_lhs_identifiers_typed(arg_node);
             }
             // MemberExpression, etc. - not implicit declarations
             _ => {}
