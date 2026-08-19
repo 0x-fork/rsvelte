@@ -4288,13 +4288,72 @@ pub(crate) fn js_expr_keypath(
 /// `Number.*`, `String` / `String.from*`, and `BigInt`. Mirrors the `globals`
 /// table in `2-analyze/scope.js`.
 pub(crate) fn is_known_defined_global_call(keypath: &str) -> bool {
-    keypath.starts_with("Math.")
-        || keypath == "Number"
-        || keypath.starts_with("Number.")
-        || keypath == "String"
-        || keypath == "String.fromCharCode"
-        || keypath == "String.fromCodePoint"
-        || keypath == "BigInt"
+    // Upstream's `globals` table, name for name: one outside it evaluates to
+    // UNKNOWN, so a near-miss like `Math.nope()` must not read as known.
+    matches!(
+        keypath,
+        "BigInt"
+            | "Number"
+            | "Number.isInteger"
+            | "Number.isFinite"
+            | "Number.isNaN"
+            | "Number.isSafeInteger"
+            | "Number.parseFloat"
+            | "Number.parseInt"
+            | "String"
+            | "String.fromCharCode"
+            | "String.fromCodePoint"
+            | "Math.min"
+            | "Math.max"
+            | "Math.random"
+            | "Math.floor"
+            | "Math.f16round"
+            | "Math.round"
+            | "Math.abs"
+            | "Math.acos"
+            | "Math.asin"
+            | "Math.atan"
+            | "Math.atan2"
+            | "Math.ceil"
+            | "Math.cos"
+            | "Math.sin"
+            | "Math.tan"
+            | "Math.exp"
+            | "Math.log"
+            | "Math.pow"
+            | "Math.sqrt"
+            | "Math.clz32"
+            | "Math.imul"
+            | "Math.sign"
+            | "Math.log10"
+            | "Math.log2"
+            | "Math.log1p"
+            | "Math.expm1"
+            | "Math.cosh"
+            | "Math.sinh"
+            | "Math.tanh"
+            | "Math.acosh"
+            | "Math.asinh"
+            | "Math.atanh"
+            | "Math.trunc"
+            | "Math.fround"
+            | "Math.cbrt"
+    )
+}
+
+/// Upstream `scope.evaluate`'s `global_constants` table.
+pub(crate) fn is_global_constant(keypath: &str) -> bool {
+    matches!(
+        keypath,
+        "Math.PI"
+            | "Math.E"
+            | "Math.LN10"
+            | "Math.LN2"
+            | "Math.LOG10E"
+            | "Math.LOG2E"
+            | "Math.SQRT2"
+            | "Math.SQRT1_2"
+    )
 }
 
 pub(crate) fn is_js_expr_defined(
@@ -4453,6 +4512,19 @@ fn identifier_is_defined(name: &str, context: &ComponentContext) -> bool {
             return true;
         }
 
+        // A function declaration's binding carries the declaration itself as
+        // its initial, which upstream's evaluate types as FUNCTION — never
+        // null/undefined, so the interpolation reads bare.
+        if matches!(binding.kind, BindingKind::Normal)
+            && !binding.is_updated()
+            && matches!(
+                binding.declaration_kind,
+                crate::compiler::phases::phase2_analyze::scope::DeclarationKind::Function
+            )
+        {
+            return true;
+        }
+
         // A non-updated `let`/`var`/`const x = <primitive literal>`
         // (e.g. legacy `let iconAsc = "↑"`): upstream's scope.evaluate
         // resolves the binding's Literal initial to a defined primitive
@@ -4558,7 +4630,7 @@ fn is_expression_defined_json(json_value: &serde_json::Value, context: &Componen
             // `BigInt`) returns a NUMBER/STRING — always defined — mirroring
             // upstream `scope.evaluate`'s `globals` table.
             obj.get("callee")
-                .and_then(json_callee_keypath)
+                .and_then(json_keypath)
                 .as_deref()
                 .is_some_and(is_known_defined_global_call)
         }
@@ -4571,7 +4643,7 @@ fn is_expression_defined_json(json_value: &serde_json::Value, context: &Componen
 }
 
 /// Dotted keypath of a static estree-JSON callee (`Math.round` → `"Math.round"`).
-fn json_callee_keypath(node: &serde_json::Value) -> Option<String> {
+pub(crate) fn json_keypath(node: &serde_json::Value) -> Option<String> {
     let obj = node.as_object()?;
     match obj.get("type").and_then(|t| t.as_str())? {
         "Identifier" => obj.get("name").and_then(|n| n.as_str()).map(String::from),
@@ -4581,7 +4653,7 @@ fn json_callee_keypath(node: &serde_json::Value) -> Option<String> {
                 return None;
             }
             let prop_name = prop.get("name").and_then(|n| n.as_str())?;
-            let base = json_callee_keypath(obj.get("object")?)?;
+            let base = json_keypath(obj.get("object")?)?;
             Some(format!("{base}.{prop_name}"))
         }
         _ => None,
