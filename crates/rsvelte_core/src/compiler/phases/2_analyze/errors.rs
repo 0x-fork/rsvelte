@@ -326,8 +326,8 @@ diagnostics! {
     /// Cannot use `%rune%` rune in non-runes mode
     rune_invalid_usage(rune: &str) => "Cannot use `{}` rune in non-runes mode\nhttps://svelte.dev/e/rune_invalid_usage", rune;
 
-    /// Props destructuring pattern cannot use computed properties
-    props_invalid_pattern() => "Props destructuring pattern cannot use computed properties or non-identifier keys";
+    /// `$props()` assignment must not contain nested properties or computed keys
+    props_invalid_pattern() => "`$props()` assignment must not contain nested properties or computed keys";
 
     // Component-related errors
 
