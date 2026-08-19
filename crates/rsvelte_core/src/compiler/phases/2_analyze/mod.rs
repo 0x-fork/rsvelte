@@ -993,8 +993,22 @@ fn synthesize_class_style_attributes(
             TemplateNode::SnippetBlock(snippet) => {
                 synthesize_class_style_attributes(&mut snippet.body, analysis);
             }
-            TemplateNode::SvelteHead(head) => {
-                synthesize_class_style_attributes(&mut head.fragment, analysis);
+            // Upstream reads one flat `analysis.elements`, so every container is
+            // covered by construction; re-enumerating them here is what let
+            // `<svelte:boundary>` and `<svelte:fragment>` children fall out.
+            TemplateNode::SvelteHead(el)
+            | TemplateNode::SvelteBoundary(el)
+            | TemplateNode::SvelteFragment(el)
+            | TemplateNode::SvelteBody(el)
+            | TemplateNode::SvelteDocument(el)
+            | TemplateNode::SvelteWindow(el) => {
+                synthesize_class_style_attributes(&mut el.fragment, analysis);
+            }
+            TemplateNode::SvelteComponent(comp) => {
+                synthesize_class_style_attributes(&mut comp.fragment, analysis);
+            }
+            TemplateNode::SvelteSelf(el) => {
+                synthesize_class_style_attributes(&mut el.fragment, analysis);
             }
             TemplateNode::SlotElement(slot) => {
                 synthesize_class_style_attributes(&mut slot.fragment, analysis);

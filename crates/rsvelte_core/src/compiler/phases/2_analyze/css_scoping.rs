@@ -1308,6 +1308,15 @@ fn collect_render_sites_in_node(
         TemplateNode::SvelteBoundary(boundary) => {
             collect_render_sites_in_fragment(&boundary.fragment, ancestors, map);
         }
+        TemplateNode::SvelteFragment(frag) => {
+            collect_render_sites_in_fragment(&frag.fragment, ancestors, map);
+        }
+        TemplateNode::SvelteComponent(comp) => {
+            collect_render_sites_in_fragment(&comp.fragment, ancestors, map);
+        }
+        TemplateNode::SvelteSelf(comp) => {
+            collect_render_sites_in_fragment(&comp.fragment, ancestors, map);
+        }
         TemplateNode::SlotElement(slot) => {
             collect_render_sites_in_fragment(&slot.fragment, ancestors, map);
         }
@@ -1416,6 +1425,21 @@ fn mark_all_elements_scoped_node(node: &mut TemplateNode) {
         }
         TemplateNode::SvelteBoundary(boundary) => {
             for child in &mut boundary.fragment.nodes {
+                mark_all_elements_scoped_node(child);
+            }
+        }
+        TemplateNode::SvelteFragment(frag) => {
+            for child in &mut frag.fragment.nodes {
+                mark_all_elements_scoped_node(child);
+            }
+        }
+        TemplateNode::SvelteComponent(comp) => {
+            for child in &mut comp.fragment.nodes {
+                mark_all_elements_scoped_node(child);
+            }
+        }
+        TemplateNode::SvelteSelf(comp) => {
+            for child in &mut comp.fragment.nodes {
                 mark_all_elements_scoped_node(child);
             }
         }
@@ -1568,6 +1592,21 @@ fn process_node_scoping(
                 process_node_scoping(child, css_selectors, ancestors, snippet_ancestors);
             }
         }
+        TemplateNode::SvelteFragment(frag) => {
+            for child in &mut frag.fragment.nodes {
+                process_node_scoping(child, css_selectors, ancestors, snippet_ancestors);
+            }
+        }
+        TemplateNode::SvelteComponent(comp) => {
+            for child in &mut comp.fragment.nodes {
+                process_node_scoping(child, css_selectors, ancestors, snippet_ancestors);
+            }
+        }
+        TemplateNode::SvelteSelf(comp) => {
+            for child in &mut comp.fragment.nodes {
+                process_node_scoping(child, css_selectors, ancestors, snippet_ancestors);
+            }
+        }
         TemplateNode::SlotElement(slot) => {
             for child in &mut slot.fragment.nodes {
                 process_node_scoping(child, css_selectors, ancestors, snippet_ancestors);
@@ -1635,6 +1674,15 @@ fn apply_scoping_marks(fragment: &mut Fragment, elements_to_scope: &FxHashSet<(u
             }
             TemplateNode::SvelteBoundary(boundary) => {
                 apply_scoping_marks(&mut boundary.fragment, elements_to_scope);
+            }
+            TemplateNode::SvelteFragment(frag) => {
+                apply_scoping_marks(&mut frag.fragment, elements_to_scope);
+            }
+            TemplateNode::SvelteComponent(comp) => {
+                apply_scoping_marks(&mut comp.fragment, elements_to_scope);
+            }
+            TemplateNode::SvelteSelf(comp) => {
+                apply_scoping_marks(&mut comp.fragment, elements_to_scope);
             }
             TemplateNode::SlotElement(slot) => {
                 apply_scoping_marks(&mut slot.fragment, elements_to_scope);
@@ -1980,6 +2028,30 @@ fn propagate_ancestor_scoping(
             TemplateNode::SvelteBoundary(boundary) => {
                 propagate_ancestor_scoping(
                     &mut boundary.fragment,
+                    css_selectors,
+                    ancestors,
+                    snippet_ancestors,
+                );
+            }
+            TemplateNode::SvelteFragment(frag) => {
+                propagate_ancestor_scoping(
+                    &mut frag.fragment,
+                    css_selectors,
+                    ancestors,
+                    snippet_ancestors,
+                );
+            }
+            TemplateNode::SvelteComponent(comp) => {
+                propagate_ancestor_scoping(
+                    &mut comp.fragment,
+                    css_selectors,
+                    ancestors,
+                    snippet_ancestors,
+                );
+            }
+            TemplateNode::SvelteSelf(comp) => {
+                propagate_ancestor_scoping(
+                    &mut comp.fragment,
                     css_selectors,
                     ancestors,
                     snippet_ancestors,
