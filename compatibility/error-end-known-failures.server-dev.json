@@ -48,7 +48,6 @@
 	"svelte/packages/svelte/tests/compiler-errors/samples/catch-without-await/main.svelte",
 	"svelte/packages/svelte/tests/compiler-errors/samples/const-tag-cyclical/main.svelte",
 	"svelte/packages/svelte/tests/compiler-errors/samples/css-global-modifier-start-2/main.svelte",
-	"svelte/packages/svelte/tests/compiler-errors/samples/css-nesting-selector-root/main.svelte",
 	"svelte/packages/svelte/tests/compiler-errors/samples/effect-active-rune/main.svelte.js",
 	"svelte/packages/svelte/tests/compiler-errors/samples/else-before-closing-2/main.svelte",
 	"svelte/packages/svelte/tests/compiler-errors/samples/else-before-closing-3/main.svelte",

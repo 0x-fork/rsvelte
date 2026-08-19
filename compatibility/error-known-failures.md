@@ -102,8 +102,8 @@ of two unrelated errors say nothing, and the code divergence is an
 `error-message-known-failures.client-dev.json` holds 17 entries;
 `error-message-known-failures.server.json` holds 16 entries; and
 `error-message-known-failures.server-dev.json` holds 16 entries. All four of
-`error-position-known-failures.<target>.json` hold 80 entries, all four of
-`error-end-known-failures.<target>.json` hold 93 entries, and all four of
+`error-position-known-failures.<target>.json` hold 79 entries, all four of
+`error-end-known-failures.<target>.json` hold 92 entries, and all four of
 `error-frame-known-failures.<target>.json` hold 0 entries. Almost every
 compile error is raised in Phase 1/2, before the target is consulted, so a
 divergence shows up on all four targets at once. Expect the sixteen files to move
@@ -150,10 +150,10 @@ The codes agree; `start` does not. An editor, a Vite overlay and `rsvelte-check`
 all place the diagnostic from `start`, so a wrong one points the user at the
 wrong code.
 
-By shape (client target, 80 entries), classified from the run's own
+By shape (client target, 79 entries), classified from the run's own
 `report.json` rather than by subtracting from the previous baseline:
 
-- **25 — rsvelte reports no span at all.** The raising site constructs
+- **24 — rsvelte reports no span at all.** The raising site constructs
   `AnalysisError::validation(...)` instead of `validation_at(...)`, so
   `start`/`end` are `None` and the JS error carries no `start` property. This is
   the same structural gap `validator-known-failures.md` tracks, and the two burn
@@ -165,7 +165,7 @@ By shape (client target, 80 entries), classified from the run's own
   reports 296:0 where upstream reports 262:11 — 34 lines off, and column 0 means
   the squiggle lands on the indentation of an unrelated statement.
 
-The shrink from 226 is **entirely inside the no-span cluster** — 174 → 25 — and
+The shrink from 226 is **entirely inside the no-span cluster** — 174 → 24 — and
 the 19 different-line entries are the same 19. That is the shape a
 span-attachment change should have, and it is worth stating because the failure
 mode it rules out is the one `validator-known-failures.md` names: a fallback that
@@ -188,12 +188,13 @@ code. The shape this section used to call canonical — `<div a="1" a="2">`, whe
 `attribute_duplicate` reported `[11, 12]` against upstream's `[11, 16]` — is fixed
 (#3114); the five `attribute-unique*` entries it covered are retired, as are the
 three `window-*` entries a zero-width meta placement span retired (#3110) and the
-three `slot_snippet_conflict` entries that gained a span (#3124).
+three `slot_snippet_conflict` entries that gained a span (#3124) and the
+`css-nesting-selector-root` entry that gained one (#3134).
 
-Partition of `error-end-known-failures.<target>.json` by shape: `25 + 45 + 23`
+Partition of `error-end-known-failures.<target>.json` by shape: `24 + 45 + 23`
 (client target, classified from the run's own `report.json`):
 
-- **25 — rsvelte reports no `end` at all.** The same `validation(...)` vs
+- **24 — rsvelte reports no `end` at all.** The same `validation(...)` vs
   `validation_at(...)` raising sites the `start` ratchet's no-span cluster names;
   these two clusters burn down together, one call per site.
 - **45 — same line, different column.** A span exists and stops in the wrong
@@ -202,7 +203,7 @@ Partition of `error-end-known-failures.<target>.json` by shape: `25 + 45 + 23`
 - **23 — different line entirely.** A multi-line construct whose closing node was
   not threaded through.
 
-**13 of the 93 diverge on `end` while `start` agrees** (9 same-line, 4
+**13 of the 92 diverge on `end` while `start` agrees** (9 same-line, 4
 different-line). Those are the ones that would have been invisible had `end` been
 folded into the `start` ratchet, and they are the argument for the split: an
 entry already listed suppresses everything about that entry.
