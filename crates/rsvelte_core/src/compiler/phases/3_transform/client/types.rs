@@ -211,8 +211,7 @@ impl<'a> ComponentContext<'a> {
         elem: &crate::ast::template::SvelteDynamicElement,
     ) -> TransformResult {
         use crate::ast::template::{
-            AnimateDirective, Attribute, BindDirective, ClassDirective, LetDirective, OnDirective,
-            StyleDirective, TransitionDirective, UseDirective,
+            Attribute, ClassDirective, LetDirective, OnDirective, StyleDirective,
         };
         use crate::compiler::phases::phase3_transform::client::visitors::animate_directive::animate_directive;
         use crate::compiler::phases::phase3_transform::client::visitors::attach_tag::attach_tag;
@@ -233,12 +232,7 @@ impl<'a> ComponentContext<'a> {
         let mut class_directives: Vec<&ClassDirective<'_>> = Vec::new();
         let mut style_directives: Vec<&StyleDirective> = Vec::new();
         let mut on_directives: Vec<OnDirective> = Vec::new();
-        let mut transition_directives: Vec<TransitionDirective> = Vec::new();
-        let mut use_directives: Vec<UseDirective> = Vec::new();
         let mut let_directives: Vec<LetDirective> = Vec::new();
-        let mut bind_directives: Vec<BindDirective> = Vec::new();
-        let mut animate_directives: Vec<AnimateDirective> = Vec::new();
-        let mut attach_tags: Vec<crate::ast::template::AttachTag> = Vec::new();
         let mut dynamic_namespace: Option<crate::ast::template::AttributeValue> = None;
 
         for attribute in &elem.attributes {
@@ -267,24 +261,10 @@ impl<'a> ComponentContext<'a> {
                 Attribute::OnDirective(dir) => {
                     on_directives.push(dir.clone());
                 }
-                Attribute::TransitionDirective(dir) => {
-                    transition_directives.push(dir.clone());
-                }
-                Attribute::UseDirective(dir) => {
-                    use_directives.push(dir.clone());
-                }
                 Attribute::LetDirective(dir) => {
                     let_directives.push(dir.clone());
                 }
-                Attribute::BindDirective(dir) => {
-                    bind_directives.push(dir.clone());
-                }
-                Attribute::AnimateDirective(dir) => {
-                    animate_directives.push(dir.clone());
-                }
-                Attribute::AttachTag(tag) => {
-                    attach_tags.push(tag.clone());
-                }
+                _ => {}
             }
         }
 
@@ -316,89 +296,40 @@ impl<'a> ComponentContext<'a> {
             self.state.node = saved_node;
         }
 
-        // Process TransitionDirectives
-        for trans_directive in &transition_directives {
-            // Save current state
+        // The remaining directives all reach `context.visit(attribute, inner_state)`
+        // in one source-order pass upstream, so they must be emitted in that order
+        // and not grouped by kind.
+        for attribute in &elem.attributes {
             let saved_init_len = self.state.init.len();
             let saved_after_update_len = self.state.after_update.len();
-
-            // Temporarily set node to element_id (see OnDirectives loop for rationale)
             let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
 
-            transition_directive(trans_directive, self);
+            match attribute {
+                Attribute::TransitionDirective(dir) => transition_directive(dir, self),
+                Attribute::UseDirective(dir) => {
+                    let stmt = use_directive(dir, self);
+                    self.state.init.push(stmt);
+                }
+                Attribute::AnimateDirective(dir) => animate_directive(dir, self),
+                Attribute::BindDirective(dir) => {
+                    use crate::compiler::phases::phase3_transform::client::visitors::bind_directive::bind_directive;
 
-            // Collect statements added by transition_directive
+                    bind_directive(
+                        dir,
+                        self,
+                        crate::compiler::phases::phase3_transform::utils::ParentRef::SvelteElement(
+                            elem,
+                        ),
+                    );
+                }
+                Attribute::AttachTag(tag) => {
+                    attach_tag(tag, self);
+                }
+                _ => {}
+            }
+
             inner_init.extend(self.state.init.drain(saved_init_len..));
             inner_after_update.extend(self.state.after_update.drain(saved_after_update_len..));
-
-            // Restore node
-            self.state.node = saved_node;
-        }
-
-        // Process UseDirectives (actions)
-        for use_dir in &use_directives {
-            // Temporarily set node to element_id (see OnDirectives loop for rationale)
-            let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
-
-            let stmt = use_directive(use_dir, self);
-            inner_init.push(stmt);
-
-            // Restore node
-            self.state.node = saved_node;
-        }
-
-        // Process AnimateDirectives
-        for anim_directive in &animate_directives {
-            let saved_init_len = self.state.init.len();
-            let saved_after_update_len = self.state.after_update.len();
-
-            let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
-
-            animate_directive(anim_directive, self);
-
-            // Collect statements added by animate_directive
-            inner_init.extend(self.state.init.drain(saved_init_len..));
-            inner_after_update.extend(self.state.after_update.drain(saved_after_update_len..));
-
-            self.state.node = saved_node;
-        }
-
-        // Process BindDirectives
-        // In the official compiler, these go through the else branch: context.visit(attribute, inner_context.state)
-        for bind_dir in &bind_directives {
-            use crate::compiler::phases::phase3_transform::client::visitors::bind_directive::bind_directive;
-
-            let saved_init_len = self.state.init.len();
-            let saved_after_update_len = self.state.after_update.len();
-
-            let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
-
-            // For svelte:element, the parent is the element itself
-            bind_directive(
-                bind_dir,
-                self,
-                crate::compiler::phases::phase3_transform::utils::ParentRef::SvelteElement(elem),
-            );
-
-            // Collect statements added by bind_directive
-            inner_init.extend(self.state.init.drain(saved_init_len..));
-            inner_after_update.extend(self.state.after_update.drain(saved_after_update_len..));
-
-            self.state.node = saved_node;
-        }
-
-        // Process AttachTags
-        // In the official compiler, these go through the else branch: context.visit(attribute, inner_context.state)
-        for attach in &attach_tags {
-            let saved_init_len = self.state.init.len();
-
-            let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
-
-            attach_tag(attach, self);
-
-            // Collect statements added by attach_tag
-            inner_init.extend(self.state.init.drain(saved_init_len..));
-
             self.state.node = saved_node;
         }
 
