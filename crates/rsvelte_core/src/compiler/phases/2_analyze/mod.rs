@@ -4516,9 +4516,13 @@ fn mark_group_bindings_in_node(
                 analysis,
             );
         }
-        TemplateNode::SvelteHead(head) => {
+        // Every container that can hold an element has to be listed, because a
+        // `bind:group` anywhere under one still needs its group array declared.
+        TemplateNode::SvelteHead(el)
+        | TemplateNode::SvelteBoundary(el)
+        | TemplateNode::SvelteFragment(el) => {
             mark_group_bindings_in_fragment(
-                &mut head.fragment,
+                &mut el.fragment,
                 ancestor_stack,
                 assignments,
                 analysis,
