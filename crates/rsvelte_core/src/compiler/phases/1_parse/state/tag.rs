@@ -2250,6 +2250,19 @@ impl<'a> Parser<'a> {
                     }
                 };
 
+                // Upstream rejects a non-identifier argument here, on the parser,
+                // so it competes with every other parse error by source position.
+                for identifier in &identifiers {
+                    if identifier.node_type() != Some("Identifier") {
+                        let at = identifier.as_node().start().map_or(start, |s| s as usize);
+                        return Err(crate::error::ParseError::svelte(
+                            "debug_tag_invalid_arguments",
+                            "{@debug ...} arguments must be identifiers, not arbitrary expressions\nhttps://svelte.dev/e/debug_tag_invalid_arguments",
+                            (at, at),
+                        ));
+                    }
+                }
+
                 self.advance(); // consume '}'
 
                 Ok(Some(TemplateNode::DebugTag(Box::new(DebugTag {
