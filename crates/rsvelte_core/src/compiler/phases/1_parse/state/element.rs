@@ -153,6 +153,33 @@ impl<'a> Parser<'a> {
                     (name_start, name_end),
                 ));
             }
+
+            // Upstream decides both of these here, on the parser stack, so they
+            // precede every analysis error the node's own content could raise.
+            if matches!(suffix, "head" | "options" | "window" | "document" | "body") {
+                if self.meta_tags.contains_key(name.as_str()) {
+                    return Err(crate::error::ParseError::svelte(
+                        "svelte_meta_duplicate",
+                        format!(
+                            "A component can only have one `<{name}>` element\nhttps://svelte.dev/e/svelte_meta_duplicate"
+                        ),
+                        (start, start),
+                    ));
+                }
+                if !matches!(
+                    self.stack.last(),
+                    Some(crate::compiler::phases::phase1_parse::parser::StackEntry::Root)
+                ) {
+                    return Err(crate::error::ParseError::svelte(
+                        "svelte_meta_invalid_placement",
+                        format!(
+                            "`<{name}>` tags cannot be inside elements or blocks\nhttps://svelte.dev/e/svelte_meta_invalid_placement"
+                        ),
+                        (start, start),
+                    ));
+                }
+                self.meta_tags.insert(name.to_string(), true);
+            }
         } else if !name.is_empty() && !self.options.loose {
             // Validate element/component names
             // regex_valid_element_name: /^(?:![a-zA-Z]+|[a-zA-Z](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?|[a-zA-Z][a-zA-Z0-9]*:[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9])$/
