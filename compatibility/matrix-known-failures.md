@@ -42,7 +42,7 @@ carrying a key that would absorb the next regression.
 
 ## Matrix known failures (`matrix-known-failures.json`, 388 entries)
 
-Partition of `matrix-known-failures.json` by family: `4 + 172 + 8 + 24 + 180 + 8 + 0`
+Partition of `matrix-known-failures.json` by family: `4 + 172 + 0 + 24 + 0 + 0 + 0 + 180 + 0 + 8 + 0 + 0 + 0`
 
 ### `binding-position` — 4 entries
 
