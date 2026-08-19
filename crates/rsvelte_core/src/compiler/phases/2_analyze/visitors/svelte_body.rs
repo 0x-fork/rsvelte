@@ -20,7 +20,7 @@ pub fn visit(body: &mut SvelteElement, context: &mut VisitorContext) -> Result<(
     context.has_svelte_body = true;
 
     // Validate placement (must be at top level)
-    if context.is_inside_element_or_block() {
+    if !context.in_root_fragment {
         return Err(errors::svelte_meta_invalid_placement("svelte:body").at(body.start, body.start));
     }
 

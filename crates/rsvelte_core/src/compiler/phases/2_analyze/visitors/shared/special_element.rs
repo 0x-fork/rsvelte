@@ -15,16 +15,18 @@ pub fn validate_special_element_placement(
 ) -> Result<(), AnalysisError> {
     match name {
         "svelte:head"
-            // svelte:head can only appear at the top level
-            if context.is_inside_element_or_block() => {
+            // Upstream rejects on `parent.type !== 'Root'` — the immediate parent,
+            // not a depth. A counter reproduces that only for the containers its
+            // own list happens to name.
+            if !context.in_root_fragment => {
                 return Err(AnalysisError::validation(
                     "svelte_meta_invalid_placement",
                     "`<svelte:head>` tags cannot be inside elements or blocks",
                 ));
             }
         "svelte:body" | "svelte:window" | "svelte:document"
-            // These can only appear at the top level (not inside elements or blocks)
-            if context.is_inside_element_or_block() => {
+            // Same root-only rule as `svelte:head` above.
+            if !context.in_root_fragment => {
                 return Err(AnalysisError::validation(
                     "svelte_meta_invalid_placement",
                     format!("`<{}>` tags cannot be inside elements or blocks", name),

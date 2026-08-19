@@ -25,7 +25,7 @@ pub fn visit(
     context.has_svelte_document = true;
 
     // Validate placement (must be at top level)
-    if context.is_inside_element_or_block() {
+    if !context.in_root_fragment {
         return Err(errors::svelte_meta_invalid_placement("svelte:document")
             .at(document.start, document.start));
     }
