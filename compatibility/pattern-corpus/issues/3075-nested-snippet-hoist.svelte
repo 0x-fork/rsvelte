@@ -3,7 +3,6 @@
 </script>
 
 {#snippet hoistable(a)}
-	<b>{a}</b>
 	{#snippet inner(b)}
 		<i>{b}</i>
 	{/snippet}
