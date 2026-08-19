@@ -103,7 +103,7 @@ of two unrelated errors say nothing, and the code divergence is an
 `error-message-known-failures.server.json` holds 16 entries; and
 `error-message-known-failures.server-dev.json` holds 16 entries. All four of
 `error-position-known-failures.<target>.json` hold 83 entries, all four of
-`error-end-known-failures.<target>.json` hold 104 entries, and all four of
+`error-end-known-failures.<target>.json` hold 96 entries, and all four of
 `error-frame-known-failures.<target>.json` hold 0 entries. Almost every
 compile error is raised in Phase 1/2, before the target is consulted, so a
 divergence shows up on all four targets at once. Expect the sixteen files to move
@@ -184,23 +184,24 @@ and not one edit.
 ## Error end positions
 
 The codes agree; `end` does not, so the diagnostic underlines the wrong amount of
-code. The canonical shape is `<div a="1" a="2">`, where `attribute_duplicate`
-reports `position: [11, 12]` against upstream's `[11, 16]` — the right start, one
-character of highlight instead of the whole attribute.
+code. The shape this section used to call canonical — `<div a="1" a="2">`, where
+`attribute_duplicate` reported `[11, 12]` against upstream's `[11, 16]` — is fixed
+(#3114); the five `attribute-unique*` entries it covered are retired, as are the
+three `window-*` entries a zero-width meta placement span retired (#3110).
 
-Partition of `error-end-known-failures.<target>.json` by shape: `28 + 53 + 23`
+Partition of `error-end-known-failures.<target>.json` by shape: `28 + 45 + 23`
 (client target, classified from the run's own `report.json`):
 
 - **28 — rsvelte reports no `end` at all.** The same `validation(...)` vs
   `validation_at(...)` raising sites the `start` ratchet's no-span cluster names;
   these two clusters burn down together, one call per site.
-- **53 — same line, different column.** A span exists and stops in the wrong
+- **45 — same line, different column.** A span exists and stops in the wrong
   place. This is the cluster the `start` ratchet cannot reach, and it is now the
   largest: attaching a span fixes `start` and leaves `end` free to be wrong.
 - **23 — different line entirely.** A multi-line construct whose closing node was
   not threaded through.
 
-**21 of the 104 diverge on `end` while `start` agrees** (17 same-line, 4
+**13 of the 96 diverge on `end` while `start` agrees** (9 same-line, 4
 different-line). Those are the ones that would have been invisible had `end` been
 folded into the `start` ratchet, and they are the argument for the split: an
 entry already listed suppresses everything about that entry.
