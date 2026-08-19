@@ -1042,15 +1042,16 @@ pub(super) fn build_element_attributes<'a>(
         if can_use_literal {
             match &a.value {
                 AttributeValue::True(_) => {
-                    let mut literal_value = String::new();
-                    if is_class && let Some(hash) = css_hash {
-                        literal_value = format!(" {hash}").trim().to_string();
-                    }
-                    if !is_class || !literal_value.is_empty() {
-                        state.template.push(TemplateEntry::Literal(format!(
-                            " {name}=\"{literal_value}\""
-                        )));
-                    }
+                    // Upstream carries the boolean into the class join, where it
+                    // stringifies to `true`, and its emptiness gate sees a truthy
+                    // value either way — so a valueless attribute always lands.
+                    let literal_value = match css_hash {
+                        Some(hash) if is_class => format!("true {hash}").trim().to_string(),
+                        _ => String::new(),
+                    };
+                    state.template.push(TemplateEntry::Literal(format!(
+                        " {name}=\"{literal_value}\""
+                    )));
                     continue;
                 }
                 AttributeValue::Sequence(parts) => {

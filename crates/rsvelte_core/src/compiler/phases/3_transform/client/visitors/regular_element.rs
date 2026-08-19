@@ -618,40 +618,39 @@ pub fn visit_regular_element(
                     && !cannot_be_set_statically(&name)
                     && (is_true_value || is_text_attribute(attr))
                 {
-                    let mut value = if is_text_attribute(attr) {
-                        if let AttributeValue::Sequence(parts) = &attr.value {
-                            if let crate::ast::template::AttributeValuePart::Text(text) = &parts[0]
-                            {
-                                text.data.to_string()
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
+                    // `None` is upstream's boolean `true` for a valueless attribute,
+                    // and it has to stay distinct from `Some("")`: scoping treats it
+                    // as empty, the emptiness gate below treats it as present.
+                    let mut value: Option<String> = if is_text_attribute(attr) {
+                        match &attr.value {
+                            AttributeValue::Sequence(parts) => match &parts[0] {
+                                crate::ast::template::AttributeValuePart::Text(text) => {
+                                    Some(text.data.to_string())
+                                }
+                                _ => Some(String::new()),
+                            },
+                            _ => Some(String::new()),
                         }
                     } else {
-                        String::new()
+                        None
                     };
 
                     // Add scoped class if needed (only for class without class directives)
                     if name == "class" && is_scoped {
                         let hash = &context.state.analysis.css.hash;
-                        if value.is_empty() {
-                            value = hash.clone();
-                        } else {
-                            value.push(' ');
-                            value.push_str(hash);
+                        if !hash.is_empty() {
+                            value = Some(match value.as_deref() {
+                                None | Some("") => hash.clone(),
+                                Some(v) => format!("{v} {hash}"),
+                            });
                         }
                     }
 
-                    if name != "class" || !value.is_empty() {
-                        let prop_value = if is_true_value {
-                            Some(String::new())
-                        } else {
-                            Some(value)
-                        };
-
-                        context.state.template.set_prop(name.clone(), prop_value);
+                    if name != "class" || value.as_deref().is_none_or(|v| !v.is_empty()) {
+                        context
+                            .state
+                            .template
+                            .set_prop(name.clone(), Some(value.unwrap_or_default()));
                     }
                 } else if name == "autofocus" {
                     // Special case: autofocus needs $.autofocus() call
