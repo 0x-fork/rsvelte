@@ -71,6 +71,9 @@ correct; file upstream at `oxformatter/oxfmt` or `prettier/prettier-plugin-svelt
   `snippet-rest-args`.
 - **Genuinely-invalid Svelte-specific CSS** — a parser-modern edge `<style>` block
   with invalid `:nth` syntax. — `css-nth-syntax`.
+- **At-rule inside `:global()`** — `:global(@keyframes shared)` is rejected by both
+  compilers (`css_expected_identifier`, #3120); rsvelte-fmt leaves a stylesheet its
+  parser rejects untouched. — `rejected-global-keyframes-selector`.
 
 ## migrate — Svelte 4→5 migrator output (out of scope per AGENTS.md)
 
@@ -79,6 +82,12 @@ Svelte-5 compiler formats differently. — `migrate/samples/slot-non-identifier/
 `migrate/samples/slot-usages/output.svelte`.
 
 ## engine-divergence — oxc vs prettier JS layout, both valid
+
+- **`let:` value read as an expression** — a default inside a `let:` destructuring pattern
+  comes back parenthesised (`[(head = "none")]`, `meta: ({ n } = {})`). Svelte accepts
+  both spellings; rsvelte-fmt parses the value as a binding pattern, where the parens are
+  a syntax error (#3125). — `let-directive-destructuring`,
+  `3123-let-directive-pattern-defaults`.
 
 Not oracle bugs and not rsvelte bugs: rsvelte formats embedded JS with the
 `oxc_formatter` crate (a deliberate design choice for the 100x-perf / oxc
