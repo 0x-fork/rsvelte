@@ -293,16 +293,14 @@ fn build_title_content(
         let mut has_state = false;
         for node in nodes {
             if let TemplateNode::ExpressionTag(expr) = node {
-                // Upstream `TitleElement`: `evaluated.is_known ? b.literal(value)`
-                // with `has_state = false` → a plain (non-reactive) `$.effect`.
-                // Inline string-valued knowns only; numeric/boolean knowns would
-                // need a numeric `b.literal` (`title = 0`, not `"0"`) to
-                // byte-match, so they fall through to the existing path.
-                if let Some(Some(v)) = get_literal_value(&expr.expression, context) {
-                    let is_num_or_bool = v.parse::<f64>().is_ok() || v == "true" || v == "false";
-                    if !is_num_or_bool {
-                        return (b::string(v), false, memo_entries);
-                    }
+                // Upstream's single-value chunk writes `b.literal((value ?? '') + '')`,
+                // so every known folds to a STRING — `0` and `true` included — and a
+                // known-nullish one folds to the empty string rather than keeping a
+                // `?? ''` around a name that is gone by then.
+                match get_literal_value(&expr.expression, context) {
+                    Some(Some(v)) => return (b::string(v), false, memo_entries),
+                    Some(None) => return (b::string(""), false, memo_entries),
+                    None => {}
                 }
                 if expression_has_reactive_state(&expr.expression, context) {
                     has_state = true;
