@@ -7371,18 +7371,14 @@ fn format_simple_selector_with_scope(
     let sel_type = sel.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match sel_type {
-        "TypeSelector" => sel
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "ClassSelector" | "IdSelector" => {
-            // For class and ID selectors, use the original source to preserve
-            // Unicode escape sequences and their terminating whitespace
-            let prefix = if sel_type == "ClassSelector" {
-                "."
-            } else {
-                "#"
+        "TypeSelector" | "ClassSelector" | "IdSelector" => {
+            // Read these back from the source: it preserves Unicode escape sequences
+            // with their terminating whitespace, and the `ns|` prefix that `name`
+            // drops because matching is done on the local name alone.
+            let prefix = match sel_type {
+                "ClassSelector" => ".",
+                "IdSelector" => "#",
+                _ => "",
             };
 
             // Try to extract from original source first (preserves escape sequences)
