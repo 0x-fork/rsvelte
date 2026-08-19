@@ -38,30 +38,14 @@ pub fn visit<'a, 'b: 'a>(
         for attr in &element.attributes {
             match attr {
                 Attribute::Attribute(attr_node) if attr_node.name == "class" => {
-                    match &attr_node.value {
-                        AttributeValue::Sequence(parts) => {
-                            for part in parts {
-                                match part {
-                                    AttributeValuePart::Text(text) => {
-                                        for class_name in text.data.split_whitespace() {
-                                            context
-                                                .analysis
-                                                .css
-                                                .used_classes
-                                                .insert(class_name.to_string());
-                                            element_classes.insert(class_name.to_string());
-                                        }
-                                    }
-                                    AttributeValuePart::ExpressionTag(_) => {
-                                        context.analysis.css.has_dynamic_classes = true;
-                                    }
-                                }
+                    match super::super::css::possible_class_names(&attr_node.value) {
+                        Some(class_names) => {
+                            for class_name in class_names {
+                                context.analysis.css.used_classes.insert(class_name.clone());
+                                element_classes.insert(class_name);
                             }
                         }
-                        AttributeValue::Expression(_) => {
-                            context.analysis.css.has_dynamic_classes = true;
-                        }
-                        _ => {}
+                        None => context.analysis.css.has_dynamic_classes = true,
                     }
                 }
                 Attribute::Attribute(attr_node) if attr_node.name == "id" => match &attr_node.value
