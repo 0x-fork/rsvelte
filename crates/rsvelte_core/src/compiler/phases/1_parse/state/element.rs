@@ -1063,14 +1063,14 @@ impl<'a> Parser<'a> {
             if let Some(attr) = self.parse_attribute()? {
                 // Check for duplicate attributes - linear scan over existing attributes.
                 // No separate data structure needed (most elements have < 10 attributes).
-                let (attr_type_prefix, attr_name, attr_start): (u8, &str, u32) = match &attr {
-                    crate::ast::Attribute::Attribute(a) => (b'A', a.name.as_str(), a.start),
+                let (attr_type_prefix, attr_name): (u8, &str) = match &attr {
+                    crate::ast::Attribute::Attribute(a) => (b'A', a.name.as_str()),
                     crate::ast::Attribute::BindDirective(b) => {
                         // bind:attribute and attribute are the same, normalize to Attribute
-                        (b'A', b.name.as_str(), b.start)
+                        (b'A', b.name.as_str())
                     }
-                    crate::ast::Attribute::ClassDirective(c) => (b'C', c.name.as_str(), c.start),
-                    crate::ast::Attribute::StyleDirective(s) => (b'S', s.name.as_str(), s.start),
+                    crate::ast::Attribute::ClassDirective(c) => (b'C', c.name.as_str()),
+                    crate::ast::Attribute::StyleDirective(s) => (b'S', s.name.as_str()),
                     _ => {
                         // Other attribute types are not checked for duplicates
                         attributes.push(attr);
@@ -1094,10 +1094,13 @@ impl<'a> Parser<'a> {
                     });
 
                     if is_dup {
+                        // Reference: element.js L250 — the span is the whole attribute,
+                        // not just its name.
+                        let (start, end) = attr.span();
                         return Err(crate::error::ParseError::svelte(
                             "attribute_duplicate",
                             "Attributes need to be unique",
-                            (attr_start as usize, attr_start as usize + attr_name.len()),
+                            (start as usize, end as usize),
                         ));
                     }
                 }
