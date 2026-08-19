@@ -320,7 +320,8 @@ pub fn transform_client_module(
 
     let has_effect_rune =
         class_transformed.contains("$effect") || class_transformed.contains("$inspect");
-    let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
+    let transformed =
+        transform_module_script_runes(&class_transformed, source, analysis, options.dev);
 
     // The transformed source includes everything (imports + body).
     // We need to split imports from body to avoid duplicate svelte import.
@@ -400,7 +401,7 @@ pub(crate) fn transform_module_source_for_module(
     server: bool,
 ) -> String {
     let class_transformed = transform_module_class_fields_client(source);
-    transform_module_script_runes_with_target(&class_transformed, analysis, dev, server)
+    transform_module_script_runes_with_target(&class_transformed, source, analysis, dev, server)
 }
 
 /// Extract imports from a string, returning (imports, rest).
@@ -2116,7 +2117,8 @@ pub(crate) fn transform_client(
         let class_transformed = transform_module_class_fields_client(&non_imports);
         let has_effect_rune =
             class_transformed.contains("$effect") || class_transformed.contains("$inspect");
-        let transformed = transform_module_script_runes(&class_transformed, analysis, options.dev);
+        let transformed =
+            transform_module_script_runes(&class_transformed, &non_imports, analysis, options.dev);
         // Drop module-level comments esrap's no-`loc` top-level Program omits
         // (leading JSDoc before a kept `export const`, per-field JSDoc that
         // `strip_typescript` re-emits from a removed `export type`/`interface`).
@@ -4267,14 +4269,18 @@ fn is_non_proxy_node_type(nt: &str) -> bool {
 
 pub(crate) fn transform_module_script_runes(
     script: &str,
+    pre_class_script: &str,
     analysis: &ComponentAnalysis,
     dev: bool,
 ) -> String {
-    transform_module_script_runes_with_target(script, analysis, dev, false)
+    transform_module_script_runes_with_target(script, pre_class_script, analysis, dev, false)
 }
 
+/// `pre_class_script` is the script before the class-field lowering — the dev
+/// `$.tag` label needs the name the user wrote, which the lowering erases.
 fn transform_module_script_runes_with_target(
     script: &str,
+    pre_class_script: &str,
     analysis: &ComponentAnalysis,
     dev: bool,
     server: bool,
@@ -4831,7 +4837,10 @@ fn transform_module_script_runes_with_target(
     // that batch's `tag_declarator` collector intentionally skips.
     if dev {
         if let Some(rewritten) =
-            tag_class_field_ast::wrap_state_derived_with_tag_class_fields_ast(&result)
+            tag_class_field_ast::wrap_state_derived_with_tag_class_fields_ast_from(
+                &result,
+                pre_class_script,
+            )
         {
             result = rewritten;
         }
@@ -5517,6 +5526,15 @@ fn transform_instance_script_for_visitors(
             PN_FILE_TOUCHED.with(|c| c.set(true));
         }
         std::borrow::Cow::Owned(out)
+    };
+
+    // The dev-mode `$.tag` label needs the spelling the user wrote: the lowering
+    // below turns a public `x = $state()` into the same `#x` + accessor pair a
+    // hand-written private field produces, and the two are then indistinguishable.
+    let pre_class_script: String = if dev {
+        script.to_string()
+    } else {
+        String::new()
     };
 
     // Transform class fields only if the script contains class definitions with runes
@@ -6694,6 +6712,7 @@ fn transform_instance_script_for_visitors(
                 analysis,
                 store_sub_vars,
                 read_only_props,
+                &pre_class_script,
             ))
             .map(Cow::Owned)
             .unwrap_or(t)

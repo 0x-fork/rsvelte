@@ -25,6 +25,7 @@ pub(super) fn transform_client_runes_with_skip_and_state<'a>(
     _analysis: &ComponentAnalysis,
     store_sub_vars: &[String],
     _read_only_props: &[(String, String)],
+    pre_class_script: &str,
 ) -> Cow<'a, str> {
     // Quick pre-check: if no rune-like pattern (`$` followed by letter) appears, skip
     if !line.contains('$') {
@@ -305,7 +306,10 @@ pub(super) fn transform_client_runes_with_skip_and_state<'a>(
             result = Cow::Owned(rewritten);
         }
         if let Some(rewritten) =
-            super::tag_class_field_ast::wrap_state_derived_with_tag_class_fields_ast(&result)
+            super::tag_class_field_ast::wrap_state_derived_with_tag_class_fields_ast_from(
+                &result,
+                pre_class_script,
+            )
         {
             result = Cow::Owned(rewritten);
         }
