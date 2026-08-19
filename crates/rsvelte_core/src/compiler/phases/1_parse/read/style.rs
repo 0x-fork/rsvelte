@@ -543,7 +543,25 @@ impl<'a> CssParser<'a> {
         self.advance(); // consume '@'
 
         // Read at-rule name
+        let name_start = self.offset + self.index;
+        // Upstream's `read_identifier` rejects a name starting `-?\d` before reading it.
+        let leading_digit = {
+            let rest = &self.source[self.index..];
+            let rest = rest.strip_prefix('-').unwrap_or(rest);
+            rest.starts_with(|c: char| c.is_ascii_digit())
+        };
         let name = self.read_identifier();
+        if leading_digit || name.is_empty() {
+            record_first_error(
+                &self.error,
+                crate::error::ParseError::svelte(
+                    "css_expected_identifier",
+                    "Expected a valid CSS identifier",
+                    (name_start, name_start),
+                ),
+            );
+            return None;
+        }
         self.skip_whitespace();
 
         // Read prelude (until { or ;)
@@ -1900,21 +1918,14 @@ impl<'a> SelectorParser<'a> {
         }
     }
 
-    /// Take over a sub-parser's nesting error. Its other diagnostics stay
-    /// where they are: the enclosing parser re-reads the same text and
-    /// upstream raises nothing for constructs the sub-parser trips on (a `,`
-    /// inside an attribute-selector string, say). Hitting the nesting bound is
-    /// different — it means the arguments were dropped rather than parsed, so
-    /// it must reach the caller.
+    /// Take over a sub-parser's error. Upstream parses pseudo-class arguments
+    /// with the same recursive `read_selector`, so a token that cannot start a
+    /// selector is rejected inside `:global(…)` exactly as it is outside.
     fn absorb_nesting_error(&self, sub: &Self) {
         let Some(err) = sub.error.take() else {
             return;
         };
-        if matches!(&err, crate::error::ParseError::SvelteError { code, .. }
-            if code == "css_nesting_too_deep")
-        {
-            record_first_error(&self.error, err);
-        }
+        record_first_error(&self.error, err);
     }
 
     fn parse_selectors(&mut self, selectors: &mut Vec<Value>) {
@@ -1964,6 +1975,15 @@ impl<'a> SelectorParser<'a> {
                 // Universal selector
                 let start = self.offset + self.index;
                 self.advance();
+                // `*|el` — `*` is the namespace, so the local name wins.
+                let mut name = "*".to_string();
+                if self.current_char() == '|' {
+                    self.advance();
+                    match self.read_namespaced_local_name() {
+                        Some(local) => name = local,
+                        None => break,
+                    }
+                }
                 let end = self.offset + self.index;
 
                 let mut obj = Map::new();
@@ -1971,7 +1991,7 @@ impl<'a> SelectorParser<'a> {
                     "type".to_string(),
                     Value::String("TypeSelector".to_string()),
                 );
-                obj.insert("name".to_string(), Value::String("*".to_string()));
+                obj.insert("name".to_string(), Value::String(name));
                 obj.insert("start".to_string(), Value::Number((start as i64).into()));
                 obj.insert("end".to_string(), Value::Number((end as i64).into()));
                 selectors.push(Value::Object(obj));
@@ -2604,6 +2624,31 @@ impl<'a> SelectorParser<'a> {
                 continue;
             }
 
+            // An attribute selector is one simple selector however much whitespace
+            // its quoted value carries, so no combinator can be found inside it.
+            if c == b'[' {
+                let mut depth = 1;
+                let mut quote: Option<u8> = None;
+                i += 1;
+                while i < bytes.len() && depth > 0 {
+                    let b = bytes[i];
+                    if b == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    match quote {
+                        Some(q) if b == q => quote = None,
+                        Some(_) => {}
+                        None if b == b'"' || b == b'\'' => quote = Some(b),
+                        None if b == b'[' => depth += 1,
+                        None if b == b']' => depth -= 1,
+                        None => {}
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
             // Handle CSS escape sequences in :has()/:is()/:not() argument parsing too
             if c == b'\\' && i + 1 < bytes.len() {
                 i += 1;
@@ -2942,12 +2987,19 @@ impl<'a> SelectorParser<'a> {
 
     fn parse_type_selector(&mut self) -> Option<Value> {
         let start = self.offset + self.index;
-        let name = self.read_identifier();
-        let end = self.offset + self.index;
+        let mut name = self.read_identifier();
 
         if name.is_empty() {
             return None;
         }
+
+        // `ns|el` — the namespace is dropped and the local name is the selector.
+        if self.current_char() == '|' {
+            self.advance();
+            name = self.read_namespaced_local_name()?;
+        }
+
+        let end = self.offset + self.index;
 
         let mut obj = Map::new();
         obj.insert(
@@ -2959,6 +3011,25 @@ impl<'a> SelectorParser<'a> {
         obj.insert("end".to_string(), Value::Number((end as i64).into()));
 
         Some(Value::Object(obj))
+    }
+
+    /// Read the local name after a `|` namespace separator, which upstream
+    /// reads with the same `read_identifier` — so an empty one is an error.
+    fn read_namespaced_local_name(&mut self) -> Option<String> {
+        let pos = self.offset + self.index;
+        let local = self.read_identifier();
+        if local.is_empty() {
+            record_first_error(
+                &self.error,
+                crate::error::ParseError::svelte(
+                    "css_expected_identifier",
+                    "Expected a valid CSS identifier",
+                    (pos, pos),
+                ),
+            );
+            return None;
+        }
+        Some(local)
     }
 
     fn is_eof(&self) -> bool {
