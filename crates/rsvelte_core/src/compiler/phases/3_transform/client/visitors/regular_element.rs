@@ -2165,6 +2165,17 @@ fn is_value_known_defined(
         JsExpr::Object(_) => false,
         // Template literals are always strings (defined)
         JsExpr::TemplateLiteral(_) => true,
+        // Upstream unions the branch values, so a branch it cannot evaluate
+        // makes the whole thing unknown. Requiring both is the conservative
+        // reading of that: it never claims defined where upstream would not.
+        JsExpr::Conditional(cond) => {
+            is_value_known_defined(arena.get_expr(cond.consequent), arena, scope_root, scope)
+                && is_value_known_defined(arena.get_expr(cond.alternate), arena, scope_root, scope)
+        }
+        JsExpr::Logical(logical) => {
+            is_value_known_defined(arena.get_expr(logical.left), arena, scope_root, scope)
+                && is_value_known_defined(arena.get_expr(logical.right), arena, scope_root, scope)
+        }
         // A raw source fragment: classify the trivially-literal spellings the
         // way `scope.evaluate` would (string/number/boolean literals are
         // defined; object/array literals and everything else are UNKNOWN).
