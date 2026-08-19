@@ -5,9 +5,9 @@
 </script>
 
 <Table {rows}>
-	<svelte:fragment slot="head" let:cols={{ first, ...restCols }}>
+	<svelte:fragment slot="head" let:cols={{ first, second: renamed }}>
 		<th>{first}</th>
-		<th>{restCols.length}</th>
+		<th>{renamed}</th>
 	</svelte:fragment>
 
 	<tr slot="row" let:row={{ id, tags: [head = 'none', ...tail], meta: { n } = {} }} let:index>
