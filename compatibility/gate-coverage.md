@@ -89,7 +89,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 3 | Compiler warning positions | multiset of `code@line:col` | warning **end** span | [S] |
 | 4 | Compiler **error** parity | `error.json` `code`, `message`, `start`, `end`, `frame` | `filename`; the NAPI entries the corpus does not call; a missing artifact scored `match` until the per-tree precondition | [D] |
 | 5 | Generated shape matrix | per-case × target JS text + warning `code` multiset, or error `code` where official rejects | neither output is parsed — identical **non-JavaScript** scores `match`; CSS; warning **position**; error **message** and **position**; multi-directive and ancestry rules; whether a folded constant is the *right* value | [D] |
-| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout | [S] |
+| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout; anything about an error both sides raise | [S] [D] |
 | 7 | svelte2tsx source map | structural invariants and corpus-wide mapped-line coverage on rsvelte's own map | relation between generated text and mapped original text; source index | [D] |
 | 8 | css-prune sweep | `css.code` + `code@line:col` warnings of 1969 generated components | `js.code`; **every element in the grid is a plain `<div>`/`<p>` in one component** | [D] |
 | 9 | Formatter parity (JS corpus) | whole-file bytes vs oxfmt oracle | ids whose oracle file is absent are skipped, uncounted | [D] |
@@ -1136,6 +1136,17 @@ is zero.)
 **[S]** `mode: 'dts'` (the `.d.ts` emit path), `namespace: 'svg'`, `namespace: 'mathml'`,
 `accessors: true` and `version: '4'` are never exercised; `emitDts` is never called. Related:
 #2438 (`namespace: 'foreign'` unreachable from the napi boundary).
+
+### Blind spot 6f — when both sides error, nothing about the error is compared
+
+`svelte2tsx-verify.mjs:219-220`: `expErr && actErr` scores `error-parity` and returns; the
+message, the position and the error kind are all dropped. **[D]** rsvelte prefixes its
+message with the variant name where official does not — `<div><svelte:head>…</svelte:head></div>`
+gives official `` `<svelte:head>` tags cannot be inside elements or blocks `` and rsvelte
+`Template error: ` + the same sentence (`svelte2tsx/utils/error.rs:30`). 15 cells of a
+288-cell content × container grid reproduce it and the gate reports every one as parity.
+The population is not small: the corpus run that found this scored **155** entries
+`error-parity`.
 
 ### Blind spot 6e — `oracle-invalid` accepts anything, unratcheted
 
