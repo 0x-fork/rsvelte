@@ -279,6 +279,9 @@ pub(crate) fn split_class_members_onto_lines(class_body: &str) -> std::borrow::C
     let mut line_start = 0usize;
     let mut prev_non_ws: Option<u8> = None;
     let mut i = 0usize;
+    // A `(`/`[` region is scanned rather than skipped, because a class body can
+    // sit inside one — `new (class { … })()`. Nothing in it terminates a member.
+    let mut group_depth = 0i32;
 
     while i < bytes.len() {
         let b = bytes[i];
@@ -330,50 +333,62 @@ pub(crate) fn split_class_members_onto_lines(class_body: &str) -> std::borrow::C
                 prev_non_ws = Some(b'/');
                 continue;
             }
-            b'(' | b'[' | b'{' => {
+            b'(' | b'[' => {
+                group_depth += 1;
+                prev_non_ws = Some(b);
+                i += 1;
+            }
+            b')' | b']' => {
+                group_depth = (group_depth - 1).max(0);
+                prev_non_ws = Some(b);
+                i += 1;
+            }
+            b'{' => {
                 let close = find_matching_bracket(class_body, i + 1, b as char);
                 let end = close.map_or(bytes.len(), |e| e + 1);
                 // Only a `}` closing a member body ends a member; `)` / `]` do not.
-                if b == b'{' {
+                if group_depth == 0 {
                     boundary = Some(end);
-                    // A nested class body needs the same one-member-per-line
-                    // shape, and its braces must not share a line with members
-                    // either — the outer scan reads them as plain source lines.
-                    // A constructor body is scanned line by line as well.
-                    if let Some(inner_end) = close.filter(|&e| e > i + 1)
-                        && (brace_opens_class_body(&class_body[..i])
-                            || brace_opens_constructor_body(&class_body[..i]))
+                }
+                // A nested class body needs the same one-member-per-line
+                // shape, and its braces must not share a line with members
+                // either — the outer scan reads them as plain source lines.
+                // A constructor body is scanned line by line as well.
+                if let Some(inner_end) = close.filter(|&e| e > i + 1)
+                    && (brace_opens_class_body(&class_body[..i])
+                        || brace_opens_constructor_body(&class_body[..i]))
+                {
+                    let inner_start = i + 1;
+                    let inner = &class_body[inner_start..inner_end];
+                    let indent = leading_indent(class_body, line_start);
+                    let mut rebuilt = String::new();
+                    if !rest_of_line_is_blank(inner, 0) {
+                        rebuilt.push('\n');
+                        rebuilt.push_str(indent);
+                        rebuilt.push('\t');
+                    }
+                    rebuilt.push_str(&split_class_members_onto_lines(inner));
+                    if !inner
+                        .rsplit('\n')
+                        .next()
+                        .is_none_or(|l| l.trim().is_empty())
                     {
-                        let inner_start = i + 1;
-                        let inner = &class_body[inner_start..inner_end];
-                        let indent = leading_indent(class_body, line_start);
-                        let mut rebuilt = String::new();
-                        if !rest_of_line_is_blank(inner, 0) {
-                            rebuilt.push('\n');
-                            rebuilt.push_str(indent);
-                            rebuilt.push('\t');
-                        }
-                        rebuilt.push_str(&split_class_members_onto_lines(inner));
-                        if !inner
-                            .rsplit('\n')
-                            .next()
-                            .is_none_or(|l| l.trim().is_empty())
-                        {
-                            rebuilt.push('\n');
-                            rebuilt.push_str(indent);
-                        }
-                        if rebuilt != inner {
-                            out.push_str(&class_body[copied..inner_start]);
-                            out.push_str(&rebuilt);
-                            copied = inner_end;
-                        }
+                        rebuilt.push('\n');
+                        rebuilt.push_str(indent);
+                    }
+                    if rebuilt != inner {
+                        out.push_str(&class_body[copied..inner_start]);
+                        out.push_str(&rebuilt);
+                        copied = inner_end;
                     }
                 }
                 prev_non_ws = Some(bytes[end.saturating_sub(1)]);
                 i = end;
             }
             b';' => {
-                boundary = Some(i + 1);
+                if group_depth == 0 {
+                    boundary = Some(i + 1);
+                }
                 prev_non_ws = Some(b';');
                 i += 1;
             }
