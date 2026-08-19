@@ -1969,7 +1969,7 @@ fn lower_variable_declaration<'a>(
         });
     let mut combined_decls = Vec::new();
 
-    for d in vd.declarations.iter() {
+    for (di, d) in vd.declarations.iter().enumerate() {
         // Per-source-declarator pair accumulator.
         let mut decls: Vec<(oxc_ast::ast::BindingPattern<'a>, Option<OxcExpression<'a>>)> =
             Vec::new();
@@ -2093,7 +2093,22 @@ fn lower_variable_declaration<'a>(
             } else {
                 let mut stmt = b.var_decl_from_pairs(kind, decls);
                 if carry && let Statement::VariableDeclaration(v) = &mut stmt {
-                    v.span = d.span;
+                    // The first statement keeps the declaration keyword's own
+                    // start, so a comment between `let` and the binding name
+                    // still sorts after the statement and before the name.
+                    v.span = if di == 0 {
+                        Span::new(vd.span.start, d.span.end)
+                    } else {
+                        d.span
+                    };
+                    // One declarator in, one out: locating it is what puts a
+                    // comment between the keyword and the name in that slot
+                    // instead of ahead of the whole statement.
+                    if v.declarations.len() == 1
+                        && let Some(only) = v.declarations.first_mut()
+                    {
+                        only.span = d.span;
+                    }
                 }
                 out.push(stmt);
             }
