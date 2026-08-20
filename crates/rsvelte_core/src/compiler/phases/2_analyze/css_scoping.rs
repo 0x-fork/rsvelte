@@ -2137,9 +2137,12 @@ fn subtree_has_matching_subject_inner(
                 if complex_selector_matches_element(selector, &element_info, ancestors) {
                     return true;
                 }
-                // For selectors with sibling combinators, the sibling pass may have already
-                // scoped this element. Check if it's scoped and matches the subject selector.
-                if el.metadata.scoped
+                // The sibling pass may already have scoped this element for a selector
+                // whose chain this walker cannot evaluate. `metadata.scoped` is set by
+                // any selector, so without the sibling test a subject scoped by an
+                // unrelated rule satisfies an ancestor test the chain rejects.
+                if has_sibling_combinator(selector)
+                    && el.metadata.scoped
                     && let Some(subj) = subject_sel
                     && element_matches_simple_selectors(&element_info, &subj.selectors)
                 {
@@ -2162,7 +2165,8 @@ fn subtree_has_matching_subject_inner(
                 if complex_selector_matches_element(selector, &element_info, ancestors) {
                     return true;
                 }
-                if el.metadata.scoped
+                if has_sibling_combinator(selector)
+                    && el.metadata.scoped
                     && let Some(subj) = subject_sel
                     && element_matches_simple_selectors(&element_info, &subj.selectors)
                 {
