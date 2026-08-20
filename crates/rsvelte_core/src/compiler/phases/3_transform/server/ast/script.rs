@@ -1316,7 +1316,10 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
 /// nested classes pass through unchanged (the `value` of a method is a
 /// `Function`, not a `PropertyDefinition`, so it is untouched).
 fn lower_class_field_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransformState<'a>) {
-    let mut v = ClassFieldRuneLower { b: state.b };
+    let mut v = ClassFieldRuneLower {
+        b: state.b,
+        rune_store_subs: rune_names_are_store_subs(state.analysis),
+    };
     v.visit_statement(stmt);
 }
 
@@ -1329,6 +1332,9 @@ fn lower_class_field_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransform
 /// on every `PropertyDefinition` in the tree.
 struct ClassFieldRuneLower<'a> {
     b: B<'a>,
+    /// `<svelte:options runes={false} />` makes `$effect` / `$inspect` store
+    /// subscriptions, so the statement removal below must not fire.
+    rune_store_subs: bool,
 }
 
 impl<'a> ClassFieldRuneLower<'a> {
@@ -1668,7 +1674,7 @@ impl<'a> VisitMut<'a> for ClassFieldRuneLower<'a> {
             let Statement::ExpressionStatement(es) = stmt else {
                 return true;
             };
-            !is_removed_effect_stmt(&es.expression, rune_names_are_store_subs(self.analysis))
+            !is_removed_effect_stmt(&es.expression, self.rune_store_subs)
         });
         oxc_ast_visit::walk_mut::walk_statements(self, stmts);
     }
