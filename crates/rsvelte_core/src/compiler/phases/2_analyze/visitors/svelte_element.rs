@@ -198,8 +198,6 @@ pub fn visit<'a, 'b: 'a>(
         }
     }
 
-    // Check for invalid bindings on svelte:element
-    // bind:value, bind:files, bind:group can only be used with specific elements
     for attr in &element.attributes {
         if let Attribute::AnimateDirective(animate) = attr
             && context.each_block_stack.last().is_none()
@@ -212,42 +210,11 @@ pub fn visit<'a, 'b: 'a>(
                 &bind.expression,
                 true,
             );
-            let name = bind.name.as_str();
-            match name {
-                "value" => {
-                    return Err(AnalysisError::validation_at(
-                        "bind_invalid_target",
-                        "`bind:value` can only be used with `<input>`, `<textarea>`, `<select>`",
-                        bind.start,
-                        bind.end,
-                    ));
-                }
-                "files" => {
-                    return Err(AnalysisError::validation_at(
-                        "bind_invalid_target",
-                        "`bind:files` can only be used with `<input type=\"file\">`",
-                        bind.start,
-                        bind.end,
-                    ));
-                }
-                "group" => {
-                    return Err(AnalysisError::validation_at(
-                        "bind_invalid_target",
-                        "`bind:group` can only be used with `<input type=\"checkbox\">` or `<input type=\"radio\">`",
-                        bind.start,
-                        bind.end,
-                    ));
-                }
-                "checked" => {
-                    return Err(AnalysisError::validation_at(
-                        "bind_invalid_target",
-                        "`bind:checked` can only be used with `<input type=\"checkbox\">` or `<input type=\"radio\">`",
-                        bind.start,
-                        bind.end,
-                    ));
-                }
-                _ => {}
-            }
+            super::bind_directive::validate_binding_target(
+                bind,
+                "svelte:element",
+                &element.attributes,
+            )?;
         }
     }
 

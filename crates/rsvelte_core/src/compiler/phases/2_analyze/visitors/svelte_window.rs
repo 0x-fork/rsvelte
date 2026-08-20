@@ -37,10 +37,17 @@ pub fn visit(
     }
 
     // Validate attributes - check for invalid ones
+    // The target rule needs the attribute list, which the mutable loop below holds.
+    for attr in &window.attributes {
+        if let Attribute::BindDirective(bind) = attr {
+            bind_directive::validate_binding_target(bind, "svelte:window", &window.attributes)?;
+        }
+    }
+
     for attr in &mut window.attributes {
         match attr {
             Attribute::BindDirective(bind) => {
-                bind_directive::visit_with_svelte_element(bind, "svelte:window", context)?;
+                bind_directive::visit_with_svelte_element(bind, context)?;
             }
             Attribute::OnDirective(on) => {
                 on_directive::visit(on, context)?;

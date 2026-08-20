@@ -32,10 +32,17 @@ pub fn visit(body: &mut SvelteElement, context: &mut VisitorContext) -> Result<(
     }
 
     // Event expressions on special elements participate in normal reference analysis.
+    // The target rule needs the attribute list, which the mutable loop below holds.
+    for attr in &body.attributes {
+        if let Attribute::BindDirective(bind) = attr {
+            bind_directive::validate_binding_target(bind, "svelte:body", &body.attributes)?;
+        }
+    }
+
     for attr in &mut body.attributes {
         match attr {
             Attribute::BindDirective(bind) => {
-                bind_directive::visit_with_svelte_element(bind, "svelte:body", context)?;
+                bind_directive::visit_with_svelte_element(bind, context)?;
             }
             Attribute::OnDirective(on) => on_directive::visit(on, context)?,
             Attribute::LetDirective(let_dir) => {
