@@ -173,7 +173,7 @@ apportioned.
 
 ### What each gate cannot see ([`compatibility/gate-coverage.md`](compatibility/gate-coverage.md))
 
-The sections below describe what the ~19 gates *do* compare. Every one of them can be green
+The sections below describe what the ~34 gates *do* compare. Every one of them can be green
 while a real defect ships, because each has a field its comparison key drops, a normalization
 step that erases the divergence, or a population its unit never reaches — and rediscovering
 those blind spots ad hoc has cost this project several shipped bugs (#2403, #2424, #2425).
@@ -214,7 +214,9 @@ that fixes entries must re-baseline in the same PR instead of leaving a backlog 
 same directory holds four sibling shrink-only ratchets, each with per-entry justification in a paired
 `.md`: the formatter-parity gate (`fmt-known-failures.json` / `fmt-oracle-excluded.json`), the
 svelte2tsx output-parity gate (`svelte2tsx-known-failures.json`), the lint output-parity gate
-(`lint-known-failures.json`), and the SCSS-backend gate (`scss-known-failures.json`), which compares
+(`lint-known-failures.json`, whose *constructed* companion
+`lint-adversarial-known-failures.json` is described under `rsvelte_lint` below), and the
+SCSS-backend gate (`scss-known-failures.json`), which compares
 `rsvelte_preprocess`'s `grass` against dart-sass on every SCSS block and `.scss` file in the corpus —
 30 divergences on a 94-unit compared population, so treat `grass` as a near-substitute, not a drop-in. svelte2tsx additionally gates its **source map** (ratchet
 `svelte2tsx-map-known-failures.json`), because the TSX-text gate cannot see the map at all. The two
@@ -495,7 +497,8 @@ key is comparable to its phase-1 twin and a divergence is a state-transition dif
 phase is in the ratchet key, because an opened-phase entry would otherwise suppress the post-edit
 divergence in the same `(unit, method)`.
 Upstream ships **no** end-to-end protocol test, so the harness is built from scratch, and a baseline
-update needs the complete nine-artifact union at one project/language-tools/corpus revision — a
+update needs the complete 17-artifact union (`CORPUS_SHARDS` + the fixture unit) at one
+project/language-tools/corpus revision — a
 partial run cannot shrink it.
 
 **The measurement is a property of the installed tree, not only of the sources.** The `.svelte.tsx`
@@ -725,6 +728,236 @@ Wave 4 architecture (decided; tsgo ships an LSP server as of TypeScript 7, so th
 `eslint-plugin-svelte`'s rules, `crates/rsvelte_lint`) ships as its own npm package,
 [`@rsvelte/lint`](apps/npm/lint), fixed-versioned with `@rsvelte/compiler` via Changesets.
 Its real-world parity corpus ratchet lives at `compatibility/lint-known-failures.json`.
+
+**A lint rule ported as a text scan is a defect waiting for the right input, and the collected
+corpus is the wrong instrument to find it.** That corpus graded 73k findings across 6.7k
+published files and sat at 104 divergences — saturated enough to read as "close". A
+*constructed* corpus (`compatibility/lint-adversarial/`, 808 patterns written by reading each
+upstream rule and asking what a plausible port gets wrong) reported **330 on its first run**,
+against the same comparison key. The recurring causes were not exotic: a `;`-split style-attribute
+scanner blind to CSS comments and quoted strings; `this={…}` on `<svelte:element>` missing from
+the attribute list, so five rules never saw it; ASCII whitespace where upstream uses JS `\s`
+(NBSP, FEFF, `\v`, `\f`); binding resolution by NAME rather than by scope, which is both a false
+positive on a shadow and a false negative past one; element hooks implemented for
+`RegularElement`/`Component` only, while upstream visits every start tag; and script-only rules
+that never look at a template event handler. Fixing them took the adversarial corpus to 4
+accepted entries and the collected one from 104 to 45 — **the collected corpus had been
+suppressing 62 of its own entries' worth of defects it could not phrase**.
+
+That corpus has since grown to **1,365 patterns** across the four axes below, and the tree now
+stands at **5** accepted adversarial entries and **3** collected ones (6,788 real-world sources,
+73,378 findings compared). Read the composition before reading the count: **four of the five are
+upstream-side or deliberate** — two `svelte-eslint-parser` artifacts (`</style⏎⏎>` produces no
+`SvelteStyleElement`; the block-blanking regex is case-insensitive, so `<Style />` is treated as a
+style tag), the `globals.browser ∖ globals.node` split, and rsvelte's choice to treat a CSS
+`svelte-ignore` on an un-preprocessed `lang="scss"` block as *used*, which is also all three
+collected entries. Exactly one is an rsvelte limitation: `sort-attributes/07-lookahead-order`
+needs a JS-compatible regex engine.
+
+Three method notes, each of which cost real time here:
+- **Two of the remaining entries are not rsvelte being wrong**, and neither is discoverable
+  from the divergence alone: `svelte-eslint-parser` builds no `SvelteStyleElement` for
+  `</style⏎⏎>` (so upstream's rule never runs), and upstream's browser-global set is
+  `globals.browser ∖ globals.node`, which modern Node empties of `navigator`. Probe the oracle on
+  a minimal input before porting a behaviour; the divergence names a symptom, not a cause.
+- **The oracle was an npm install, not a pin.** Floating ranges under `--no-package-lock` moved
+  three ratchet entries with no rsvelte change — proven by building the pre-campaign binary and
+  finding its output byte-identical on those files. Versions are now exact, and `eslint` is held
+  at 9 because eslint-plugin-svelte 3.23.0's `no-reactive-functions` calls an API ESLint 10
+  removed: under 10 every positive report for that rule throws and the file is scored
+  *unparseable* rather than compared, hiding a whole rule's positive population from both gates.
+- **A fixture on `eslint_plugin_oracle.rs`'s SKIP list is graded by nothing else** unless some
+  corpus happens to contain its shape. The store rewrite here silently lost six findings on such
+  a fixture (a computed property key serializes with its start at the `[`, which matches no oxc
+  reference); the fixture gate was green, the adversarial corpus was green, and only the
+  collected corpus caught it. When adding a SKIP entry, name the gate that now holds that shape.
+
+**Four more axes were added after that, and each found defects the report key cannot express.**
+The report gate compares `(ruleId, line, column, message)` over files that all share one ancestry,
+which leaves four things unobservable: the text `--fix` produces
+(`lint-adversarial-fix.mjs`), a suggestion's `{desc, resulting text}`
+(`lint-adversarial-suggest.mjs`), a finding's **end** position (`lint-adversarial-end.mjs`), and
+**what the project declares** (`lint-env.mjs`). Their first runs found, respectively: fix
+divergences on rules whose report position was already right; 5 suggestion divergences at
+positions where the report key *already agreed*; **670 end-position divergences over 4611
+compared findings across 20 rules**, four of which were reporting a zero-width range; and a class
+nothing could see at all.
+
+**The autofix gate enables ONE rule per pattern, and the rule it picks is the pattern's directory
+name — so a rule is never run on a pattern filed under a different rule.** That is not the same
+scope limit as "cross-rule fix scheduling is ESLint's driver policy", which is why the per-rule
+scope was chosen; it is a whole population of single-rule behaviour the gate cannot reach.
+`lint-adversarial-fix-all.mjs` enables all 74 at once and found it immediately: rsvelte's `--fix`
+filtered `eslint-disable*` directives on `LineIndex::line` while the report path filtered on the
+line the finding is *reported* on — ESLint's table, which counts U+2028/U+2029, for the seven rules
+in `uses_eslint_line_table`. So `--fix` rewrote a source whose report was suppressed, and skipped a
+finding it had just reported, both with `svelte/html-quotes` alone. Of the 21 non-parity units on
+that gate's first run over 1364 patterns, **zero** were unattributable driver-policy noise — 16
+reproduce the per-rule gate's own entries, and the rest each have a named cause (including an
+upstream crash: `no-useless-mustaches` rewrites `href={``}` to `href=""`, then
+`no-navigation-without-base` indexes an empty `value` array).
+
+Three lessons generalize past the lint gates.
+
+**A rule's suggestion did not exist in the machine-readable output.** `render` dropped the
+`fix`/`suggestions` payload at the `LintMessage` → `Diagnostic` boundary, so the axis had to be
+*built on both sides* before anything could be compared — "what does the gate not look at" is
+sometimes answered by "a field the product does not emit".
+
+**The end position is a separate ratchet for the reason `start`/`end` already are on the
+compiler-error gates**, and it is compared only where the start already matches: a finding one
+side does not report has no counterpart. That couples the two gates in one direction — **fixing a
+start divergence ADDS rows to the end gate** as newly-matched findings become comparable, which
+is expected rather than a regression.
+
+**The environment is an input, and every population had it fixed.** eslint-plugin-svelte resolves
+`@sveltejs/kit` **from the linted file's path** and disables five rules without it, while
+`compatibility/lint-adversarial/package.json` declares it for the whole adversarial corpus — so
+"is SvelteKit installed" was a constant no gate could vary, and rsvelte had no notion of the
+condition at all. `compatibility/lint-env/` holds mini-projects whose sources are byte-identical
+and whose `package.json` is the only variable; the gate refuses to run if that invariant is
+broken, and refuses to pass if every project yields the same oracle count (which would mean the
+manifests separate no rule). Two related conditions were also declared-but-unread: `RuleConditions`
+was set on every rule and consumed by nothing, so the seven rules upstream disables in runes mode
+ran on `.svelte.(js|ts)` modules — which **are** runes mode by definition. Ask of any gate whose
+oracle reads the filesystem: *what did the checkout provide that the sources did not?*
+
+**The module surface is a second code path with almost no population.** A `.svelte.(js|ts)` goes
+through `classify_source` → `SourceKind::Module` → `run_script_rules_module`, and the corpus held
+18 such files out of 1069. Re-hosting every pattern's instance `<script>` body as a standalone
+module produced **128 divergences**, and one of the causes was that the module entry point was
+handed a bare basename instead of the file's path, so every filesystem-aware rule was blind
+there. A separate code path carrying 1.7% of the population is where defects live.
+
+**Two program-path ESTree gaps surfaced through these, and both were rule-agnostic.**
+`convert_class_element_for_program` dropped a class `static {}` block entirely (`_ => None`), and
+the function converters never consulted `this_param`, so a TypeScript `this` parameter was absent
+from `params` — which TSESTree models as an ordinary `params[0]`. Every JSON-walking rule was
+blind to both. Codegen was unaffected (verified against the official compiler), so the blast
+radius was the JSON program the linter and svelte2tsx read.
+
+**Three more of the same class are open, and one is now hidden behind a per-rule workaround —
+which is the part to remember.** The serialized program still drops a
+`TSTypeAliasDeclaration` entirely (`convert_statement_for_program` has no arm; it falls to
+`_ => None`), omits `params.rest` for a `function` **statement** while the *exported* form already
+guards it (so `function f(...a)` and `export function f(...a)` disagree with each other today), and
+never emits a function's `returnType`. Every JSON-walking rule is blind to all three. `no-inspect`
+now looks correct on those shapes only because it tops its walk up from a direct oxc parse of the
+script slice — so **the gate is green and the gap is untouched**, and the next rule to need any of
+those nodes will rediscover it. A fix belongs in
+`crates/rsvelte_core/src/compiler/phases/1_parse/read/expression.rs`; `returnType` additionally
+needs a new field on `JsNode::FunctionDeclaration`, a type the compiler, svelte2tsx and every rule
+share. Two adjacent AST divergences found the same way: a template `import('svelte/internal')`
+serializes as a `CallExpression` with `callee: Identifier "import"` rather than an
+`ImportExpression`, and a `FunctionBody`'s `directives` are dropped, so
+`() => { 'use strict'; return a; }` serializes as a block with one statement.
+
+**Every gate configures all shared rules to `"warn"`, which makes the CONFIGURATION a constant
+they cannot vary — and two axes were hiding inside it.** `lint-preset.mjs` (gate 33) compares the
+default severity per rule id, and `lint-conditions.mjs` (gate 34) compares whether a rule runs at
+all in each Svelte mode. Both are recorded-difference ratchets rather than equality assertions,
+because rsvelte's `recommended` preset is a documented curation of its own and asserting equality
+would encode a product decision as a correctness claim.
+
+What they found: **21 rules that upstream defaults to `error` and rsvelte defaulted to `warn`** —
+and severity decides the exit code in both tools, so `rsvelte-lint` exited 0 where `eslint` exits
+1 on the same source. All 21 were fixed rather than listed, because rsvelte already agreed with
+upstream on every rule whose severity was not the blanket `warn` (11 `error`, 2 `warn`, 13 for 13)
+and every divergence ran one direction — the shape of an incomplete transcription, not a policy.
+Three `RuleConditions` flags likewise disagreed, each making rsvelte run a rule ESLint skips.
+
+**Both of those read a declared table, and running the tables is a third gate.** `lint-severity.mjs`
+(gate 36) drives upstream's `flat/recommended` verbatim against `rsvelte-lint` with no `--config`
+and compares the findings *with severity in the key*, plus the process **exit code**. The rule-set
+half came back confirmed — **0 severity divergences over 1,179 / 1,178 findings** — while the exit
+code diverged on **64 of 1,365 patterns**, and that half is what generalizes. Fifty-nine are
+rsvelte exiting 1 on a Svelte **compiler** diagnostic `svelte-eslint-parser` is too permissive to
+see (55 the official compiler also rejects; **4 are rsvelte over-rejections** — a `$`-prefixed class
+member name read as a store reference, and legacy mode not turning a rune-named `$` reference into a
+store subscription, both in `2_analyze/store_subscriptions.rs`). Four more are a rule
+`lint-universe.mjs` excludes as type-aware, still reporting at `error` upstream: **an `EXCLUDE` entry
+removes a rule from a finding comparison and cannot remove it from the exit status**, so a
+findings-only gate has no view of what a switching user's CI does. And driving the *default* preset
+reached a rule no other gate enables, which throws on `<a href="…" rel>` and takes the file's whole
+report with it — a configuration nobody had ever run was holding a live upstream crash.
+
+**Two reductions in those gates were non-discriminating on the first attempt, and both were caught
+by their own arithmetic rather than by review.** Keying the preset gate on membership alone
+reported the 21 severity divergences as agreeing. And reducing `meta.conditions` by unioning across
+**all** condition objects — instead of only those whose `svelteVersions` admits `'5'` — reported six
+correctly-gated rules as wrong, because a `{svelteVersions:['3/4']}` object constrains nothing on
+the runes axis while being unreachable here. Ten rows, six of them artefacts. When a gate's key is
+*derived* rather than read, the derivation is the thing to test first.
+
+**A gate that reads a machine format cannot see a bug in the format a human reads.** All ~8 lint
+gates drive `--format sarif`. `Position::column` is stored zero-based (SARIF adds 1; the LSP shape
+consumes it as stored), and `write_human` / `write_github_actions` printed it raw — so **every
+column in the default CLI output and every CI annotation was one short**, `4:0` where ESLint prints
+`4:1`, while `machine` and `sarif` were right. The `github-actions` unit test asserted the wrong
+value, encoding the behaviour instead of the convention. Ask of an output gate not only "what does
+the key drop" but "**which serializer does the oracle exercise**".
+
+**The next question after that is which ENTRY POINT it exercises, and it found a fourth copy of one
+decision.** All ~8 lint gates drive the CLI, so every one of them goes through `runner.rs`; the wasm
+playground and the NAPI addon instead wrap `json_api.rs`, which **no gate drives**. Both must decide
+the same thing — the seven rules in `uses_eslint_line_table` report on ESLint's table, where U+2028 /
+U+2029 end a line, and every other rule reports on the parser's — and `json_api` answered it with a
+blanket `line_index.position()`, so the bindings put those seven rules on a different line and column
+than the CLI does for one source. It could not have shared the CLI's answer even in principle:
+`report_line` and `uses_eslint_line_table` were `#[cfg(feature = "native")]` while `json_api` is not,
+which is the mechanism that let a fourth copy exist. The decision is now one un-gated
+`LintDiagnostic::report_span`, with the four upstream-measured verdicts pinned as a test — a directive
+is located on the parser table and filtered against the reporting rule's table, so **a U+2028 before
+the directive shields the parser-table rule and not the ESLint-table one, and one after it shields the
+reverse**. When a shared crate has a native and a non-native surface, `#[cfg]` is where the ports
+diverge silently.
+
+**A probe that uses a configuration no user writes measures a different product.** `extends:
+["none"]` — which only the gates use, to isolate one rule — also disables the parse-error
+diagnostic, so a probe run that way showed `rsvelte-lint` silently passing unparseable files with
+exit 0. Under the default config it reports and exits 1, as ESLint does. What *was* real: the
+message was a `{:?}`-formatted Rust struct with `range: None`, so no line:column reached the user.
+Related measurement worth keeping: rsvelte's parser is the **compiler's**, and
+`svelte-eslint-parser` is deliberately more permissive — 3 of 1355 adversarial patterns parse there
+and not here, against **0 of 6788 real-world files**. Do not "fix" that by loosening the compiler
+parser; the divergence lives only in inputs written to be invalid.
+
+**A rule's fix path and its report path are two implementations, and only the autofix gate
+compares them to each other.** `prefer-class-directive` reported through `js_whitespace` (JS
+semantics, U+FEFF is whitespace) and trimmed through Rust's `str::trim*` (Unicode `White_Space`,
+U+FEFF is not), so a `class` value padded with U+FEFF was reported at the identical position on
+both sides and rewritten differently. Every gate keyed on `(ruleId, line, column, message)` is
+blind to that split by construction — the same "two ports of one function, and no gate compares
+the ports" shape recorded for the client/server constant fold, one level down.
+
+**rsvelte's `parse()` accepts a document official's `parse()` rejects**, and the linter is only
+where it was noticed. `svelte_meta_invalid_placement` — `<svelte:head>` inside an element — is
+raised by upstream from `phases/1-parse/state/element.js:161` and by rsvelte from
+`phases/2_analyze/visitors/svelte_head.rs:31-32`. Anything that parses without analyzing
+(svelte2tsx, the language server, `rsvelte-lint`) therefore sees a valid tree where the official
+toolchain sees a fatal error. It surfaced as an autofix divergence: ESLint's `verifyAndFix` stops
+when a pass produces text its parser rejects, so upstream fixed one nesting level and stopped
+while rsvelte relinted cleanly and fixed the next. Zero of 6,788 real-world sources reach it.
+
+**Rule OPTIONS are the axis this corpus is now saturated on, and the measurement is worth keeping
+because "each rule has an option pattern" is the non-discriminating version of it.** 29 of the 76
+rules declare an options schema and 28 are exercised with a non-default option somewhere — but
+that counts *reaching* the option, not covering its values. Enumerating every enum and boolean
+**value** in those schemas gives 43 unexercised values, of which 40 are the rule's own code default
+(the schemas declare no `default`, so the default has to be read out of the `??` / `||` at the
+consumption site — reading it off the schema reports the default as a gap) and are covered by every
+option-less pattern in the directory. Of the three that remain, `sort-attributes.alphabetical` is
+**dead upstream** — declared in the schema, read at zero sites, and rsvelte matches by also
+ignoring it — leaving exactly one real gap: `block-lang.enforceScriptPresent: true`, which inline
+`/* eslint … */` configuration structurally cannot reach, since the arm fires only when there is
+no `<script>` and ESLint reads inline config only from a JS comment. It was checked by hand with an
+explicit config instead; both sides report at 1:2 with the same message.
+
+**Finding ORDER is dropped by every lint gate (they build a `Set`) and was measured clean.** Over
+the 978 adversarial patterns with ≥2 findings, both sides emit in non-decreasing position order
+with 0 violations each and 0 files differing in the order of their positions; 73 differ only in
+which rule wins a same-position tie, which upstream derives from rule registration order and does
+not document. Recorded so the axis is not re-opened as an unknown.
 
 ### Type-aware lint suite (out-of-workspace)
 
