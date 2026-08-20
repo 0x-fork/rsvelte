@@ -32,7 +32,7 @@ other on the same pattern: a bare `<id>` is a text divergence, and
 `oracle-crash:<id>` is a pattern ESLint threw on while fixing, where there is no
 text to compare.
 
-Partition of `lint-adversarial-fix-all-known-failures.json` by cause: `14 + 1 + 1 + 1 + 1`
+Partition of `lint-adversarial-fix-all-known-failures.json` by cause: `14 + 1 + 1 + 1`
 
 | cause | entries |
 |---|---|

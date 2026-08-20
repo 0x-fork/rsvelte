@@ -26,7 +26,7 @@ An entry needs a reason that is *not* "rsvelte is wrong here".
 
 `lint-adversarial-fix-known-failures.json` holds **14 entries**.
 
-Partition of `lint-adversarial-fix-known-failures.json` by cause: `13 + 1 + 1`
+Partition of `lint-adversarial-fix-known-failures.json` by cause: `13 + 1`
 
 | cause | entries |
 |---|---|
