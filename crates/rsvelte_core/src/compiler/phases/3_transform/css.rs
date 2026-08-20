@@ -1810,10 +1810,7 @@ fn is_parent_chain_unused(ctx: &CssContext) -> bool {
 /// *some* element, which keeps the rule alive when `.grand` exists elsewhere in
 /// the component.
 fn is_nested_selector_unused_against_ancestors(rel_selectors: &[Value], ctx: &CssContext) -> bool {
-    if ctx.has_dynamic_elements
-        || ctx.dom_structure.elements.is_empty()
-        || !structural_ancestry_is_lexical(ctx)
-    {
+    if ctx.dom_structure.elements.is_empty() || !structural_ancestry_is_lexical(ctx) {
         return false;
     }
     let parent_preludes = ctx.parent_preludes.borrow();
@@ -3856,7 +3853,7 @@ fn is_structural_descendant_chain_unused(rel_selectors: &[Value], ctx: &CssConte
     if rel_selectors.len() < 2 || ctx.dom_structure.elements.is_empty() {
         return false;
     }
-    if ctx.has_dynamic_elements || !structural_ancestry_is_lexical(ctx) {
+    if !structural_ancestry_is_lexical(ctx) {
         return false;
     }
     for rel in rel_selectors.iter().skip(1) {
@@ -3894,8 +3891,10 @@ fn is_structural_descendant_chain_unused(rel_selectors: &[Value], ctx: &CssConte
 /// is already decided by [`is_simple_selector_unused`], whose per-name
 /// deoptimizations this walker deliberately does not reproduce.
 fn is_structural_compound_unused(rel_selectors: &[Value], ctx: &CssContext) -> bool {
+    // No `has_dynamic_elements` bail: upstream lets a `<svelte:element>` off only the
+    // type-selector test, and `structural_element_matches_compound` already does that
+    // per element — a component-wide bail would forgive its classes and ids as well.
     if rel_selectors.len() != 1
-        || ctx.has_dynamic_elements
         || ctx.dom_structure.elements.is_empty()
         || !structural_ancestry_is_lexical(ctx)
     {
