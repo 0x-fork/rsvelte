@@ -2962,15 +2962,14 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
                                 return;
                             }
                             "pending" if expr.arguments.is_empty() => {
-                                // Whole-call rewrite: `$effect.pending()` becomes
-                                // `$.eager(() => $.pending())`, matching upstream
-                                // (`$.eager` receives a thunk that calls
-                                // `$.pending()`). The entire CallExpression span is
-                                // replaced.
+                                // Whole-call rewrite. Upstream builds
+                                // `b.thunk(b.call('$.pending'))`, and `thunk`
+                                // unthunks a zero-argument call of an identifier,
+                                // so the argument is the bare reference.
                                 self.add_replacement(
                                     expr.span.start,
                                     expr.span.end,
-                                    "$.eager(() => $.pending())".to_string(),
+                                    "$.eager($.pending)".to_string(),
                                 );
                                 return;
                             }
@@ -3056,7 +3055,10 @@ impl<'a, 's, 'ast> Visit<'ast> for StateVarCollector<'a, 's> {
             self.add_replacement(
                 expr.span.start,
                 expr.span.end,
-                format!("$.eager(() => {})", transformed_arg),
+                format!(
+                    "$.eager({})",
+                    super::destructure_transforms::unthunk_string(&transformed_arg)
+                ),
             );
             return;
         }

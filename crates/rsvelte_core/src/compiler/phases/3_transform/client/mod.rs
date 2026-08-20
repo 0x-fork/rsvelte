@@ -50,6 +50,7 @@ mod scan_index;
 mod scope_analysis;
 mod state_assigns_combined_ast;
 mod state_call_ast;
+mod state_eager_ast;
 mod state_member_mutate_ast;
 mod state_pipeline_ast;
 mod state_raw_frozen_ast;

@@ -10,6 +10,7 @@
 pub mod ast;
 pub(crate) mod await_save_ast;
 pub(crate) mod derived_reads_ast;
+pub(crate) mod effect_pending_ast;
 pub(crate) mod evaluate;
 pub mod helpers;
 pub(crate) mod rune_call_ast;
@@ -109,6 +110,13 @@ pub fn transform_server_module(
     // `$effect.tracking()` has no effect tracking on the server → `false`
     // (mirrors the instance-script path + upstream server CallExpression visitor).
     let source_without_effects = source_without_effects.replace("$effect.tracking()", "false");
+    // `$effect.pending()` → `0` for the same reason; the module path reused the
+    // client transform, which lowers it to a client-only `$.eager($.pending)`.
+    let source_without_effects = {
+        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
+        effect_pending_ast::transform_effect_pending_ast(&source_without_effects, is_ts)
+            .unwrap_or(source_without_effects)
+    };
 
     // Lower `$state` to its bare initializer BEFORE the client transform, the way
     // upstream's server `VariableDeclaration` visitor does. Otherwise the client
