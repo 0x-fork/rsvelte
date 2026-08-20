@@ -7278,10 +7278,15 @@ fn transform_instance_script_for_visitors(
         // `$props.id()` / `$.props_id()` (whitespace-tolerant) rather than the
         // literal `= $props.id()` substring, so `let id=$props.id()` (no spaces)
         // is also skipped instead of surviving alongside the generated const. H-060.
+        // An `export const` declarator is skipped too: upstream drops it in
+        // `VariableDeclaration` whichever way the declaration is reached, and the
+        // name still resolves — `$$exports` reads the hoisted `const`. Keeping it
+        // emitted `const x` twice in one scope, which is not parseable JS.
+        let declaration_head = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         if at_statement_boundary
-            && (trimmed.starts_with("let ")
-                || trimmed.starts_with("const ")
-                || trimmed.starts_with("var "))
+            && (declaration_head.starts_with("let ")
+                || declaration_head.starts_with("const ")
+                || declaration_head.starts_with("var "))
             && trimmed
                 .find('=')
                 .map(|eq| trimmed[eq + 1..].trim().trim_end_matches(';').trim())
