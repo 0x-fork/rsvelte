@@ -2587,6 +2587,17 @@ fn visit_possible_siblings(
     }
 }
 
+/// Whether Phase 2's sibling walk could have stopped short of this element's real
+/// siblings. It is faithful through `{#if}` / `{#each}` / `{#await}` / `{#key}` —
+/// an inexhaustive branch demotes a sibling to "probable" rather than dropping it —
+/// and stops only at a snippet body, whose render sites it does not follow, or
+/// beside a render tag / slot whose content it does not enumerate.
+fn siblings_may_be_incomplete(
+    el: &crate::compiler::phases::phase2_analyze::types::CssDomElement,
+) -> bool {
+    el.snippet_name.is_some() || el.prev_is_opaque_boundary || el.prev_has_opaque_boundary
+}
+
 fn is_sibling_combinator_no_match_impl(rel_selectors: &[Value], ctx: &CssContext) -> bool {
     if rel_selectors.len() < 2 || ctx.dom_structure.elements.is_empty() {
         return false;
@@ -2889,6 +2900,7 @@ fn is_sibling_combinator_unused(rel_selectors: &[Value], ctx: &CssContext) -> bo
                 // Phase 2 may not have complete sibling data for this element
                 // (e.g., it's inside a snippet that breaks sibling walking)
                 if ctx.has_opaque_sibling_boundaries
+                    && siblings_may_be_incomplete(el)
                     && el.possible_prev_adjacent.is_empty()
                     && el.possible_prev_general.is_empty()
                     && el.possible_next_adjacent.is_empty()
@@ -2917,6 +2929,7 @@ fn is_sibling_combinator_unused(rel_selectors: &[Value], ctx: &CssContext) -> bo
                     }
                     // Check for incomplete siblings
                     if ctx.has_opaque_sibling_boundaries
+                        && siblings_may_be_incomplete(el)
                         && el.possible_prev_adjacent.is_empty()
                         && el.possible_prev_general.is_empty()
                         && el.possible_next_adjacent.is_empty()
