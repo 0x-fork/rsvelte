@@ -14,6 +14,7 @@ pub(crate) mod effect_pending_ast;
 pub(crate) mod evaluate;
 pub mod helpers;
 pub(crate) mod rune_call_ast;
+pub(crate) mod snapshot_declarator_ast;
 pub(crate) mod strip_export_ast;
 pub mod transform_legacy;
 pub mod transform_script;
@@ -168,7 +169,11 @@ pub fn transform_server_module(
     // upstream `compileModule` server keeps `$.snapshot` everywhere EXCEPT a plain
     // variable-declarator init, where it is redundant and strips to the bare arg
     // (e.g. melt-ui Popover / selection-state `const prev = $state.snapshot(this.x)`).
-    let transformed = transform_script::strip_snapshot_declarator_init_module(&transformed);
+    let transformed = {
+        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
+        snapshot_declarator_ast::strip_snapshot_declarator_init(&transformed, is_ts)
+            .unwrap_or(transformed)
+    };
 
     // Split imports from body
     let (script_imports, script_rest) = super::client::extract_imports_str(&transformed);

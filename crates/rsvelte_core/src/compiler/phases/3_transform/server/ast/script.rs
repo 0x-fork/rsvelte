@@ -996,6 +996,7 @@ impl<'a> EffectValueLower<'a> {
 }
 
 /// `$state.eager` / `$state.snapshot` call detection (server `CallExpression`).
+#[derive(PartialEq, Eq)]
 enum StateDotRune {
     Eager,
     Snapshot,
@@ -1347,6 +1348,18 @@ impl<'a> ClassFieldRuneLower<'a> {
         prop: &mut oxc_ast::ast::PropertyDefinition<'a>,
     ) -> Option<DeclRune> {
         let rune = prop.value.as_ref().and_then(detect_decl_rune)?;
+        // Upstream's server `PropertyDefinition` handles only `$state` /
+        // `$state.raw` / `$derived` / `$derived.by`. `$state.snapshot` falls
+        // through to the tree-wide `CallExpression` visitor, which WRAPS it in
+        // `$.snapshot(…)` — the opposite of the strip a declarator initializer
+        // gets, and `detect_decl_rune` answers the declarator's question.
+        if prop
+            .value
+            .as_ref()
+            .is_some_and(|v| state_dot_rune(v) == Some(StateDotRune::Snapshot))
+        {
+            return None;
+        }
         let b = self.b;
         // Take the `$state(...)` / `$derived(...)` call out and move its first
         // argument expression out directly (the rehomed call already lives in the
