@@ -2307,10 +2307,41 @@ fn subtree_has_matching_subject_inner(
                     }
                 }
             }
-            _ => {}
+            node => {
+                if let Some(child) = transparent_child_fragment(node)
+                    && subtree_has_matching_subject_inner(
+                        child,
+                        selector,
+                        ancestors,
+                        snippet_ancestors,
+                    )
+                {
+                    return true;
+                }
+            }
         }
     }
     false
+}
+
+/// The child fragment of a node that is transparent to ancestor matching.
+/// Upstream's `get_element_parent` walks the whole path and stops only at a
+/// `RegularElement` / `SvelteElement`, so every other container passes its
+/// children through — enumerating the transparent ones is what keeps leaving
+/// a container behind.
+fn transparent_child_fragment<'a, 'b>(node: &'a TemplateNode<'b>) -> Option<&'a Fragment<'b>> {
+    match node {
+        TemplateNode::SvelteHead(el)
+        | TemplateNode::SvelteBoundary(el)
+        | TemplateNode::SvelteFragment(el)
+        | TemplateNode::SvelteBody(el)
+        | TemplateNode::SvelteDocument(el)
+        | TemplateNode::SvelteWindow(el) => Some(&el.fragment),
+        TemplateNode::SvelteComponent(comp) => Some(&comp.fragment),
+        TemplateNode::SvelteSelf(el) => Some(&el.fragment),
+        TemplateNode::TitleElement(t) => Some(&t.fragment),
+        _ => None,
+    }
 }
 
 /// Decode CSS escape sequences in a selector name.
