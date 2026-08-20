@@ -42,7 +42,7 @@ use crate::diagnostic::{Fix, TextEdit};
 use crate::rule::{
     Fixable, Rule, RuleCategory, RuleConditions, RuleMeta, Severity, SpecialElement,
 };
-use crate::rules::find_this_attr_span;
+use crate::rules::this_attr::oracle_this_attr_span;
 
 static META: RuleMeta = RuleMeta {
     name: "svelte/sort-attributes",
@@ -200,6 +200,13 @@ fn patterns_match(patterns: &[Pattern], key: &str) -> bool {
     result
 }
 
+/// Upstream compares keys with JS `<`, which orders by UTF-16 code unit — so a
+/// non-BMP name (a surrogate pair, 0xD800–0xDBFF) sorts *before* U+E000–U+FFFF,
+/// the opposite of Rust's code-point order.
+fn js_string_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
 /// The compiled option: a list of groups (in order).
 #[derive(Clone)]
 struct CompiledOption {
@@ -226,7 +233,7 @@ impl CompiledOption {
             let mb = patterns_match(&g.patterns, b);
             if ma && mb {
                 if g.sort == Sort::Alphabetical {
-                    return match a.cmp(b) {
+                    return match js_string_cmp(a, b) {
                         std::cmp::Ordering::Equal => 0,
                         std::cmp::Ordering::Less => -1,
                         std::cmp::Ordering::Greater => 1,
@@ -289,6 +296,19 @@ fn load_compiled_option(ctx: &LintContext) -> Cow<'static, CompiledOption> {
 
 // ─── Key text extraction ──────────────────────────────────────────────────────
 
+/// `|`-joined directive modifiers, as `getAttributeKeyText` appends them.
+fn with_modifiers(base: String, modifiers: &[compact_str::CompactString]) -> String {
+    if modifiers.is_empty() {
+        return base;
+    }
+    let mut out = base;
+    for m in modifiers {
+        out.push('|');
+        out.push_str(m.as_str());
+    }
+    out
+}
+
 /// Get the attribute key text for an attribute, mirroring upstream's
 /// `getAttributeKeyText`. Returns `None` for spread attributes (ignored).
 fn attr_key_text(_src: &str, a: &Attribute) -> Option<String> {
@@ -300,12 +320,19 @@ fn attr_key_text(_src: &str, a: &Attribute) -> Option<String> {
         // Regular attribute: key is the name.
         Attribute::Attribute(n) => Some(n.name.as_str().to_string()),
         // Bind directive: `bind:name`.
-        Attribute::BindDirective(n) => Some(format!("bind:{}", n.name.as_str())),
-        // On directive: `on:name`.
-        Attribute::OnDirective(n) => Some(format!("on:{}", n.name.as_str())),
+        Attribute::BindDirective(n) => Some(with_modifiers(
+            format!("bind:{}", n.name.as_str()),
+            &n.modifiers,
+        )),
+        // On directive: `on:name|modifier…`.
+        Attribute::OnDirective(n) => Some(with_modifiers(
+            format!("on:{}", n.name.as_str()),
+            &n.modifiers,
+        )),
         // Class directive: `class:name`.
         Attribute::ClassDirective(n) => Some(format!("class:{}", n.name.as_str())),
-        // Style directive: `style:name`.
+        // Style directive: `style:name`. Upstream's `SvelteStyleDirective` arm
+        // does not append modifiers, unlike the `SvelteDirective` one.
         Attribute::StyleDirective(n) => Some(format!("style:{}", n.name.as_str())),
         // Transition directive: intro+outro → `transition:`, intro only → `in:`,
         // outro only → `out:`.
@@ -317,7 +344,10 @@ fn attr_key_text(_src: &str, a: &Attribute) -> Option<String> {
             } else {
                 "out"
             };
-            Some(format!("{}:{}", prefix, n.name.as_str()))
+            Some(with_modifiers(
+                format!("{}:{}", prefix, n.name.as_str()),
+                &n.modifiers,
+            ))
         }
         // Animate directive: `animate:name`.
         Attribute::AnimateDirective(n) => Some(format!("animate:{}", n.name.as_str())),
@@ -342,8 +372,10 @@ struct SortEntry {
     end: u32,
     /// Whether this is a spread attribute.
     spread: bool,
-    /// Whether this is a plain `Attribute::Attribute` node (governs the
-    /// spread-between escape hatch, mirroring upstream's `isSvelteAttribute`).
+    /// Whether upstream would see this node as a `SvelteAttribute` — the only
+    /// node type the spread-between escape hatch applies to. Shorthand `{name}`
+    /// is a distinct `SvelteShorthandAttribute` upstream and so reports
+    /// directly, as does the `this=` special directive.
     is_plain_attr: bool,
 }
 
@@ -352,7 +384,8 @@ impl SortEntry {
         let key = attr_key_text(src, a);
         let (start, end) = attr_range(a);
         let spread = matches!(a, Attribute::SpreadAttribute(_));
-        let is_plain_attr = matches!(a, Attribute::Attribute(_));
+        let is_plain_attr = matches!(a, Attribute::Attribute(_))
+            && src.as_bytes().get(start as usize) != Some(&b'{');
         Self {
             key,
             start,
@@ -604,24 +637,19 @@ impl SortAttributes {
     /// at the position it appears in the source (before its raw `this={...}` attribute
     /// was stripped out by the parser into `el.expression`).
     fn entries_for_svelte_component(src: &str, el: &SvelteComponentElement) -> Vec<SortEntry> {
-        let src_bytes = src.as_bytes();
         let mut entries: Vec<SortEntry> = el
             .attributes
             .iter()
             .map(|a| SortEntry::from_attr(src, a))
             .collect();
 
-        // Reconstruct the `this=` attribute span from `el.expression`.
-        if let (Some(expr_start), Some(expr_end)) = (el.expression.start(), el.expression.end())
-            && let Some((this_start, this_end)) =
-                find_this_attr_span(src_bytes, expr_start, expr_end)
-        {
+        if let Some((this_start, this_end)) = oracle_this_attr_span(src, el.start) {
             let this_entry = SortEntry {
                 key: Some("this".to_string()),
                 start: this_start,
                 end: this_end,
                 spread: false,
-                is_plain_attr: true,
+                is_plain_attr: false,
             };
             // Insert at the correct source-order position.
             let pos = entries
@@ -636,23 +664,19 @@ impl SortAttributes {
     /// Build entries for `<svelte:element>`, injecting a virtual `this` entry
     /// at the position it appears in the source.
     fn entries_for_svelte_dynamic_element(src: &str, el: &SvelteDynamicElement) -> Vec<SortEntry> {
-        let src_bytes = src.as_bytes();
         let mut entries: Vec<SortEntry> = el
             .attributes
             .iter()
             .map(|a| SortEntry::from_attr(src, a))
             .collect();
 
-        if let (Some(expr_start), Some(expr_end)) = (el.tag.start(), el.tag.end())
-            && let Some((this_start, this_end)) =
-                find_this_attr_span(src_bytes, expr_start, expr_end)
-        {
+        if let Some((this_start, this_end)) = oracle_this_attr_span(src, el.start) {
             let this_entry = SortEntry {
                 key: Some("this".to_string()),
                 start: this_start,
                 end: this_end,
                 spread: false,
-                is_plain_attr: true,
+                is_plain_attr: false,
             };
             let pos = entries
                 .iter()
