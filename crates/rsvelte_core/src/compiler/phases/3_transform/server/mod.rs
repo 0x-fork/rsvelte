@@ -115,6 +115,15 @@ pub fn transform_server_module(
     // transform signal-wraps the binding and collapses both `x = x + 1` and
     // `x += 1` to the same `$.set(x, $.get(x) + 1)`, losing the operator that
     // `post_process_for_server` would have to restore.
+    // `$state*` destructuring has to expand while the rune is still there —
+    // the call-stripping below turns `let { a } = $state(1)` into
+    // `let { a } = 1`, which no longer says where the value came from.
+    let source_without_effects = super::client::expand_module_rune_destructuring_for_server(
+        &source_without_effects,
+        analysis,
+    )
+    .unwrap_or(source_without_effects);
+
     let source_without_effects = rune_call_ast::transform_rune_calls_combined(
         &source_without_effects,
         &["$state(", "$state.raw(", "$state.eager("],

@@ -355,7 +355,10 @@ pub(super) fn wrap_state_derived_with_tag(input: &str) -> String {
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
                 .collect();
 
-            if var_name.is_empty() {
+            // `$$`-prefixed names are the compiler's own temps (`$$d`,
+            // `$$array`); upstream labels a binding the user wrote, never one it
+            // generated.
+            if var_name.is_empty() || var_name.starts_with("$$") {
                 search_from = abs_kw_pos + keyword.len();
                 continue;
             }
@@ -450,7 +453,7 @@ pub(super) fn wrap_state_derived_with_tag(input: &str) -> String {
                 .unwrap_or(0);
             let var_name = &before_eq[name_start..name_end];
 
-            if var_name.is_empty() {
+            if var_name.is_empty() || var_name.starts_with("$$") {
                 search_from = abs_pat_pos + pattern.len();
                 continue;
             }

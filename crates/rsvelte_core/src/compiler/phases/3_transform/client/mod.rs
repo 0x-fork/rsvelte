@@ -27,6 +27,7 @@ mod instance_dev_tail_ast;
 mod legacy_state_member_mutate_ast;
 mod local_assign_ast;
 mod module_derived_ast;
+mod module_destructure_ast;
 mod module_dev_tail_ast;
 mod module_state_runes_ast;
 mod private_class_assign_ast;
@@ -390,6 +391,29 @@ pub(crate) fn print_module_program(
     generate(&program, &arena)
         .map(|code| format!("{header}\n{}", rehome_derived_jsdoc(&code)))
         .map_err(TransformError::CodeGen)
+}
+
+/// Expand a destructured `$state` / `$state.raw` / `$state.snapshot` declarator
+/// in a module script, for the server path only: it lowers those calls to their
+/// bare initializer before the shared module transform runs, so the rune is gone
+/// by the time [`transform_module_script_runes`] could act on it.
+pub(crate) fn expand_module_rune_destructuring_for_server(
+    source: &str,
+    analysis: &ComponentAnalysis,
+) -> Option<String> {
+    let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
+    module_destructure_ast::transform_module_rune_destructuring_ast(
+        source,
+        is_ts,
+        &module_destructure_ast::ModuleDestructureConfig {
+            state_vars: &[],
+            non_reactive_vars: &[],
+            proxy_vars: &[],
+            dev: false,
+            server: true,
+            state_only: true,
+        },
+    )
 }
 
 /// Transform module source code for module compilation (shared between client and server).
@@ -4482,6 +4506,27 @@ fn transform_module_script_runes_with_target(
             && !reactive_module_state_vars.contains(&binding.name)
         {
             reactive_module_state_vars.push(binding.name.clone());
+        }
+    }
+
+    // Expand a destructured rune declarator before the call lowering below sees
+    // it: `let { a } = $state(1)` is one `tmp` plus one declarator per bound
+    // leaf, not a pattern around the lowered call.
+    {
+        let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
+        if let Some(rewritten) = module_destructure_ast::transform_module_rune_destructuring_ast(
+            &result,
+            is_ts,
+            &module_destructure_ast::ModuleDestructureConfig {
+                state_vars: &reactive_module_state_vars,
+                non_reactive_vars: &module_non_reactive_vars,
+                proxy_vars: &module_proxy_vars,
+                dev,
+                server,
+                state_only: false,
+            },
+        ) {
+            result = rewritten;
         }
     }
 
