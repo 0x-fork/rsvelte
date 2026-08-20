@@ -1,5 +1,39 @@
 # @rsvelte/compiler
 
+## 0.10.18
+
+### Patch Changes
+
+- ecd52e1: Stop rejecting a `$`-prefixed class member name, and turn every rune-named `$` reference into a store subscription under an explicit legacy mode
+
+  `class P { $abc() {} }` was rejected with `global_reference_invalid`: the `$`-reference
+  scan in `2_analyze/store_subscriptions.rs` excluded object keys, member properties, string
+  literals and comments, but not a class body — and a `$inspect` member name additionally
+  flipped the component into runes mode, because runes auto-detection walked a non-computed
+  `MethodDefinition` / `PropertyDefinition` key. Upstream reads `module.scope.references`,
+  which never holds a declaration slot.
+
+  Under `runes: false` — from the compile option or from `<svelte:options runes={false} />`,
+  which upstream merges into the options before analysing — upstream opens its
+  store-subscription condition with `runes_option === false ||`, so `let a = $state(1)`
+  compiles to a store read. rsvelte raised `rune_invalid_usage` instead. The merged value is
+  now what reaches the store loop, the synthetic binding is declared whether or not the
+  unprefixed name resolves, rune binding kinds are no longer assigned in explicit legacy
+  mode, and the server's and client's `$effect` / `$inspect` / `$inspect.trace` removals no
+  longer fire on a name that resolves to a store subscription.
+
+- fa88d36: Align `rsvelte-lint` with `eslint-plugin-svelte` on the axes no gate previously compared.
+
+  - 21 rules defaulted to `warn` where upstream defaults to `error`. Severity decides the exit code in both tools, so `rsvelte-lint` exited 0 where `eslint` exits 1 on the same source. Three rule mode-gates likewise made rsvelte run a rule ESLint skips.
+  - The human-readable and GitHub Actions diagnostic writers printed a zero-based column — `4:0` where ESLint prints `4:1`. SARIF and the machine format were already correct.
+  - `--fix` resolved `eslint-disable` directives against the parser's line table while the report path used the reporting rule's own table, so a directive suppressed one line and the fixer rewrote another wherever U+2028/U+2029 make the two tables differ.
+  - `prefer-class-directive`'s autofix trimmed with Unicode `White_Space` semantics while its report used JS semantics, so a `class` value padded with U+FEFF was reported identically to ESLint and rewritten differently.
+  - The JSON API the wasm and NAPI bindings wrap reported every rule on the parser's line table, so the seven rules that upstream positions with `getLocFromIndex` came out on a different line and column there than from the CLI. All consumers now share one `LintDiagnostic::report_span`.
+  - `prefer-destructured-store-props` now gates its rune-named-store skip on runes mode, `infinite-reactive-loop` no longer treats an inline function expression as a then-callback, `no-trailing-spaces` no longer counts a leading BOM as trailing whitespace (its autofix would have deleted the BOM), and lint parse errors now carry a line and column instead of a debug-formatted struct.
+
+- 7ffd3f9: Stop reading a prop twice when an inline template arrow mutates it. `state.a = state.b` inside `onclick={() => { … }}` compiled to `state().a = state()().b`, which throws `state(...) is not a function` on the first click: the assignment converter read-transforms both sides so the mutation wrapper can be built, and the second transform pass then re-read every source-prop and store-subscription on the right. The read transforms now mark their getter callee opaque, which is what the setter callees already do, so a second pass is a no-op while a user-written `p()` is still read as one.
+- 7ffd3f9: Walk an `UpdateExpression`'s argument during analysis. Upstream ends that visitor with `context.next()`; rsvelte returned without descending, so nothing inside `x++` was ever visited: a component whose only member expression was `p.a++` lost its `$.push($$props, …)` / `$.pop()` pair, and a legacy prop whose only use was `p++` was reported `export_let_unused` while a `$derived` read only through `linked.current++` never raised `state_referenced_locally`.
+
 ## 0.10.17
 
 ### Patch Changes
