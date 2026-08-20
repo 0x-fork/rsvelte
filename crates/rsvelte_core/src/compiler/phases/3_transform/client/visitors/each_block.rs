@@ -2077,6 +2077,25 @@ fn visit_fragment(fragment: &Fragment, context: &mut ComponentContext) -> JsBloc
 /// `key_state` transforms (`{ [labelKey]: label }` → `{ [$$props.labelKey]:
 /// label }`), while the each-context binding names remain shadowed via
 /// `local_scope`. All other pattern shapes convert structurally.
+/// The key of a non-computed, non-identifier destructuring property, keeping the
+/// source spelling so the printed quote style matches.
+fn literal_property_key(
+    key: &serde_json::Map<String, serde_json::Value>,
+) -> Option<crate::compiler::phases::phase3_transform::js_ast::JsLiteral> {
+    use crate::compiler::phases::phase3_transform::js_ast::JsLiteral;
+    match key.get("value") {
+        Some(serde_json::Value::String(s)) => Some(match key.get("raw").and_then(|r| r.as_str()) {
+            Some(raw) if !raw.is_empty() => JsLiteral::RawString {
+                value: s.as_str().into(),
+                raw: raw.into(),
+            },
+            _ => JsLiteral::String(s.as_str().into()),
+        }),
+        Some(serde_json::Value::Number(n)) => Some(JsLiteral::Number(n.as_f64()?)),
+        _ => None,
+    }
+}
+
 fn convert_context_pattern(
     context: &mut ComponentContext,
     expr: &Expression,
@@ -2138,12 +2157,19 @@ fn convert_context_pattern(
                                 shorthand: false,
                             });
                         } else {
-                            let Some(key_name) = key
-                                .as_object()
-                                .and_then(|k| k.get("name"))
-                                .and_then(|n| n.as_str())
-                            else {
-                                continue;
+                            let key_obj = key.as_object();
+                            let key_name =
+                                key_obj.and_then(|k| k.get("name")).and_then(|n| n.as_str());
+                            // A literal key that is not a valid identifier
+                            // (`{ 'a-b': z }`) carries no `name`; dropping the
+                            // property left its value binding unbound in the
+                            // emitted key function.
+                            let key_js = match key_name {
+                                Some(name) => JsPropertyKey::Identifier(name.into()),
+                                None => match key_obj.and_then(literal_property_key) {
+                                    Some(lit) => JsPropertyKey::Literal(lit),
+                                    None => continue,
+                                },
                             };
                             let value_pattern = if value.is_object() {
                                 convert_context_pattern(
@@ -2151,15 +2177,18 @@ fn convert_context_pattern(
                                     &Expression::from_json(value.clone()),
                                     local_scope,
                                 )
+                            } else if let Some(name) = key_name {
+                                JsPattern::Identifier(name.into())
                             } else {
-                                JsPattern::Identifier(key_name.into())
+                                continue;
                             };
-                            let shorthand = prop_obj
-                                .get("shorthand")
-                                .and_then(|s| s.as_bool())
-                                .unwrap_or(false);
+                            let shorthand = key_name.is_some()
+                                && prop_obj
+                                    .get("shorthand")
+                                    .and_then(|s| s.as_bool())
+                                    .unwrap_or(false);
                             properties.push(JsObjectPatternProperty::Property {
-                                key: JsPropertyKey::Identifier(key_name.into()),
+                                key: key_js,
                                 value: value_pattern,
                                 computed: false,
                                 shorthand,
