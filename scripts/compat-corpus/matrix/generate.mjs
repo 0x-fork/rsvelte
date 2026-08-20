@@ -17,6 +17,10 @@ import {
 	FOLD_INDIRECTIONS,
 	FOLD_INDIRECTION_READS,
 	FOLD_INDIRECTION_SLOTS,
+	FOLD_OPERAND_VALUES,
+	FOLD_BINARY_OPERATORS,
+	FOLD_UNARY_OPERATORS,
+	FOLD_TERNARY_HOSTS,
 	INVALID_BIND_TARGETS,
 	VALID_BIND_TARGETS,
 	BIND_SLOTS,
@@ -67,6 +71,10 @@ import {
 	OPAQUE_CARRIERS,
 	OPAQUE_HOSTS,
 	OPAQUE_ENTRIES,
+	WRITE_BINDINGS,
+	WRITE_HOSTS,
+	WRITE_SHAPES,
+	WRITE_PREAMBLE,
 } from './axes.mjs';
 import { commentMutants } from './mutate.mjs';
 
@@ -136,6 +144,55 @@ function constantFoldCases() {
 				cases.push({
 					id: `constant-fold/${expressionName}__${indirectionName}__${slotName}.svelte`,
 					source: `<script>\n\t${declarations}\n</script>\n\n${EXPRESSION_SLOTS[slotName].replaceAll('%s', read)}\n`,
+				});
+			}
+		}
+	}
+	return cases;
+}
+
+function foldValueTypeCases() {
+	const cases = [];
+	const values = Object.entries(FOLD_OPERAND_VALUES);
+	const OPERATOR_IDS = {
+		'+': 'add',
+		'-': 'sub',
+		'===': 'strict-eq',
+		'!==': 'strict-ne',
+		'==': 'loose-eq',
+		'!=': 'loose-ne',
+		'<': 'lt',
+		'>=': 'ge',
+		'??': 'nullish',
+		'||': 'or',
+		'&&': 'and',
+	};
+	// One slot for the binary/unary product: what varies here is the operand's
+	// type, which the fold decides before any slot sees the result, and the slot
+	// axis is already walked in full by `constant-fold`'s own rows.
+	const slot = EXPRESSION_SLOTS.interpolation;
+	for (const [leftName, left] of values) {
+		for (const operator of FOLD_BINARY_OPERATORS) {
+			for (const [rightName, right] of values) {
+				cases.push({
+					id: `fold-value-type/${OPERATOR_IDS[operator]}__${leftName}__${rightName}.svelte`,
+					source: slot.replaceAll('%s', `${left} ${operator} ${right}`) + '\n',
+				});
+			}
+		}
+		for (const [unaryName, form] of Object.entries(FOLD_UNARY_OPERATORS)) {
+			cases.push({
+				id: `fold-value-type/unary-${unaryName}__${leftName}.svelte`,
+				source: slot.replaceAll('%s', form.replaceAll('%s', left)) + '\n',
+			});
+		}
+	}
+	for (const [leftName, left] of values) {
+		for (const [rightName, right] of values) {
+			for (const [hostName, wrap] of Object.entries(FOLD_TERNARY_HOSTS)) {
+				cases.push({
+					id: `fold-value-type/ternary-${hostName}__${leftName}__${rightName}.svelte`,
+					source: wrap(`n > 3 ? ${left} : ${right}`),
 				});
 			}
 		}
@@ -451,12 +508,37 @@ function opaqueKeywordCases() {
 	return cases;
 }
 
+function writeHostCases() {
+	const cases = [];
+	for (const [bindingName, binding] of Object.entries(WRITE_BINDINGS)) {
+		for (const [hostName, host] of Object.entries(WRITE_HOSTS)) {
+			for (const [shapeName, shape] of Object.entries(WRITE_SHAPES)) {
+				const cross = shape.includes('%q');
+				const write = shape
+					.replaceAll('%q', () => binding.crossRead)
+					.replaceAll('%s', () => binding.read);
+				const script = host.script ? `\t${host.script.replaceAll('%s', () => write)}\n` : '';
+				const declaration = cross ? binding.crossDeclaration : binding.declaration;
+				const source = WRITE_PREAMBLE.replace('%d', () => declaration)
+					.replace('%h', () => script)
+					.replace('%m', () => host.markup.replaceAll('%s', () => write));
+				cases.push({
+					id: `write-host/${bindingName}__${hostName}__${shapeName}.svelte`,
+					source,
+				});
+			}
+		}
+	}
+	return cases;
+}
+
 export const FAMILIES = {
 	'binding-position': bindingPositionCases,
 	'async-derived': asyncDerivedCases,
 	'comment-slot': commentSlotCases,
 	'literal-escape': literalEscapeCases,
 	'constant-fold': constantFoldCases,
+	'fold-value-type': foldValueTypeCases,
 	'invalid-bind': invalidBindCases,
 	'param-default': paramDefaultCases,
 	'each-collection': eachCollectionCases,
@@ -467,6 +549,7 @@ export const FAMILIES = {
 	'removed-statement-comment': removedStatementCommentCases,
 	'private-field': privateFieldCases,
 	'opaque-keyword': opaqueKeywordCases,
+	'write-host': writeHostCases,
 };
 
 export function generate(families = Object.keys(FAMILIES)) {

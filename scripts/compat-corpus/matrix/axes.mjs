@@ -637,6 +637,104 @@ export const FOLD_INDIRECTION_SLOTS = [
 ];
 
 /**
+ * Axis F3 — the JS TYPE of a folded operand, crossed with F4 (the operator) and
+ * F5 (the ternary host).
+ *
+ * The rows of `FOLDABLE_EXPRESSIONS` above pick expression KINDS, and every one
+ * of them is single-typed: `'a' + 'b'` is two strings, `Math.max(1, 2)` two
+ * numbers, `true ? 'a' : 'b'` a test that is itself known. So the family reached
+ * the fold on every run and could not tell two rules for it apart — the client
+ * fold carried a folded value as `Option<Option<String>>`, in which `null` and
+ * `undefined` are one value and `0` and `'0'` are one value, and the family was
+ * green while `typeof '0'` printed `number`, `'1' + 1` printed `2` and
+ * `$derived(n ? undefined : null)` was judged constant and emitted
+ * non-reactively (#3027). The discriminating axis is not which expression, it is
+ * which TYPE — so these values are chosen so that each pair collides under
+ * stringification while differing as JS values.
+ *
+ * `''` and `0` also separate a falsy value from a nullish one, which is the
+ * other half of the same representation: `truthy()` and `is_nullish()` are two
+ * questions a single `Option<String>` answers with one bit.
+ */
+export const FOLD_OPERAND_VALUES = {
+	undefined: 'undefined',
+	null: 'null',
+	true: 'true',
+	'number-zero': '0',
+	'number-one': '1',
+	'string-zero': "'0'",
+	'string-true': "'true'",
+	'string-empty': "''",
+};
+
+/**
+ * Axis F4 — the operator applied to the operand pair. `+` is the one that
+ * branches on "is either side a string"; `-` stands for the pure ToNumber
+ * operators; the four equalities separate strict from loose; `<` / `>=` are the
+ * relational pair, where two strings compare lexicographically and anything else
+ * numerically (`'10' < '9'`); `??` reads nullish rather than falsy, which `||`
+ * and `&&` next to it read as truthy — `'' || 'x'` and `null ?? 2` are the pair
+ * that separates the two questions.
+ */
+export const FOLD_BINARY_OPERATORS = [
+	'+',
+	'-',
+	'===',
+	'!==',
+	'==',
+	'!=',
+	'<',
+	'>=',
+	'??',
+	'||',
+	'&&',
+];
+
+/** Axis F4' — the unary operators whose result depends on the argument's type. */
+export const FOLD_UNARY_OPERATORS = {
+	typeof: 'typeof %s',
+	not: '!%s',
+	negate: '-%s',
+	plus: '+%s',
+	void: 'void %s',
+};
+
+/**
+ * Axis F5 — where a ternary whose test is NOT known is read from.
+ *
+ * `FOLDABLE_EXPRESSIONS`'s `conditional-constant` row has a known test, so it
+ * only exercises the branch-selection path. With an unknown test the fold has to
+ * decide whether both branches carry the SAME value — upstream's
+ * `values.size === 1` — and that comparison is what #3027 got wrong. The two
+ * hosts are the two shapes the report names: an element attribute (hoisted out
+ * of `$.template_effect`) and a component prop (emitted as a plain value instead
+ * of a getter).
+ */
+export const FOLD_TERNARY_HOSTS = {
+	'derived-attribute': (expression) => `<script>
+	const { n } = $props();
+	const c = $derived(${expression});
+</script>
+
+<div title={c}></div>
+`,
+	'derived-component-prop': (expression) => `<script>
+	import Child from './Child.svelte';
+	const { n } = $props();
+	const c = $derived(${expression});
+</script>
+
+<Child to={c} />
+`,
+	'inline-attribute': (expression) => `<script>
+	const { n } = $props();
+</script>
+
+<div title={${expression}}></div>
+`,
+};
+
+/**
  * Axis D — expressions that are not a legal `bind:` target, crossed with axis E,
  * the directive slot they sit in.
  *
@@ -1661,3 +1759,130 @@ export const OPAQUE_ENTRIES = {
 				.join('\n')}\n</script>\n\n<p>ok</p>\n`,
 	},
 };
+
+/**
+ * Axis W1 — the reactive binding that is written to and read back.
+ *
+ * `binding-position` (axis A) already varies the binding kind, but each of its
+ * rows bakes ONE host into `wrap`: `prop-destructured`, `state-local`,
+ * `derived-local`, `store-auto-sub` and `legacy-let-prop` all put the body in a
+ * named function inside `<script>`, and only the two each-block rows use an
+ * inline template arrow. Binding kind and host are therefore confounded there —
+ * the product is unenumerable, and #3026 lived in a cell it cannot express
+ * (a destructured prop written from an inline template arrow). Declaring the
+ * binding independently of the host is the whole point of this family.
+ */
+export const WRITE_BINDINGS = {
+	'prop-destructured': {
+		read: 'p',
+		crossRead: 'q',
+		declaration: 'const { p } = $props();',
+		crossDeclaration: 'const { p, q } = $props();',
+	},
+	'prop-bindable': {
+		read: 'p',
+		crossRead: 'q',
+		declaration: 'let { p = $bindable() } = $props();',
+		crossDeclaration: 'let { p = $bindable(), q = $bindable() } = $props();',
+	},
+	'state-local': {
+		read: 'p',
+		crossRead: 'q',
+		declaration: 'let p = $state({ a: 1, b: 2, c: 3 });',
+		crossDeclaration: 'let p = $state({ a: 1, b: 2, c: 3 });\n\tlet q = $state({ a: 1, b: 2, c: 3 });',
+	},
+	'store-auto-sub': {
+		read: '$s',
+		crossRead: '$t',
+		declaration: "import { writable } from 'svelte/store';\n\tconst s = writable({ a: 1, b: 2, c: 3 });",
+		crossDeclaration:
+			"import { writable } from 'svelte/store';\n\tconst s = writable({ a: 1, b: 2, c: 3 });\n\tconst t = writable({ a: 1, b: 2, c: 3 });",
+	},
+	'legacy-let-prop': {
+		read: 'p',
+		crossRead: 'q',
+		declaration: 'export let p = { a: 1, b: 2, c: 3 };',
+		crossDeclaration: 'export let p = { a: 1, b: 2, c: 3 };\n\texport let q = { a: 1, b: 2, c: 3 };',
+	},
+};
+
+/**
+ * Axis W2 — where the statement lives. `%s` is the write.
+ *
+ * rsvelte converts a template expression with a different function than a script
+ * body and then applies the identifier transforms a second time over the result,
+ * so "the same statement, moved" is a different code path and not merely a
+ * different position. #3026 was correct in every `script-*` host and wrong in
+ * every `template-*` one — a family that fixes the host cannot see it, however
+ * many binding kinds and syntactic positions it crosses.
+ */
+export const WRITE_HOSTS = {
+	'script-fn': {
+		script: 'function run() {\n\t\t%s;\n\t}',
+		markup: '<button onclick={run}>x</button>',
+	},
+	'script-arrow': {
+		script: 'const run = () => {\n\t\t%s;\n\t};',
+		markup: '<button onclick={run}>x</button>',
+	},
+	'template-arrow-block': {
+		markup: '<button\n\tonclick={() => {\n\t\t%s;\n\t}}>x</button\n>',
+	},
+	'template-arrow-expr': {
+		markup: '<button onclick={() => (%s)}>x</button>',
+	},
+	'template-snippet-arrow': {
+		markup:
+			'{#snippet row()}\n\t<button\n\t\tonclick={() => {\n\t\t\t%s;\n\t\t}}>x</button\n\t>\n{/snippet}\n\n{@render row()}',
+	},
+	'component-prop-arrow': {
+		script: "import Comp from './Comp.svelte';",
+		markup: '<Comp\n\tcb={() => {\n\t\t%s;\n\t}} />',
+	},
+};
+
+/**
+ * Axis W3 — the write itself, as an expression. `%s` is the binding read.
+ *
+ * The discriminating rows are the ones whose right-hand side reads the SAME
+ * binding the left-hand side writes: that is the only shape where rsvelte
+ * pre-transforms a subtree and then walks it again, and #3026 doubled every such
+ * read into `p()().b`. `member-assign-const` and `read-only` are the controls —
+ * the first has a transformed left and nothing to double, the second has no
+ * assignment at all — so a fix that simply stops transforming right-hand sides
+ * fails them instead of passing everything.
+ *
+ * `member-assign-cross` reads a SECOND binding of the same kind, declared only
+ * for this row so the other rows keep an unused-export warning out of the legacy
+ * mode cases. It separates "the read that doubles is the one the left writes"
+ * from "any read on the right doubles" — #3026 was the second, and a family
+ * carrying only the self rows would have pinned the wrong rule.
+ */
+export const WRITE_SHAPES = {
+	'member-assign-self': '%s.a = %s.b',
+	'member-compound-self': '%s.a += %s.b',
+	'member-index-self': '%s[0] = %s.b',
+	'deep-member-self': '%s.a.b = %s.c',
+	'member-assign-nested-arrow': '%s.a = [1].map(() => %s.b)[0]',
+	'member-assign-conditional': '%s.a = %s.b ? %s.c : %s.b',
+	'member-assign-sequence': '%s.a = (0, %s.b)',
+	'member-update-self': '%s.a++',
+	'member-assign-cross': '%s.a = %q.b',
+	'member-assign-const': '%s.a = 1',
+	'read-only': 'sink(%s.b)',
+};
+
+/**
+ * The declarations every write-host case shares. `sink` is what the `read-only`
+ * control reads into; keeping it a function declaration (not a `$state`) leaves
+ * the binding axis the only reactive name in the file.
+ */
+export const WRITE_PREAMBLE = `<script>
+	%d
+	function sink(x) {
+		return x;
+	}
+%h</script>
+
+%m
+`;

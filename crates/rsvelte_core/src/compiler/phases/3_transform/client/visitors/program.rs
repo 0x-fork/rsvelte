@@ -305,7 +305,7 @@ fn store_sub_read(
     arena: &crate::compiler::phases::phase3_transform::js_ast::arena::JsArena,
     node: JsExpr,
 ) -> JsExpr {
-    b::call(arena, node, vec![])
+    b::getter_call(arena, node)
 }
 
 /// Transform a store subscription assignment.
@@ -527,7 +527,7 @@ fn prop_read(
     arena: &crate::compiler::phases::phase3_transform::js_ast::arena::JsArena,
     node: JsExpr,
 ) -> JsExpr {
-    b::call(arena, node, vec![])
+    b::getter_call(arena, node)
 }
 
 /// Transform a prop assignment.
@@ -655,7 +655,7 @@ fn reactive_import_read(
     arena: &crate::compiler::phases::phase3_transform::js_ast::arena::JsArena,
     node: JsExpr,
 ) -> JsExpr {
-    b::call(arena, node, vec![])
+    b::getter_call(arena, node)
 }
 
 /// Transform a reactive import mutation.
