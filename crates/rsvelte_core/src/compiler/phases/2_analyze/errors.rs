@@ -56,8 +56,8 @@ diagnostics! {
     /// `$props()` can only be used at the component top level as a variable declaration initializer.
     props_invalid_placement() => "`$props()` can only be used at the top level of components as a variable declaration initializer";
 
-    /// `$props()` can only be used with an object destructuring pattern or an identifier
-    props_invalid_identifier() => "`$props()` can only be used with an object destructuring pattern or an identifier";
+    /// `$props()` can only be used with an object destructuring pattern
+    props_invalid_identifier() => "`$props()` can only be used with an object destructuring pattern";
 
     /// `%rune%` has already been declared
     props_duplicate(rune: &str) => "Cannot use `{}()` more than once", rune;
@@ -65,8 +65,8 @@ diagnostics! {
     /// Declaring or accessing a prop starting with `$$` is illegal (they are reserved for Svelte internals)
     props_illegal_name() => "Declaring or accessing a prop starting with `$$` is illegal (they are reserved for Svelte internals)";
 
-    /// `$props.id()` can only be used as a variable declaration initializer at the top level of the `<script>` tag
-    props_id_invalid_placement() => "`$props.id()` can only be used as a variable declaration initializer at the top level of the `<script>` tag";
+    /// `$props.id()` can only be used at the top level of components as a variable declaration initializer
+    props_id_invalid_placement() => "`$props.id()` can only be used at the top level of components as a variable declaration initializer";
 
     /// `%rune%` cannot be used with arguments
     rune_invalid_arguments(rune: &str) => "`{}` cannot be called with arguments", rune;

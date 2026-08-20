@@ -784,7 +784,8 @@ pub fn visit_typed(node: &JsNode, context: &mut VisitorContext) -> Result<(), An
             if context.analysis.props_id.is_some() {
                 return Err(errors::props_duplicate("$props.id").at(*start, *end));
             }
-            if !is_props_id_valid_placement(context) {
+            if context.ast_type != super::AstType::Instance || !is_props_id_valid_placement(context)
+            {
                 return Err(errors::props_id_invalid_placement().at(*start, *end));
             }
             if arg_count > 0 {
