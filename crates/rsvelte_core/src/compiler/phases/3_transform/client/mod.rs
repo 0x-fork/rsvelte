@@ -1438,7 +1438,35 @@ pub(crate) fn transform_client(
             let binding = binding_by_name.get(name.as_str()).copied();
 
             if let Some(binding) = binding {
+                // Upstream reads the binding through `build_getter`, which is the
+                // identity when the binding has no read transform. A `$state` that
+                // is never reassigned is lowered to a plain `const`, so it has
+                // none — and then the `state` arm below is never reached, because
+                // the identifier branch has already returned.
+                let read_is_signal = match binding.kind {
+                    BindingKind::State | BindingKind::RawState => {
+                        !analysis.immutable || binding.reassigned || analysis.accessors
+                    }
+                    _ => true,
+                };
                 let is_identifier_expr = true; // build_getter returns identifier for simple refs
+                let returned_early = !read_is_signal
+                    && (matches!(
+                        binding.declaration_kind,
+                        crate::compiler::phases::phase2_analyze::scope::DeclarationKind::Let
+                            | crate::compiler::phases::phase2_analyze::scope::DeclarationKind::Var
+                    ) || !options.dev);
+                let read_expr = || {
+                    if read_is_signal {
+                        b::call(
+                            &context.arena,
+                            b::member_path(&context.arena, "$.get"),
+                            vec![b::id(name)],
+                        )
+                    } else {
+                        b::id(name)
+                    }
+                };
 
                 if is_identifier_expr {
                     if matches!(
@@ -1532,7 +1560,7 @@ pub(crate) fn transform_client(
                             ));
                         }
                     }
-                    BindingKind::State => {
+                    BindingKind::State if !returned_early => {
                         // Remove previously added members for this alias
                         while exports_members.last().is_some_and(|m| match m {
                             JsObjectMember::Property(p) => match &p.key {
@@ -1548,11 +1576,7 @@ pub(crate) fn transform_client(
                             alias,
                             vec![JsStatement::Return(
                                 super::js_ast::nodes::JsReturnStatement {
-                                    argument: Some(context.arena.alloc_expr(b::call(
-                                        &context.arena,
-                                        b::member_path(&context.arena, "$.get"),
-                                        vec![b::id(name)],
-                                    ))),
+                                    argument: Some(context.arena.alloc_expr(read_expr())),
                                 },
                             )],
                         ));
@@ -1577,7 +1601,7 @@ pub(crate) fn transform_client(
                             )],
                         ));
                     }
-                    BindingKind::RawState => {
+                    BindingKind::RawState if !returned_early => {
                         // Remove previously added members for this alias
                         while exports_members.last().is_some_and(|m| match m {
                             JsObjectMember::Property(p) => match &p.key {
@@ -1593,11 +1617,7 @@ pub(crate) fn transform_client(
                             alias,
                             vec![JsStatement::Return(
                                 super::js_ast::nodes::JsReturnStatement {
-                                    argument: Some(context.arena.alloc_expr(b::call(
-                                        &context.arena,
-                                        b::member_path(&context.arena, "$.get"),
-                                        vec![b::id(name)],
-                                    ))),
+                                    argument: Some(context.arena.alloc_expr(read_expr())),
                                 },
                             )],
                         ));
