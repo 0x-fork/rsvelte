@@ -401,7 +401,7 @@ fn element_has_async_attribute(node: &RegularElement, state: &ServerTransformSta
                 // would spuriously route the element through `emit_async_element`,
                 // breaking the surrounding push coalescing.
                 let raw_name = a.name.as_str();
-                if is_event_attribute_name(raw_name)
+                if is_event_attribute(a)
                     || raw_name == "defaultValue"
                     || raw_name == "defaultChecked"
                 {
@@ -1007,10 +1007,7 @@ pub(super) fn build_element_attributes<'a>(
         // Event handlers (`on*` as Attribute form) + defaultValue/defaultChecked
         // are omitted by upstream as attributes. An `onload`/`onerror` handler on
         // a load/error element is recorded for the trailing capture literal.
-        if is_event_attribute_name(raw_name)
-            || raw_name == "defaultValue"
-            || raw_name == "defaultChecked"
-        {
+        if is_event_attribute(a) || raw_name == "defaultValue" || raw_name == "defaultChecked" {
             if (raw_name == "onload" || raw_name == "onerror")
                 && is_load_error_element(node.name.as_str())
             {
@@ -1329,7 +1326,7 @@ fn build_element_spread_attributes<'a>(
                 if raw_name == "value" && matches!(node.name.as_str(), "select" | "textarea") {
                     continue;
                 }
-                if is_event_attribute_name(raw_name)
+                if is_event_attribute(a)
                     || raw_name == "defaultValue"
                     || raw_name == "defaultChecked"
                 {
@@ -2241,8 +2238,23 @@ fn attr_expr_value<'a>(
 
 /// Whether `name` is an event-handler attribute (`on` + lowercase letter), the
 /// `is_event_attribute` predicate from upstream `utils/ast.js`.
-fn is_event_attribute_name(name: &str) -> bool {
-    name.len() > 2 && name.starts_with("on") && name.as_bytes()[2].is_ascii_lowercase()
+fn is_event_attribute(a: &AttributeNode) -> bool {
+    // Upstream's name test reads the two leading characters and nothing else, so
+    // `onClick` is a handler; what keeps `onclick="alert(1)"` an ordinary
+    // attribute is the value shape, not the spelling of the name.
+    a.name.starts_with("on") && is_expression_attribute(&a.value)
+}
+
+/// Upstream `is_expression_attribute`: a lone expression, in either the bare or
+/// the one-part sequence spelling.
+fn is_expression_attribute(value: &AttributeValue) -> bool {
+    match value {
+        AttributeValue::True(_) => false,
+        AttributeValue::Expression(_) => true,
+        AttributeValue::Sequence(parts) => {
+            parts.len() == 1 && matches!(parts[0], AttributeValuePart::ExpressionTag(_))
+        }
+    }
 }
 
 /// Whether the element emits `load` / `error` events (upstream
