@@ -1985,21 +1985,15 @@ fn lower_variable_declaration<'a>(
         _ => VariableDeclarationKind::Let,
     };
 
-    // ONE output statement per SOURCE declarator (写经 upstream's
-    // `VariableDeclaration` visitor, which splits a USER-written
-    // multi-declarator `let a = …, b = …` into separate statements). A single
-    // source declarator that expands into multiple synthetic declarators (a
-    // destructured `$state` → `tmp, $$array, x, y`) stays COMBINED in one
-    // statement, because the source had no top-level comma between them.
+    // ONE output statement per SOURCE declarator, but only for the INSTANCE
+    // body. `VariableDeclaration.js` never splits — it returns one declaration
+    // holding every declarator; the split comes from analyze's instance-body
+    // pass (`2-analyze/index.js`, "one declarator per declaration, makes things
+    // simpler"), which the module body does not go through. A single source
+    // declarator that expands into multiple synthetic declarators (a
+    // destructured `$state` → `tmp, $$array, x, y`) stays COMBINED either way.
     let mut out: Vec<Statement<'a>> = Vec::new();
-    let combine_module_derived = !is_instance
-        && vd.declarations.iter().all(|d| {
-            matches!(d.id, oxc_ast::ast::BindingPattern::BindingIdentifier(_))
-                && matches!(
-                    declarator_rune(d, is_instance, state),
-                    Some(DeclRune::Derived | DeclRune::DerivedBy)
-                )
-        });
+    let combine_module = !is_instance;
     let mut combined_decls = Vec::new();
 
     for (di, d) in vd.declarations.iter().enumerate() {
@@ -2121,7 +2115,7 @@ fn lower_variable_declaration<'a>(
         }
 
         if !decls.is_empty() {
-            if combine_module_derived {
+            if combine_module {
                 combined_decls.extend(decls);
             } else {
                 let mut stmt = b.var_decl_from_pairs(kind, decls);
