@@ -4034,7 +4034,12 @@ fn structural_simple_selector_is_evaluable(sel: &Value) -> bool {
                         })
                     })
                 }),
-                _ => false,
+                // `:has(...)` can reject on its own and this walker cannot look
+                // downwards; upstream `break`s out of the switch for every other
+                // pseudo-class, so it constrains nothing and must not stop the
+                // rest of the chain from being evaluated.
+                "has" => false,
+                _ => true,
             }
         }
         Some("PseudoElementSelector") => true,
