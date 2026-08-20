@@ -434,14 +434,7 @@ pub fn visit<'a, 'b: 'a>(
     let parent_idx = context.current_parent_idx();
     let is_root_child = parent_idx.is_none();
 
-    let mut element_classes = FxHashSet::default();
-    let mut element_id: Option<String> = None;
-    let mut static_attributes: Vec<(String, Option<String>)> = Vec::new();
-    let mut dynamic_attribute_names: FxHashSet<String> = FxHashSet::default();
-    let mut has_spread = false;
-    let mut has_class_directive = false;
-    let mut class_directive_names: FxHashSet<String> = FxHashSet::default();
-    let mut has_style_directive = false;
+    let mut css_facts = super::shared::element::CssAttributeFacts::default();
 
     if collect_css {
         context
@@ -449,171 +442,13 @@ pub fn visit<'a, 'b: 'a>(
             .css
             .used_elements
             .insert(element.name.to_string());
+        css_facts =
+            super::shared::element::collect_css_attribute_facts(&element.attributes, context);
+    }
 
-        for attr in &element.attributes {
-            if let Attribute::Attribute(attr_node) = attr {
-                // Track static attribute name/value for CSS attribute selector matching
-                match &attr_node.value {
-                    AttributeValue::True(_) => {
-                        // Boolean attribute like `<details open>`
-                        static_attributes.push((attr_node.name.to_string(), None));
-                    }
-                    AttributeValue::Sequence(parts) => {
-                        // Check if all parts are static text
-                        let mut all_static = true;
-                        let mut value = String::new();
-                        for part in parts {
-                            if let AttributeValuePart::Text(text) = part {
-                                value.push_str(&text.data);
-                            } else {
-                                all_static = false;
-                                break;
-                            }
-                        }
-                        if all_static {
-                            static_attributes.push((attr_node.name.to_string(), Some(value)));
-                        } else {
-                            // Has dynamic parts - try to determine possible values
-                            // for CSS attribute selector matching
-                            let mut all_resolved = true;
-                            let mut computed_values: Vec<String> = vec![String::new()];
-                            for part in parts {
-                                match part {
-                                    AttributeValuePart::Text(text) => {
-                                        for v in &mut computed_values {
-                                            v.push_str(&text.data);
-                                        }
-                                    }
-                                    AttributeValuePart::ExpressionTag(expr_tag) => {
-                                        use super::super::css::get_possible_values_expr;
-                                        if let Some(possible_vals) =
-                                            get_possible_values_expr(&expr_tag.expression, false)
-                                        {
-                                            if possible_vals.len() > 20 {
-                                                // Too many combinations, bail out
-                                                all_resolved = false;
-                                                break;
-                                            }
-                                            let prev = computed_values.clone();
-                                            computed_values.clear();
-                                            for pv in &prev {
-                                                for ev in &possible_vals {
-                                                    computed_values.push(format!("{}{}", pv, ev));
-                                                }
-                                            }
-                                            if computed_values.len() > 100 {
-                                                all_resolved = false;
-                                                break;
-                                            }
-                                        } else {
-                                            all_resolved = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            if all_resolved && !computed_values.is_empty() {
-                                for value in &computed_values {
-                                    static_attributes
-                                        .push((attr_node.name.to_string(), Some(value.clone())));
-                                }
-                            } else {
-                                dynamic_attribute_names.insert(attr_node.name.to_string());
-                            }
-                        }
-                    }
-                    _ => {
-                        // Expression or other dynamic value
-                        // Try to statically determine the value for CSS attribute selector matching
-                        if let AttributeValue::Expression(expr_tag) = &attr_node.value {
-                            use super::super::css::get_possible_values_expr;
-                            if let Some(possible_values) =
-                                get_possible_values_expr(&expr_tag.expression, false)
-                            {
-                                // We can determine the possible values statically
-                                for value in &possible_values {
-                                    static_attributes.push((
-                                        attr_node.name.to_string(),
-                                        Some(value.to_string()),
-                                    ));
-                                }
-                            } else {
-                                dynamic_attribute_names.insert(attr_node.name.to_string());
-                            }
-                        } else {
-                            dynamic_attribute_names.insert(attr_node.name.to_string());
-                        }
-                    }
-                }
-
-                match attr_node.name.as_str() {
-                    "class" => match super::super::css::possible_class_names(&attr_node.value) {
-                        Some(class_names) => {
-                            for class_name in class_names {
-                                context.analysis.css.used_classes.insert(class_name.clone());
-                                element_classes.insert(class_name);
-                            }
-                        }
-                        None => context.analysis.css.has_dynamic_classes = true,
-                    },
-                    "id" => {
-                        match &attr_node.value {
-                            AttributeValue::Sequence(parts) => {
-                                // An interpolated id (`id="a{x}"`) has an unknown runtime
-                                // value, so it could match any #id selector.
-                                let has_dynamic_part = parts
-                                    .iter()
-                                    .any(|p| matches!(p, AttributeValuePart::ExpressionTag(_)));
-                                if has_dynamic_part {
-                                    context.analysis.css.has_dynamic_ids = true;
-                                } else {
-                                    for part in parts {
-                                        if let AttributeValuePart::Text(text) = part {
-                                            let id = text.data.trim();
-                                            if !id.is_empty() {
-                                                context
-                                                    .analysis
-                                                    .css
-                                                    .used_ids
-                                                    .insert(id.to_string());
-                                                element_id = Some(id.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // `id={expr}` or the `{id}` shorthand: dynamic, unknown value.
-                            AttributeValue::Expression(_) => {
-                                context.analysis.css.has_dynamic_ids = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            } else if let Attribute::SpreadAttribute(spread) = attr {
-                // Visit spread attribute to set has_dynamic_classes
-                has_spread = true;
-                spread_attribute::visit(spread, context)?;
-            } else if let Attribute::BindDirective(bind) = attr {
-                // bind:name is a dynamic attribute
-                dynamic_attribute_names.insert(bind.name.to_string());
-            } else if let Attribute::ClassDirective(class_dir) = attr {
-                has_class_directive = true;
-                class_directive_names.insert(class_dir.name.to_string());
-                // `class:name` matches a `.name` class selector exactly (the official
-                // `attribute_matches` returns true for ClassDirective with `~=`), so
-                // track the directive name as a class on this element.
-                element_classes.insert(class_dir.name.to_string());
-            } else if let Attribute::StyleDirective(_) = attr {
-                has_style_directive = true;
-            }
-        }
-    } else {
-        for attr in &element.attributes {
-            if let Attribute::SpreadAttribute(spread) = attr {
-                spread_attribute::visit(spread, context)?;
-            }
+    for attr in &element.attributes {
+        if let Attribute::SpreadAttribute(spread) = attr {
+            spread_attribute::visit(spread, context)?;
         }
     }
 
@@ -884,14 +719,14 @@ pub fn visit<'a, 'b: 'a>(
         });
         let dom_element = super::super::types::CssDomElement {
             tag_name: element.name.to_string(),
-            classes: element_classes,
-            id: element_id,
-            static_attributes,
-            dynamic_attribute_names,
-            has_spread,
-            has_class_directive,
-            class_directive_names,
-            has_style_directive,
+            classes: css_facts.classes,
+            id: css_facts.id,
+            static_attributes: css_facts.static_attributes,
+            dynamic_attribute_names: css_facts.dynamic_attribute_names,
+            has_spread: css_facts.has_spread,
+            has_class_directive: css_facts.has_class_directive,
+            class_directive_names: css_facts.class_directive_names,
+            has_style_directive: css_facts.has_style_directive,
             parent_idx,
             children_idx: Vec::new(),
             is_root_child,

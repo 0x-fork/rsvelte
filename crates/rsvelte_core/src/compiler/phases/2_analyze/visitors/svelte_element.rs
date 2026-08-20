@@ -9,7 +9,6 @@ use super::super::errors;
 use super::VisitorContext;
 use super::shared::fragment;
 use crate::ast::template::{Attribute, AttributeValue, AttributeValuePart, SvelteDynamicElement};
-use rustc_hash::FxHashSet;
 
 const NAMESPACE_SVG: &str = "http://www.w3.org/2000/svg";
 const NAMESPACE_MATHML: &str = "http://www.w3.org/1998/Math/MathML";
@@ -35,54 +34,12 @@ pub fn visit<'a, 'b: 'a>(
     super::shared::element::validate_element(&element.attributes, context)?;
 
     let collect_css = context.analysis.css.has_css;
-    let mut element_classes = rustc_hash::FxHashSet::default();
-    let mut element_id = None;
+    let mut css_facts = super::shared::element::CssAttributeFacts::default();
 
     if collect_css {
         context.analysis.css.has_dynamic_elements = true;
-        for attr in &element.attributes {
-            match attr {
-                Attribute::Attribute(attr_node) if attr_node.name == "class" => {
-                    match super::super::css::possible_class_names(&attr_node.value) {
-                        Some(class_names) => {
-                            for class_name in class_names {
-                                context.analysis.css.used_classes.insert(class_name.clone());
-                                element_classes.insert(class_name);
-                            }
-                        }
-                        None => context.analysis.css.has_dynamic_classes = true,
-                    }
-                }
-                Attribute::Attribute(attr_node) if attr_node.name == "id" => match &attr_node.value
-                {
-                    AttributeValue::Sequence(parts) => {
-                        let has_dynamic_part = parts
-                            .iter()
-                            .any(|p| matches!(p, AttributeValuePart::ExpressionTag(_)));
-                        if has_dynamic_part {
-                            context.analysis.css.has_dynamic_ids = true;
-                        } else if parts.len() == 1
-                            && let Some(AttributeValuePart::Text(text)) = parts.first()
-                        {
-                            element_id = Some(text.data.to_string());
-                        }
-                    }
-                    AttributeValue::Expression(_) => {
-                        context.analysis.css.has_dynamic_ids = true;
-                    }
-                    _ => {}
-                },
-                Attribute::ClassDirective(cd) => {
-                    context
-                        .analysis
-                        .css
-                        .used_classes
-                        .insert(cd.name.to_string());
-                    element_classes.insert(cd.name.to_string());
-                }
-                _ => {}
-            }
-        }
+        css_facts =
+            super::shared::element::collect_css_attribute_facts(&element.attributes, context);
     }
 
     let parent_idx = context.current_parent_idx();
@@ -90,14 +47,14 @@ pub fn visit<'a, 'b: 'a>(
     let element_idx = if collect_css {
         let dom_element = super::super::types::CssDomElement {
             tag_name: String::new(),
-            classes: element_classes,
-            id: element_id,
-            static_attributes: Vec::new(),
-            dynamic_attribute_names: FxHashSet::default(),
-            has_spread: false,
-            has_class_directive: false,
-            class_directive_names: FxHashSet::default(),
-            has_style_directive: false,
+            classes: css_facts.classes,
+            id: css_facts.id,
+            static_attributes: css_facts.static_attributes,
+            dynamic_attribute_names: css_facts.dynamic_attribute_names,
+            has_spread: css_facts.has_spread,
+            has_class_directive: css_facts.has_class_directive,
+            class_directive_names: css_facts.class_directive_names,
+            has_style_directive: css_facts.has_style_directive,
             parent_idx,
             children_idx: Vec::new(),
             is_root_child,

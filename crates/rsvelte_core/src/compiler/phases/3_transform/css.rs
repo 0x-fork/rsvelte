@@ -5108,7 +5108,16 @@ fn is_attribute_selector_unused_parsed(
             return false;
         }
         if attr_name.eq_ignore_ascii_case("class") && element.has_class_directive {
-            return false;
+            // Upstream's `attribute_matches` bails out on the directive for every
+            // operator except `~=`, where a directive matches only its own name.
+            if operator != "~=" {
+                return false;
+            }
+            if let Some(expected) = expected_value.as_deref()
+                && element.class_directive_names.contains(expected)
+            {
+                return false;
+            }
         }
         if attr_name.eq_ignore_ascii_case("style") && element.has_style_directive {
             return false;
@@ -5193,7 +5202,14 @@ fn is_attribute_selector_unused(raw: &str, ctx: &CssContext) -> bool {
 
         // Check class directives for [class] selector
         if attr_name.eq_ignore_ascii_case("class") && element.has_class_directive {
-            return false;
+            if operator != "~=" {
+                return false;
+            }
+            if let Some(expected) = expected_value.as_deref()
+                && element.class_directive_names.contains(expected)
+            {
+                return false;
+            }
         }
 
         // Check style directives for [style] selector

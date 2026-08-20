@@ -278,3 +278,185 @@ pub fn validate_element(
 
     Ok(())
 }
+
+/// What the CSS matcher needs to know about one element's attribute list.
+#[derive(Default)]
+pub struct CssAttributeFacts {
+    pub classes: rustc_hash::FxHashSet<String>,
+    pub id: Option<String>,
+    pub static_attributes: Vec<(String, Option<String>)>,
+    pub dynamic_attribute_names: rustc_hash::FxHashSet<String>,
+    pub has_spread: bool,
+    pub has_class_directive: bool,
+    pub class_directive_names: rustc_hash::FxHashSet<String>,
+    pub has_style_directive: bool,
+}
+
+/// Upstream's `attribute_matches` reads `node.attributes` for a `RegularElement` and a
+/// `SvelteElement` alike, so both must contribute the same facts — a dynamic element that
+/// records only its classes is invisible to every other attribute selector.
+pub fn collect_css_attribute_facts(
+    attributes: &[Attribute],
+    context: &mut VisitorContext,
+) -> CssAttributeFacts {
+    use crate::ast::template::{AttributeValue, AttributeValuePart};
+    use crate::compiler::phases::phase2_analyze::css;
+
+    let mut facts = CssAttributeFacts::default();
+
+    for attr in attributes {
+        match attr {
+            Attribute::Attribute(attr_node) => {
+                match &attr_node.value {
+                    AttributeValue::True(_) => {
+                        facts
+                            .static_attributes
+                            .push((attr_node.name.to_string(), None));
+                    }
+                    AttributeValue::Sequence(parts) => {
+                        let mut all_static = true;
+                        let mut value = String::new();
+                        for part in parts {
+                            if let AttributeValuePart::Text(text) = part {
+                                value.push_str(&text.data);
+                            } else {
+                                all_static = false;
+                                break;
+                            }
+                        }
+                        if all_static {
+                            facts
+                                .static_attributes
+                                .push((attr_node.name.to_string(), Some(value)));
+                        } else {
+                            let mut all_resolved = true;
+                            let mut computed_values: Vec<String> = vec![String::new()];
+                            for part in parts {
+                                match part {
+                                    AttributeValuePart::Text(text) => {
+                                        for v in &mut computed_values {
+                                            v.push_str(&text.data);
+                                        }
+                                    }
+                                    AttributeValuePart::ExpressionTag(expr_tag) => {
+                                        if let Some(possible_vals) = css::get_possible_values_expr(
+                                            &expr_tag.expression,
+                                            false,
+                                        ) {
+                                            if possible_vals.len() > 20 {
+                                                all_resolved = false;
+                                                break;
+                                            }
+                                            let prev = std::mem::take(&mut computed_values);
+                                            for pv in &prev {
+                                                for ev in &possible_vals {
+                                                    computed_values.push(format!("{pv}{ev}"));
+                                                }
+                                            }
+                                            if computed_values.len() > 100 {
+                                                all_resolved = false;
+                                                break;
+                                            }
+                                        } else {
+                                            all_resolved = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if all_resolved && !computed_values.is_empty() {
+                                for value in &computed_values {
+                                    facts
+                                        .static_attributes
+                                        .push((attr_node.name.to_string(), Some(value.clone())));
+                                }
+                            } else {
+                                facts
+                                    .dynamic_attribute_names
+                                    .insert(attr_node.name.to_string());
+                            }
+                        }
+                    }
+                    AttributeValue::Expression(expr_tag) => {
+                        if let Some(possible_values) =
+                            css::get_possible_values_expr(&expr_tag.expression, false)
+                        {
+                            for value in &possible_values {
+                                facts
+                                    .static_attributes
+                                    .push((attr_node.name.to_string(), Some(value.to_string())));
+                            }
+                        } else {
+                            facts
+                                .dynamic_attribute_names
+                                .insert(attr_node.name.to_string());
+                        }
+                    }
+                }
+
+                match attr_node.name.as_str() {
+                    "class" => match css::possible_class_names(&attr_node.value) {
+                        Some(class_names) => {
+                            for class_name in class_names {
+                                context.analysis.css.used_classes.insert(class_name.clone());
+                                facts.classes.insert(class_name);
+                            }
+                        }
+                        None => context.analysis.css.has_dynamic_classes = true,
+                    },
+                    "id" => match &attr_node.value {
+                        AttributeValue::Sequence(parts) => {
+                            let has_dynamic_part = parts
+                                .iter()
+                                .any(|p| matches!(p, AttributeValuePart::ExpressionTag(_)));
+                            if has_dynamic_part {
+                                context.analysis.css.has_dynamic_ids = true;
+                            } else {
+                                for part in parts {
+                                    if let AttributeValuePart::Text(text) = part {
+                                        let id = text.data.trim();
+                                        if !id.is_empty() {
+                                            context.analysis.css.used_ids.insert(id.to_string());
+                                            facts.id = Some(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        AttributeValue::Expression(_) => {
+                            context.analysis.css.has_dynamic_ids = true;
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            Attribute::SpreadAttribute(_) => {
+                facts.has_spread = true;
+            }
+            Attribute::BindDirective(bind) => {
+                facts.dynamic_attribute_names.insert(bind.name.to_string());
+            }
+            Attribute::ClassDirective(class_dir) => {
+                facts.has_class_directive = true;
+                facts
+                    .class_directive_names
+                    .insert(class_dir.name.to_string());
+                context
+                    .analysis
+                    .css
+                    .used_classes
+                    .insert(class_dir.name.to_string());
+                // `class:name` matches `.name` exactly under upstream's `~=` rule, so the
+                // directive name is a class this element can carry.
+                facts.classes.insert(class_dir.name.to_string());
+            }
+            Attribute::StyleDirective(_) => {
+                facts.has_style_directive = true;
+            }
+            _ => {}
+        }
+    }
+
+    facts
+}
