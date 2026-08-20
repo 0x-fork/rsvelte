@@ -738,6 +738,7 @@ pub fn visit<'a, 'b: 'a>(
             has_opaque_content,
             is_dynamic_tag: false,
             snippet_name: context.current_snippet_name(),
+            sibling_walk_incomplete: false,
             prev_is_opaque_boundary: false,
             prev_has_opaque_boundary: false,
         };

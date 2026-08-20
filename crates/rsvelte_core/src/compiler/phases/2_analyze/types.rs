@@ -2387,6 +2387,11 @@ pub struct CssDomElement {
     /// Innermost enclosing `{#snippet}` name — its real DOM ancestors are that
     /// snippet's render sites, not its lexical `parent_idx`.
     pub snippet_name: Option<String>,
+    /// Set when the sibling walk stopped at something it could not enumerate, so
+    /// the four lists above are a subset of the real siblings rather than all of
+    /// them. A `{#if}` / `{#each}` / `{#await}` / `{#key}` branch does not set it:
+    /// an inexhaustive branch demotes a sibling to `Probable` instead.
+    pub sibling_walk_incomplete: bool,
     /// Whether this element can be immediately preceded by an opaque boundary
     /// (slot, render tag, component) - used for :global(X) + Y detection
     pub prev_is_opaque_boundary: bool,
