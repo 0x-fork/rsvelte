@@ -408,7 +408,7 @@ pub fn visit<'a, 'b: 'a>(
     context: &mut VisitorContext<'a>,
 ) -> Result<(), AnalysisError> {
     // Validate the element
-    validate_element(element, context)?;
+    validate_element(&element.attributes, context)?;
 
     // Check accessibility
     let a11y_warnings = a11y_check(

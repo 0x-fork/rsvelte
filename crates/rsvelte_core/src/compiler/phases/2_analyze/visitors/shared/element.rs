@@ -10,7 +10,7 @@ use super::attribute::{
     get_attribute_expression, is_expression_attribute, validate_attribute, validate_attribute_name,
     validate_slot_attribute,
 };
-use crate::ast::template::{Attribute, RegularElement};
+use crate::ast::template::Attribute;
 use crate::compiler::phases::phase2_analyze::{errors, warnings};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -45,15 +45,17 @@ fn get_react_attribute_correction(name: &str) -> Option<&'static str> {
 /// Validate an element and its attributes.
 ///
 /// Corresponds to `validate_element` in the JavaScript implementation.
+/// Takes the attribute list rather than the element, because upstream runs this
+/// from both `RegularElement` and `SvelteElement` and the body reads nothing else.
 pub fn validate_element(
-    node: &RegularElement,
+    attributes: &[Attribute],
     context: &mut VisitorContext,
 ) -> Result<(), AnalysisError> {
     let mut has_animate_directive = false;
     let mut in_transition: Option<usize> = None;
     let mut out_transition: Option<usize> = None;
 
-    for (idx, attribute) in node.attributes.iter().enumerate() {
+    for (idx, attribute) in attributes.iter().enumerate() {
         let (attr_start, attr_end) = attribute.span();
         match attribute {
             Attribute::Attribute(attr) => {
@@ -196,7 +198,7 @@ pub fn validate_element(
                 if let Some(existing_idx) = existing {
                     // Get the existing directive to determine conflict type
                     if let Some(Attribute::TransitionDirective(existing_dir)) =
-                        node.attributes.get(existing_idx)
+                        attributes.get(existing_idx)
                     {
                         let a = if existing_dir.intro {
                             if existing_dir.outro {

@@ -60,6 +60,11 @@ pub fn visit(
             // Regular-attribute handler expressions drive `needs_context` (see
             // svelte_window for the rationale).
             Attribute::Attribute(a) => {
+                if !super::shared::utils::is_event_attribute(a) {
+                    return Err(
+                        errors::illegal_element_attribute("svelte:document").at(a.start, a.end)
+                    );
+                }
                 super::attribute::visit_attribute_value_expressions(&mut a.value, context)?;
             }
             _ => {}

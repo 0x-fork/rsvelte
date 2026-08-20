@@ -47,7 +47,7 @@ pub fn visit(body: &mut SvelteElement, context: &mut VisitorContext) -> Result<(
                 return Err(errors::svelte_body_illegal_attribute().at(spread.start, spread.end));
             }
             Attribute::Attribute(attribute) => {
-                if !attribute.name.starts_with("on") {
+                if !super::shared::utils::is_event_attribute(attribute) {
                     return Err(
                         errors::svelte_body_illegal_attribute().at(attribute.start, attribute.end)
                     );

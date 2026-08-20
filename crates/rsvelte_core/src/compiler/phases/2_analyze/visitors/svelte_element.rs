@@ -29,6 +29,11 @@ pub fn visit<'a, 'b: 'a>(
     element: &mut SvelteDynamicElement<'b>,
     context: &mut VisitorContext<'a>,
 ) -> Result<(), AnalysisError> {
+    // Upstream's `SvelteElement` visitor runs the same `validate_element` as the
+    // regular one, so an illegal attribute name or a non-expression `on*` handler
+    // is rejected here too.
+    super::shared::element::validate_element(&element.attributes, context)?;
+
     let collect_css = context.analysis.css.has_css;
     let mut element_classes = rustc_hash::FxHashSet::default();
     let mut element_id = None;

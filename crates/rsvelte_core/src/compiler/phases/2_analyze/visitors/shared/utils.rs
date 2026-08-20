@@ -1858,3 +1858,20 @@ pub fn walk_js_statement_node(
 
     Ok(())
 }
+
+/// Upstream `is_event_attribute`: the two-character `on` prefix plus a value that
+/// is a lone expression. `<svelte:window>`, `<svelte:document>` and
+/// `<svelte:body>` allow exactly this and nothing else, so the name test alone
+/// admits `onclick="f(1)"` and a valueless `onclick`, which they reject.
+pub fn is_event_attribute(attribute: &crate::ast::template::AttributeNode) -> bool {
+    use crate::ast::template::{AttributeValue, AttributeValuePart};
+
+    attribute.name.starts_with("on")
+        && match &attribute.value {
+            AttributeValue::True(_) => false,
+            AttributeValue::Expression(_) => true,
+            AttributeValue::Sequence(parts) => {
+                parts.len() == 1 && matches!(parts[0], AttributeValuePart::ExpressionTag(_))
+            }
+        }
+}

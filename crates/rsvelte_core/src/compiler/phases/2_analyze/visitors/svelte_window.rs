@@ -63,6 +63,11 @@ pub fn visit(
             // component-context emission. Previously these were ignored, so a
             // `<svelte:window onkeydown={…goto(…)…}>` left `needs_context` false.
             Attribute::Attribute(a) => {
+                if !super::shared::utils::is_event_attribute(a) {
+                    return Err(
+                        errors::illegal_element_attribute("svelte:window").at(a.start, a.end)
+                    );
+                }
                 super::attribute::visit_attribute_value_expressions(&mut a.value, context)?;
             }
             _ => {}
