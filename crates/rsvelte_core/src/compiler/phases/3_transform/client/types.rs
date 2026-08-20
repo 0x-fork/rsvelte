@@ -287,10 +287,16 @@ impl<'a> ComponentContext<'a> {
             // `mem::replace` returns the old value as we install the new one,
             // so we don't pay an extra clone of the saved `self.state.node`.
             let saved_node = std::mem::replace(&mut self.state.node, element_id.clone());
+            // A non-function handler declares its `$.derived` through init, and
+            // upstream visits with the inner context — so it belongs inside the
+            // `$.element` callback, not beside it.
+            let saved_init_len = self.state.init.len();
 
             if let TransformResult::Expression(event_call) = self.visit_on_directive(on_directive) {
                 inner_after_update.push(b::stmt(&self.arena, event_call));
             }
+
+            inner_init.extend(self.state.init.drain(saved_init_len..));
 
             // Restore node
             self.state.node = saved_node;
