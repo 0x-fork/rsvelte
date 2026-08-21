@@ -50,6 +50,8 @@ pub struct ScopeBuilder<'a> {
     updates: Vec<Update>,
     /// Current function depth (for validating $ prefixes)
     function_depth: usize,
+    /// Whether the template fragment, rather than a script, is being visited.
+    in_template: bool,
     /// Whether we are in runes mode
     runes_mode: bool,
     /// Whether legacy mode is explicit (compile option or `<svelte:options runes={false} />`).
@@ -130,6 +132,7 @@ impl<'a> ScopeBuilder<'a> {
             // - Variables inside a function body have function_depth = 2 (→ OK)
             // The validate_identifier_name check is `(!function_depth || function_depth <= 1)`.
             function_depth: 1,
+            in_template: false,
             runes_mode,
             legacy_forced,
             is_typescript,
@@ -203,7 +206,9 @@ impl<'a> ScopeBuilder<'a> {
         };
 
         // Visit template - still within the script scope so bindings are accessible
+        self.in_template = true;
         self.visit_fragment(&ast.fragment);
+        self.in_template = false;
 
         // Now pop the script scope after template processing is done
         if let Some(old_scope) = script_scope {
@@ -596,24 +601,18 @@ impl<'a> ScopeBuilder<'a> {
             binding.declaration_start = Some(start);
         }
 
-        // Validate identifier name (check for invalid $ prefixes)
-        // In runes mode: validate without function_depth (all levels validated)
-        // In legacy mode: validate with function_depth so bindings inside function bodies
-        //   (function_depth >= 2) are allowed. This matches the official Svelte compiler's
-        //   scope.js behavior where `function_depth <= 1` means instance scope level only.
-        //
-        // Official Svelte scope.js:
-        //   this.function_depth = parent ? parent.function_depth + (porous ? 0 : 1) : 0;
-        //   validate_identifier_name(binding, this.function_depth);
-        //   validate_identifier_name checks: (!function_depth || function_depth <= 1)
-        //   So function_depth >= 2 (inside a function body) allows $ prefixed names.
-        {
-            let function_depth = if self.runes_mode {
-                None
-            } else {
-                Some(self.function_depth)
-            };
-            if let Err(e) = validate_identifier_name(&binding, function_depth) {
+        // `Scope.declare` always passes the declaring scope's depth, in both
+        // modes, so anything below the script's top level is exempt. Runes mode
+        // re-checks without the exemption, but only from the three analyze
+        // visitors upstream calls it from (variable declarator / function /
+        // class), which is why a `$`-prefixed template binding stays legal.
+        // A template binding is always at least two non-porous levels below the
+        // module scope upstream — the instance scope and the root `Fragment`,
+        // neither of which we materialise — so the `depth <= 1` guard inside
+        // `validate_identifier_name` never fires for one.
+        if !self.in_template {
+            let function_depth = self.scopes[target_scope].function_depth;
+            if let Err(e) = validate_identifier_name(&binding, Some(function_depth)) {
                 self.validation_errors.push(e);
             }
         }

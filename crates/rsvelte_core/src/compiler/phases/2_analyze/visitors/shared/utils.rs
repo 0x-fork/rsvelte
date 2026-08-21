@@ -1248,11 +1248,16 @@ pub fn walk_js_expression_node(
             // visitor, but we re-check here because template
             // ExpressionTags walk straight through `walk_js_expression_node`
             // and never hit the JS identifier visitor.
-            if name == "$"
+            if (name == "$"
                 || (name.starts_with("$$")
                     && name != "$$props"
                     && name != "$$restProps"
-                    && name != "$$slots")
+                    && name != "$$slots"))
+                && context
+                    .analysis
+                    .root
+                    .get_binding(name.as_str(), context.scope)
+                    .is_none()
             {
                 return Err(
                     super::super::super::errors::global_reference_invalid(name).at(*start, *end)

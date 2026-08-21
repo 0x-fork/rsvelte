@@ -57,7 +57,17 @@ fn visit_identifier_inner(
     // Corresponds to Svelte's L266-269 and L351-352 in 2-analyze/index.js
     if name == "$" || name.starts_with("$$") {
         // $$ prefixed names except reserved ones ($$props, $$restProps, $$slots) are illegal
-        if name != "$$props" && name != "$$restProps" && name != "$$slots" {
+        // Upstream walks the module scope's UNRESOLVED references, so a `$` that
+        // resolves to a binding — a parameter, most often — is not one of these.
+        if name != "$$props"
+            && name != "$$restProps"
+            && name != "$$slots"
+            && context
+                .analysis
+                .root
+                .get_binding(name, context.scope)
+                .is_none()
+        {
             return Err(errors::global_reference_invalid(name).at(start, end));
         }
     }

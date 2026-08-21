@@ -387,12 +387,10 @@ fn visit_runes_mode_typed(
 
     // Validate identifier names
     for path in &paths {
-        if let Some(&binding_idx) = context
+        if let Some(binding_idx) = context
             .analysis
             .root
-            .scope
-            .declarations
-            .get(path.name.as_str())
+            .get_binding(path.name.as_str(), context.scope)
         {
             let binding = &context.analysis.root.bindings[binding_idx];
             utils::validate_identifier_name(binding, None)?;
