@@ -98,6 +98,15 @@ impl<'a> Parser<'a> {
             let close_start = self.index - 1; // start includes '<'
             self.advance(); // consume '/'
             let name_start_idx = self.index;
+            // Upstream reads the name off a right-trimmed template, so a `</`
+            // with nothing but whitespace left runs out of input.
+            if !self.options.loose && self.source[self.index..].trim_start().is_empty() {
+                return Err(crate::error::ParseError::svelte(
+                    "unexpected_eof",
+                    "Unexpected end of input",
+                    (self.index, self.index),
+                ));
+            }
             self.read_tag_name();
             let name_end_idx = self.index;
             self.skip_whitespace();
@@ -194,8 +203,10 @@ impl<'a> Parser<'a> {
         }
 
         if name.is_empty() {
-            // If we're at EOF with just '<', report unexpected_eof (unless in loose mode)
-            if self.is_eof() {
+            // Upstream keeps reading and runs out of input, so trailing
+            // whitespace after the `<` does not make it text.
+            let only_whitespace_left = self.source[self.index..].trim_start().is_empty();
+            if self.is_eof() || only_whitespace_left {
                 if self.options.loose {
                     // In loose mode, allow EOF after '<'
                     return Ok(None);
@@ -203,6 +214,15 @@ impl<'a> Parser<'a> {
                 return Err(crate::error::ParseError::svelte(
                     "unexpected_eof",
                     "Unexpected end of input",
+                    (self.index, self.index),
+                ));
+            }
+            if !self.options.loose {
+                // Upstream validates the empty name like any other, so a `<`
+                // that starts no tag is an error rather than text.
+                return Err(crate::error::ParseError::svelte(
+                    "tag_invalid_name",
+                    "Expected a valid element or component name. Components must have a valid variable name or dot notation expression\nhttps://svelte.dev/e/tag_invalid_name",
                     (self.index, self.index),
                 ));
             }
@@ -267,10 +287,18 @@ impl<'a> Parser<'a> {
         if !has_closing_bracket && !self.options.loose {
             self.skip_whitespace();
             if self.is_eof() {
+                // Upstream throws from `read_until`, which has not consumed the
+                // trailing whitespace, so the point is the last token's end.
+                let at = self.source[..self.index].trim_end().len();
+                // Consuming the `/` got past `read_attribute`, so what runs out
+                // is `eat('>', true)` rather than the attribute reader.
+                if self_closing {
+                    return Err(crate::error::ParseError::expected_token(">", at));
+                }
                 return Err(crate::error::ParseError::svelte(
                     "unexpected_eof",
                     "Unexpected end of input",
-                    (self.source.len(), self.source.len()),
+                    (at, at),
                 ));
             }
             return Err(crate::error::ParseError::expected_token(">", self.index));
