@@ -46,6 +46,63 @@ pub fn visit_snippet_block<'a>(node: &SnippetBlock<'a>, state: &mut ServerTransf
         .map(|s| s.to_string())
         .unwrap_or_else(|| "snippet".to_string());
 
+    let fn_decl = build_snippet_function(node, &name, state);
+
+    // 写经 upstream `fn.___snippet = true`: record the snippet's function name so
+    // the `uses_component_bindings` settle-loop assembly can hoist this
+    // declaration ahead of `$$render_inner` (snippet functions render OUTSIDE the
+    // re-render loop).
+    state.snippet_names.insert(name.clone());
+
+    // 写经 `node.metadata.can_hoist ? state.hoisted : state.init`: a hoistable
+    // snippet (no instance-state reference) goes to module scope; otherwise it
+    // is emitted into the enclosing fragment's template body. In dev mode the
+    // guard and declaration share upstream's `state.init` placement.
+    // Upstream `can_hoist = is_root_level && body_refs_only_own_params`. Our
+    // analyze does NOT bump its depth counters for `<svelte:boundary>`, so a
+    // snippet that sits directly inside a boundary's children fragment (e.g.
+    // `{#snippet children()}` in `<svelte:boundary>`) wrongly reports
+    // `can_hoist == true`. Re-impose the root-level gate with the server-side
+    // `fragment_depth` (root fragment = 1; any nested block / boundary body ≥ 2)
+    // so a boundary-nested snippet is emitted INLINE in the boundary block rather
+    // than hoisted to module scope — mirroring the same gate the SvelteBoundary
+    // visitor applies to the `failed` snippet.
+    if node.metadata.can_hoist && state.fragment_depth <= 1 {
+        if state.options.dev {
+            state
+                .hoisted
+                .push(b.stmt(b.call("$.prevent_snippet_stringification", vec![b.id(&name)])));
+        }
+        state.hoisted.push(fn_decl);
+    } else {
+        if state.options.dev {
+            state
+                .template
+                .push(super::shared::TemplateEntry::HoistableDecl(b.stmt(b.call(
+                    "$.prevent_snippet_stringification",
+                    vec![b.id(&name)],
+                ))));
+        }
+        state
+            .template
+            .push(super::shared::TemplateEntry::HoistableDecl(fn_decl));
+    }
+}
+
+/// Build `function <name>($$renderer, ...params) { <body> }` for a snippet.
+///
+/// All three server call sites go through this: the `SnippetBlock` visitor, a
+/// component-child slot snippet and a `<svelte:boundary>` `failed` / `pending`
+/// snippet. They must agree on both halves — a parameter reconstructed by name
+/// alone drops a destructuring pattern, and a missing shadow frame lets a body
+/// read of a parameter constant-fold to the same-named component binding.
+pub(super) fn build_snippet_function<'a>(
+    node: &SnippetBlock<'a>,
+    name: &str,
+    state: &mut ServerTransformState<'a>,
+) -> oxc_ast::ast::Statement<'a> {
+    let b = state.b;
+
     // -- parameters ---------------------------------------------------------
     // 写经 upstream: `[b.id('$$renderer'), ...node.parameters]` — the declared
     // parameters are spread VERBATIM into the formal-parameter list. We
@@ -100,51 +157,7 @@ pub fn visit_snippet_block<'a>(node: &SnippetBlock<'a>, state: &mut ServerTransf
     state.shadowed_names.pop();
     state.slot_let_shadows.pop();
 
-    let fn_decl = b.function_declaration(&name, params, fn_body, false);
-
-    // 写经 upstream `fn.___snippet = true`: record the snippet's function name so
-    // the `uses_component_bindings` settle-loop assembly can hoist this
-    // declaration ahead of `$$render_inner` (snippet functions render OUTSIDE the
-    // re-render loop).
-    state.snippet_names.insert(name.clone());
-
-    // 写经 `node.metadata.can_hoist ? state.hoisted : state.init`: a hoistable
-    // snippet (no instance-state reference) goes to module scope; otherwise it
-    // is emitted into the enclosing fragment's template body. In dev mode the
-    // guard and declaration share upstream's `state.init` placement.
-    // Upstream `can_hoist = is_root_level && body_refs_only_own_params`. Our
-    // analyze does NOT bump its depth counters for `<svelte:boundary>`, so a
-    // snippet that sits directly inside a boundary's children fragment (e.g.
-    // `{#snippet children()}` in `<svelte:boundary>`) wrongly reports
-    // `can_hoist == true`. Re-impose the root-level gate with the server-side
-    // `fragment_depth` (root fragment = 1; any nested block / boundary body ≥ 2)
-    // so a boundary-nested snippet is emitted INLINE in the boundary block rather
-    // than hoisted to module scope — mirroring the same gate the SvelteBoundary
-    // visitor applies to the `failed` snippet.
-    if node.metadata.can_hoist && state.fragment_depth <= 1 {
-        if state.options.dev {
-            state
-                .hoisted
-                .push(b.stmt(b.call("$.prevent_snippet_stringification", vec![b.id(&name)])));
-        }
-        state.hoisted.push(fn_decl);
-    } else {
-        if state.options.dev {
-            state
-                .template
-                .push(super::shared::TemplateEntry::HoistableDecl(b.stmt(b.call(
-                    "$.prevent_snippet_stringification",
-                    vec![b.id(&name)],
-                ))));
-            state
-                .template
-                .push(super::shared::TemplateEntry::HoistableDecl(fn_decl));
-        } else {
-            state
-                .template
-                .push(super::shared::TemplateEntry::HoistableDecl(fn_decl));
-        }
-    }
+    b.function_declaration(name, params, fn_body, false)
 }
 
 /// Collect every binding identifier name introduced by a snippet / slot
