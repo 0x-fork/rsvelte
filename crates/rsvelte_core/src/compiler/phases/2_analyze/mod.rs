@@ -390,6 +390,17 @@ pub(crate) fn analyze_prepared_component_with_retained(
         if analysis.custom_element.is_none() {
             analysis.accessors = false;
         }
+
+        // Upstream raises these from the module scope's leftover references,
+        // before any visitor runs, so they outrank every diagnostic the walk
+        // below can produce — and `$$props` is checked ahead of `$$restProps`
+        // whichever comes first in the source.
+        if let Some((start, end)) = analysis.legacy_props_ref {
+            return Err(errors::legacy_props_invalid().at(start, end));
+        }
+        if let Some((start, end)) = analysis.legacy_rest_props_ref {
+            return Err(errors::legacy_rest_props_invalid().at(start, end));
+        }
     }
 
     // Handle legacy mode exports
@@ -805,7 +816,16 @@ pub(crate) fn analyze_prepared_component_with_retained(
         && (analysis.uses_slots
             || (analysis.custom_element.is_none() && !analysis.slot_names.is_empty()))
     {
-        return Err(errors::slot_snippet_conflict());
+        // Reference: 2-analyze/index.js L861 — the position is the FIRST `<slot>`,
+        // falling back to wherever `$$slot` is mentioned when there is no element.
+        let err = errors::slot_snippet_conflict();
+        return Err(match analysis.slot_names.values().next() {
+            Some(&(start, end)) => err.at(start, end),
+            None => match memchr::memmem::find(analysis.source.as_bytes(), b"$$slot") {
+                Some(pos) => err.at(pos as u32, pos as u32),
+                None => err,
+            },
+        });
     }
 
     // Analyze CSS if present
@@ -987,8 +1007,22 @@ fn synthesize_class_style_attributes(
             TemplateNode::SnippetBlock(snippet) => {
                 synthesize_class_style_attributes(&mut snippet.body, analysis);
             }
-            TemplateNode::SvelteHead(head) => {
-                synthesize_class_style_attributes(&mut head.fragment, analysis);
+            // Upstream reads one flat `analysis.elements`, so every container is
+            // covered by construction; re-enumerating them here is what let
+            // `<svelte:boundary>` and `<svelte:fragment>` children fall out.
+            TemplateNode::SvelteHead(el)
+            | TemplateNode::SvelteBoundary(el)
+            | TemplateNode::SvelteFragment(el)
+            | TemplateNode::SvelteBody(el)
+            | TemplateNode::SvelteDocument(el)
+            | TemplateNode::SvelteWindow(el) => {
+                synthesize_class_style_attributes(&mut el.fragment, analysis);
+            }
+            TemplateNode::SvelteComponent(comp) => {
+                synthesize_class_style_attributes(&mut comp.fragment, analysis);
+            }
+            TemplateNode::SvelteSelf(el) => {
+                synthesize_class_style_attributes(&mut el.fragment, analysis);
             }
             TemplateNode::SlotElement(slot) => {
                 synthesize_class_style_attributes(&mut slot.fragment, analysis);
@@ -1004,7 +1038,7 @@ fn synthesize_class_style_attributes(
 /// Synthesize class/style attributes for a single element's attribute list.
 fn synthesize_for_element_attrs(
     attributes: &mut Vec<crate::ast::template::Attribute>,
-    _is_scoped: bool,
+    is_scoped: bool,
 ) {
     use crate::ast::template::{
         Attribute, AttributeNode, AttributeValue, AttributeValuePart, Text,
@@ -1036,10 +1070,8 @@ fn synthesize_for_element_attrs(
         }
     }
 
-    // We need an empty class to generate the set_class() or class="" correctly.
-    // NOTE: We do NOT synthesize for scoped-only elements (no class directives) because
-    // the transform phase handles CSS hash injection for those elements directly.
-    if !has_spread && !has_class && has_class_directive {
+    // We need an empty class to generate the set_class() or class="" correctly
+    if !has_spread && !has_class && (is_scoped || has_class_directive) {
         attributes.push(Attribute::Attribute(AttributeNode {
             start: u32::MAX, // synthetic marker (uses -1 in JS, we use u32::MAX)
             end: u32::MAX,
@@ -4530,9 +4562,13 @@ fn mark_group_bindings_in_node(
                 analysis,
             );
         }
-        TemplateNode::SvelteHead(head) => {
+        // Every container that can hold an element has to be listed, because a
+        // `bind:group` anywhere under one still needs its group array declared.
+        TemplateNode::SvelteHead(el)
+        | TemplateNode::SvelteBoundary(el)
+        | TemplateNode::SvelteFragment(el) => {
             mark_group_bindings_in_fragment(
-                &mut head.fragment,
+                &mut el.fragment,
                 ancestor_stack,
                 assignments,
                 analysis,

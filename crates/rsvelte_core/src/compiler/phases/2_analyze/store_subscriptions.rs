@@ -108,15 +108,32 @@ pub fn detect_store_subscriptions(
     for store_ref in &store_refs {
         let ref_name = &store_ref.name;
 
-        // Skip reserved names ($$props, $$restProps, $$slots)
+        // Skip reserved names ($$props, $$restProps, $$slots). The first two are
+        // illegal in runes mode, but that is not known yet — auto-detection runs
+        // after this scan — so record the position and let the caller report it.
         if RESERVED.contains(&ref_name.as_str()) {
+            if analysis.root.find_binding_any_scope(ref_name).is_none() {
+                let span = (
+                    store_ref.position as u32,
+                    (store_ref.position + ref_name.len()) as u32,
+                );
+                let slot = match ref_name.as_str() {
+                    "$$props" => &mut analysis.legacy_props_ref,
+                    "$$restProps" => &mut analysis.legacy_rest_props_ref,
+                    _ => continue,
+                };
+                slot.get_or_insert(span);
+            }
             continue;
         }
 
         // Check for invalid $$ references ($$xxx is illegal)
         // Corresponds to Svelte's L266-269 and L351-352 in 2-analyze/index.js
         // Note: bare $ detection is handled in Identifier visitor via proper AST analysis
-        if ref_name.starts_with("$$") {
+        // Only an UNRESOLVED reference is illegal — upstream reads the module
+        // scope's leftover references, so a `$$x` bound by the template (an
+        // each item, a snippet parameter) never reaches this rule.
+        if ref_name.starts_with("$$") && analysis.root.find_binding_any_scope(ref_name).is_none() {
             return Err(errors::global_reference_invalid(ref_name).at(
                 store_ref.position as u32,
                 (store_ref.position + ref_name.len()) as u32,
@@ -218,6 +235,21 @@ pub fn detect_store_subscriptions(
 
                 if is_rune_init {
                     // The binding IS a rune initialization - skip, $name is a rune
+                    continue;
+                }
+
+                // Upstream skips the store sub whenever `get_rune(init, scope)`
+                // is non-null — i.e. for ANY rune-call initializer, not only the
+                // $state/$derived family the binding KIND records. `const host =
+                // $host()` leaves a Normal binding, but `$host` is still the
+                // rune. `$props` inits are excluded here: the
+                // `is_props_rune_init` special case below owns that rule
+                // (`let state = $props()` must still make `$state` a store sub).
+                if binding
+                    .init_rune
+                    .as_deref()
+                    .is_some_and(|r| r != "$props" && r != "$props.id")
+                {
                     continue;
                 }
 

@@ -23,7 +23,7 @@ uncompared, and both turned out to hold defects:
 
 An entry needs a reason that is *not* "rsvelte is wrong here".
 
-`lint-adversarial-fix-all-known-failures.json` holds 18 entries over 1364
+`lint-adversarial-fix-all-known-failures.json` holds **17 entries** over 1364
 compared patterns; on the run that baselined it the oracle rewrote 793 files and
 rsvelte rewrote 792.
 
@@ -32,13 +32,12 @@ other on the same pattern: a bare `<id>` is a text divergence, and
 `oracle-crash:<id>` is a pattern ESLint threw on while fixing, where there is no
 text to compare.
 
-Partition of `lint-adversarial-fix-all-known-failures.json` by cause: `14 + 1 + 1 + 1 + 1`
+Partition of `lint-adversarial-fix-all-known-failures.json` by cause: `14 + 1 + 1 + 1`
 
 | cause | entries |
 |---|---|
 | rsvelte-only autofix (upstream rule is report-only) | 14 |
 | upstream autofix defect we decline to reproduce | 1 |
-| `svelte_meta_invalid_placement` is a parse error upstream, an analyze error here | 1 |
 | a listed upstream-parser defect, surfaced by a fix oscillation | 1 |
 | upstream rule crashes on text an earlier pass produced | 1 |
 
@@ -108,17 +107,6 @@ rather than after the *key*, so `style:color|important` becomes
 the `!important`. rsvelte writes `style:color|important={color}`. Reported in
 [`upstream_issues/eslint-plugin-svelte-shorthand-directive-modifier.md`](../upstream_issues/eslint-plugin-svelte-shorthand-directive-modifier.md);
 the full evidence, including the two compiled outputs, is in the per-rule doc.
-
-### `no-raw-special-elements/14-nested-inside-each.svelte`
-
-Both sides report identically and produce the same pass-1 text; upstream's pass 2
-never runs because `svelte-eslint-parser` calls the compiler's `parse()`, which
-raises `svelte_meta_invalid_placement` from
-`phases/1-parse/state/element.js:161`, while rsvelte raises it from
-`phases/2_analyze/visitors/svelte_head.rs` — a phase the linter never reaches — so
-rsvelte relints cleanly and fixes one level deeper. Neither output is a file
-Svelte accepts; the input is unfixable by this rule. The per-rule doc carries the
-verification.
 
 ### `no-nested-style-tag/14-component-lookalike.svelte`
 

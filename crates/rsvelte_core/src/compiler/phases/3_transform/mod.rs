@@ -945,6 +945,7 @@ pub fn transform_module(
         GenerateMode::Server => server::transform_server_module(analysis, source, options)?,
         GenerateMode::None => String::new(),
     };
+    let js = shared::class_body::terminate_export_default_class(&js).unwrap_or(js);
 
     Ok(TransformResult {
         js,

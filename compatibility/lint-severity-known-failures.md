@@ -60,8 +60,8 @@ Every one of these 55 patterns fails to compile, and it is the compiler saying
 so rather than a rule: the key's cause field carries the diagnostic code, and
 all 55 are compiler codes (`slot_element_invalid_name` ×13,
 `dollar_prefix_invalid` ×7, `state_invalid_placement` ×4, `legacy_export_invalid`
-×4, `animation_invalid_placement` ×4, `parse-error` ×4, and 13 more codes accounting for
-19 between them), never a `svelte/…` rule id. Many are inherent to the rule being
+×4, `animation_invalid_placement` ×4, `parse-error` ×3, and 15 more codes accounting for
+20 between them), never a `svelte/…` rule id. Many are inherent to the rule being
 exercised — `no-dynamic-slot-name`'s whole subject is a construct Svelte 5
 rejects outright.
 
