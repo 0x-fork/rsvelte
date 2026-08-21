@@ -1,10 +1,12 @@
-//! Strict-mode early errors that OXC does not raise.
+//! Restrictions acorn applies to a script that OXC does not.
 //!
-//! Every component script is an ES module and therefore strict, and acorn
-//! applies the strict-mode restrictions uniformly. OXC has no equivalent pass,
-//! so each one it accepts has to be found here. acorn is single-pass and
-//! non-recovering, so it throws on the first violation it reaches and never
-//! sees any that follow — callers take the earliest by position.
+//! Two families. Every component script is an ES module and therefore strict,
+//! and acorn applies the strict-mode early errors uniformly while OXC has no
+//! such pass. And acorn implements a narrower grammar: `using` declarations,
+//! the import phases and the deprecated `assert` clause are all syntax OXC
+//! parses and acorn rejects. acorn is single-pass and non-recovering, so it
+//! throws on the first violation it reaches and never sees any that follow —
+//! callers take the earliest by position.
 
 use oxc_ast::ast::{
     AssignmentTarget, BindingPattern, Class, Expression, FormalParameters, Function,
@@ -29,9 +31,14 @@ const RESERVED: &[&str] = &[
 ];
 
 /// The earliest strict-mode violation in `program`, as `(offset, message)`.
-pub fn find_violation(program: &oxc_ast::ast::Program<'_>, source: &str) -> Option<(u32, String)> {
+pub fn find_violation(
+    program: &oxc_ast::ast::Program<'_>,
+    source: &str,
+    is_typescript: bool,
+) -> Option<(u32, String)> {
     let mut scan = Scan {
         source,
+        is_typescript,
         hits: Vec::new(),
     };
     scan.visit_program(program);
@@ -40,12 +47,29 @@ pub fn find_violation(program: &oxc_ast::ast::Program<'_>, source: &str) -> Opti
 
 struct Scan<'s> {
     source: &'s str,
+    /// acorn-typescript keeps the deprecated `assert` clause, so that one
+    /// restriction is JS-only.
+    is_typescript: bool,
     hits: Vec<(u32, String)>,
 }
 
 impl Scan<'_> {
     fn hit(&mut self, at: u32, message: impl Into<String>) {
         self.hits.push((at, message.into()));
+    }
+
+    /// `assert { … }`, the withdrawn spelling of an import-attributes clause.
+    fn check_with_clause(&mut self, clause: Option<&oxc_ast::ast::WithClause<'_>>) {
+        let Some(clause) = clause else { return };
+        if self.is_typescript || clause.keyword != oxc_ast::ast::WithClauseKeyword::Assert {
+            return;
+        }
+        // The clause span starts at `{`; acorn stops at the keyword, and only
+        // whitespace separates the two.
+        let before = self.source[..clause.span.start as usize].trim_end();
+        if let Some(prefix) = before.strip_suffix("assert") {
+            self.hit(prefix.len() as u32, "Unexpected token");
+        }
     }
 
     /// A binding or reference named `name` at `at`, checked against the names
@@ -261,6 +285,41 @@ impl<'a> Visit<'a> for Scan<'_> {
             self.check_name(id.name.as_str(), id.span.start, true);
         }
         walk::walk_class(self, class);
+    }
+
+    fn visit_variable_declaration(&mut self, decl: &oxc_ast::ast::VariableDeclaration<'a>) {
+        use oxc_ast::ast::VariableDeclarationKind as K;
+        // acorn does not implement explicit resource management, so it reads
+        // `using` as an identifier and stops at the name that follows it.
+        if matches!(decl.kind, K::Using | K::AwaitUsing)
+            && let Some(first) = decl.declarations.first()
+        {
+            self.hit(first.id.span().start, "Unexpected token");
+        }
+        walk::walk_variable_declaration(self, decl);
+    }
+
+    fn visit_import_declaration(&mut self, decl: &oxc_ast::ast::ImportDeclaration<'a>) {
+        // `import defer` / `import source` are stage-3 phases acorn does not
+        // know; it stops at the token after the phase keyword, which is the
+        // first specifier. `assert { … }` is the deprecated spelling of `with`.
+        if decl.phase.is_some()
+            && let Some(first) = decl.specifiers.as_ref().and_then(|s| s.first())
+        {
+            self.hit(first.span().start, "Unexpected token");
+        }
+        self.check_with_clause(decl.with_clause.as_deref());
+        walk::walk_import_declaration(self, decl);
+    }
+
+    fn visit_export_from_declaration(&mut self, decl: &oxc_ast::ast::ExportFromDeclaration<'a>) {
+        self.check_with_clause(decl.with_clause.as_deref());
+        walk::walk_export_from_declaration(self, decl);
+    }
+
+    fn visit_export_all_declaration(&mut self, decl: &oxc_ast::ast::ExportAllDeclaration<'a>) {
+        self.check_with_clause(decl.with_clause.as_deref());
+        walk::walk_export_all_declaration(self, decl);
     }
 
     fn visit_object_expression(&mut self, obj: &oxc_ast::ast::ObjectExpression<'a>) {

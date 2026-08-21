@@ -6955,7 +6955,7 @@ fn convert_parsed_program<'ast>(
                     }),
                     await_or_yield_in_params(program, content)
                         .map(|(at, message)| (at, message.to_string())),
-                    super::strict_mode::find_violation(program, content),
+                    super::strict_mode::find_violation(program, content, is_typescript),
                 ]
                 .into_iter()
                 .flatten()
