@@ -1683,16 +1683,33 @@ pub fn check_js_parse_error_with_pos(content: &str) -> Option<(String, usize)> {
             let parser = OxcParser::new(allocator, &wrapped, source_type);
             let result = parser.parse();
             if let Some(first_error) = result.diagnostics.first() {
+                // Acorn raises "Assigning to rvalue" at the target's start, not
+                // where it stopped consuming, so this one label reads left.
+                let at_label_start = matches!(
+                    first_error.message.as_ref(),
+                    "Cannot assign to this expression" | "Invalid left-hand side in assignment"
+                );
                 let pos = first_error
                     .labels
                     .first()
-                    .map(|label| label.offset() as usize + label.len() as usize)
+                    .map(|label| {
+                        if at_label_start {
+                            label.offset() as usize
+                        } else {
+                            label.offset() as usize + label.len() as usize
+                        }
+                    })
                     .map(|wrapped_end| {
                         // Strip the leading `(` we added and clamp.
                         wrapped_end.saturating_sub(1).min(content.len())
                     })
                     .unwrap_or(0);
-                return Some((first_error.message.to_string(), pos));
+                let message = if at_label_start {
+                    "Assigning to rvalue".to_string()
+                } else {
+                    first_error.message.to_string()
+                };
+                return Some((message, pos));
             }
             // Check for invalid assignment targets that OXC doesn't report as errors
             if let Some(oxc_ast::ast::Statement::ExpressionStatement(expr_stmt)) =
