@@ -3692,6 +3692,19 @@ impl<'a> ScopeBuilder<'a> {
         // can find it and know that it's a local (non-dynamic) snippet
         if let Some(name) = block.expression.name() {
             let span = block.expression.start().zip(block.expression.end());
+            // A snippet declares with `Function`, which `declare_binding`
+            // exempts from the duplicate check so a TypeScript overload set
+            // stays legal. Two snippets are not an overload set.
+            if self.scopes[self.current_scope]
+                .declarations
+                .contains_key(name)
+            {
+                let mut error = errors::declaration_duplicate(name);
+                if let Some((start, end)) = span {
+                    error = error.at(start, end);
+                }
+                self.validation_errors.push(error);
+            }
             let idx = self.declare_binding(
                 name.to_string(),
                 BindingKind::Normal,
