@@ -1080,10 +1080,10 @@ impl<'a> Parser<'a> {
 
             // Handle {/each}. A mismatched close (e.g. `{/if}`) errors in strict
             // mode; in loose mode it is left for an outer block.
-            self.expect_block_close("each")?;
+            let found_closing = self.expect_block_close("each")?;
 
-            // Pop from stack (matched close, or EOF / loose-mode recovery).
-            if !self.stack.is_empty() {
+            // At EOF the entry stays on the stack for `block_unclosed`.
+            if found_closing && !self.stack.is_empty() {
                 self.stack.pop();
             }
 
@@ -1334,10 +1334,10 @@ impl<'a> Parser<'a> {
 
         // Handle closing {/each}. A mismatched close (e.g. `{/if}`) errors in
         // strict mode; in loose mode it is left for an outer block.
-        self.expect_block_close("each")?;
+        let found_closing = self.expect_block_close("each")?;
 
-        // Pop from stack (matched close, or EOF / loose-mode recovery).
-        if !self.stack.is_empty() {
+        // At EOF the entry stays on the stack for `block_unclosed`.
+        if found_closing && !self.stack.is_empty() {
             self.stack.pop();
         }
 
@@ -1693,10 +1693,10 @@ impl<'a> Parser<'a> {
         // Handle closing {/await}. A mismatched close (e.g. `{#await}` closed by
         // `{/if}`) errors in strict mode; in loose mode it is left for an outer
         // block.
-        self.expect_block_close("await")?;
+        let found_closing = self.expect_block_close("await")?;
 
-        // Pop the stack (matched close, or EOF / loose-mode recovery).
-        if !self.stack.is_empty() {
+        // At EOF the entry stays on the stack for `block_unclosed`.
+        if found_closing && !self.stack.is_empty() {
             self.stack.pop();
         }
 
@@ -1738,10 +1738,10 @@ impl<'a> Parser<'a> {
 
         // Handle closing {/key}. A mismatched close (e.g. `{/if}`) errors in
         // strict mode; in loose mode it is left for an outer block.
-        self.expect_block_close("key")?;
+        let found_closing = self.expect_block_close("key")?;
 
-        // Pop from stack (matched close, or EOF / loose-mode recovery).
-        if !self.stack.is_empty() {
+        // At EOF the entry stays on the stack for `block_unclosed`.
+        if found_closing && !self.stack.is_empty() {
             self.stack.pop();
         }
 
@@ -1912,10 +1912,10 @@ impl<'a> Parser<'a> {
 
         // Handle closing {/snippet}. A mismatched close (e.g. `{/if}`) errors in
         // strict mode; in loose mode it is left for an outer block.
-        self.expect_block_close("snippet")?;
+        let found_closing = self.expect_block_close("snippet")?;
 
-        // Pop from stack (matched close, or EOF / loose-mode recovery).
-        if !self.stack.is_empty() {
+        // At EOF the entry stays on the stack for `block_unclosed`.
+        if found_closing && !self.stack.is_empty() {
             self.stack.pop();
         }
 
