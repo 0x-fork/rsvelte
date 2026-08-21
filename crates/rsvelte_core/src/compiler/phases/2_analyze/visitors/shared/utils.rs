@@ -1379,23 +1379,16 @@ pub fn walk_js_expression_node(
             }
         }
         JsNode::CallExpression {
-            callee,
-            arguments,
-            start,
-            end,
-            ..
+            callee, arguments, ..
         } => {
             let callee_node = arena.get_js_node(*callee);
             let rune_name = get_rune_name_node(callee_node, context);
 
-            if let Some(ref rn) = rune_name
-                && matches!(
-                    rn.as_str(),
-                    "$state" | "$state.raw" | "$derived" | "$derived.by"
-                )
-                && context.in_const_tag
-            {
-                return Err(errors::state_invalid_placement(rn).at(*start, *end));
+            // A template expression is one more caller of the rune rules, but
+            // this walker keeps no `js_path`, so a rune inside a function body
+            // here would read as having no parent and be rejected wrongly.
+            if rune_name.is_some() && context.function_depth == 0 {
+                super::super::call_expression::validate_rune_call(expression, context)?;
             }
 
             if rune_name.is_none() && !is_safe_identifier_node(callee_node, context) {
