@@ -5,7 +5,10 @@
 
 <svelte:boundary>
 	<b>{o}</b>
-	{#snippet failed({ message }, reset)}<i>{message}</i><button onclick={reset}>r</button>{/snippet}
+	{#snippet failed({ message }, reset)}
+		<i>{message}</i>
+		<button onclick={reset}>r</button>
+	{/snippet}
 	{#snippet pending()}<u>{d}</u>{/snippet}
 </svelte:boundary>
 
