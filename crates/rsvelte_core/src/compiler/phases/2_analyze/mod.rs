@@ -390,6 +390,17 @@ pub(crate) fn analyze_prepared_component_with_retained(
         if analysis.custom_element.is_none() {
             analysis.accessors = false;
         }
+
+        // Upstream raises these from the module scope's leftover references,
+        // before any visitor runs, so they outrank every diagnostic the walk
+        // below can produce — and `$$props` is checked ahead of `$$restProps`
+        // whichever comes first in the source.
+        if let Some((start, end)) = analysis.legacy_props_ref {
+            return Err(errors::legacy_props_invalid().at(start, end));
+        }
+        if let Some((start, end)) = analysis.legacy_rest_props_ref {
+            return Err(errors::legacy_rest_props_invalid().at(start, end));
+        }
     }
 
     // Handle legacy mode exports

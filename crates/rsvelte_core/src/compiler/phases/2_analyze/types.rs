@@ -1591,6 +1591,12 @@ pub struct ComponentAnalysis {
     /// decision without waiting for the post-walk reconciliation.
     pub instance_has_legacy_patterns: bool,
 
+    /// First unresolved `$$props` / `$$restProps` reference, in upstream's
+    /// module-then-instance-then-template order. Recorded while scanning for
+    /// store subscriptions, but reported only once runes mode has settled.
+    pub legacy_props_ref: Option<(u32, u32)>,
+    pub legacy_rest_props_ref: Option<(u32, u32)>,
+
     /// Whether the component uses $$props
     pub uses_props: bool,
 
@@ -1797,6 +1803,8 @@ impl ComponentAnalysis {
             has_await: false,
             maybe_runes: false,
             instance_has_legacy_patterns: false,
+            legacy_props_ref: None,
+            legacy_rest_props_ref: None,
             uses_props: false,
             uses_rest_props: false,
             uses_slots: false,

@@ -373,6 +373,12 @@ diagnostics! {
     /// Cannot use `export let` in runes mode — use `$props()` instead
     legacy_export_invalid() => "Cannot use `export let` in runes mode — use `$props()` instead\nhttps://svelte.dev/e/legacy_export_invalid";
 
+    /// Cannot use `$$props` in runes mode
+    legacy_props_invalid() => "Cannot use `$$props` in runes mode\nhttps://svelte.dev/e/legacy_props_invalid";
+
+    /// Cannot use `$$restProps` in runes mode
+    legacy_rest_props_invalid() => "Cannot use `$$restProps` in runes mode\nhttps://svelte.dev/e/legacy_rest_props_invalid";
+
     /// `$:` is not allowed in runes mode, use `$derived` or `$effect` instead
     legacy_reactive_statement_invalid() => "`$:` is not allowed in runes mode, use `$derived` or `$effect` instead\nhttps://svelte.dev/e/legacy_reactive_statement_invalid";
 

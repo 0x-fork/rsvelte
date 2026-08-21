@@ -108,8 +108,22 @@ pub fn detect_store_subscriptions(
     for store_ref in &store_refs {
         let ref_name = &store_ref.name;
 
-        // Skip reserved names ($$props, $$restProps, $$slots)
+        // Skip reserved names ($$props, $$restProps, $$slots). The first two are
+        // illegal in runes mode, but that is not known yet — auto-detection runs
+        // after this scan — so record the position and let the caller report it.
         if RESERVED.contains(&ref_name.as_str()) {
+            if analysis.root.find_binding_any_scope(ref_name).is_none() {
+                let span = (
+                    store_ref.position as u32,
+                    (store_ref.position + ref_name.len()) as u32,
+                );
+                let slot = match ref_name.as_str() {
+                    "$$props" => &mut analysis.legacy_props_ref,
+                    "$$restProps" => &mut analysis.legacy_rest_props_ref,
+                    _ => continue,
+                };
+                slot.get_or_insert(span);
+            }
             continue;
         }
 
