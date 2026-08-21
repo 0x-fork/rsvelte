@@ -527,6 +527,30 @@ and published code writes it almost never. The coverage is
 `crates/rsvelte_core/tests/a11y_svelte_element_2523.rs`, which constructs one case per rule and
 pairs each `!is_dynamic_element` row with the static element that does raise it.
 
+### Blind spot 2e — the unit is one compile, so a per-process rule is unobservable
+
+Every entry is compiled once per target and its warnings compared in isolation. **[D]** A
+warning whose emission depends on *how many times the compiler has already run* therefore has
+no observable here at any corpus size — the divergence **is** the second call.
+
+Measured (#3239): upstream dedupes the compile-**option** deprecations through a module-level
+`warned` Set in `validate-options.js`, so three `compile()` calls with `{ accessors: true }` in
+one fresh process yield `[options_deprecated_accessors]`, `[]`, `[]`. rsvelte emits the warning
+all three times. Two independent reasons this gate is blind to it: the unit above, and the fact
+that **no corpus entry passes either option** — `targets.mjs` fixes the option set, so blind
+spot 1d (the compile-option surface is one point) covers the same hole from the other side.
+
+The divergence is **deliberate**, not a backlog item: reproducing a module-level `warned` Set
+needs process-global mutable state, and under the parallel NAPI driver *which* file receives the
+single warning would be nondeterministic — worse for a user than over-warning, since a warning
+that lands on an arbitrary file is one a build log cannot be diffed against. It is pinned by
+`compile_option_deprecations_repeat_on_every_call` in
+`crates/rsvelte_core/tests/svelte_options_deprecations.rs` so that a later move to
+once-per-process is a decision rather than a drift. Note the asymmetry the issue's title hides:
+only the **option** path dedupes upstream. The `<svelte:options accessors />` *tag* path is
+raised from `2-analyze/index.js` with no `warn_once` at all, so it warns on every compile in
+both compilers — and that half this gate does see.
+
 ---
 
 ## 4. Compiler error parity
