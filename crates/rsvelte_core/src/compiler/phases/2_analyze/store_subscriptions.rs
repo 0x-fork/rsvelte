@@ -116,7 +116,10 @@ pub fn detect_store_subscriptions(
         // Check for invalid $$ references ($$xxx is illegal)
         // Corresponds to Svelte's L266-269 and L351-352 in 2-analyze/index.js
         // Note: bare $ detection is handled in Identifier visitor via proper AST analysis
-        if ref_name.starts_with("$$") {
+        // Only an UNRESOLVED reference is illegal — upstream reads the module
+        // scope's leftover references, so a `$$x` bound by the template (an
+        // each item, a snippet parameter) never reaches this rule.
+        if ref_name.starts_with("$$") && analysis.root.find_binding_any_scope(ref_name).is_none() {
             return Err(errors::global_reference_invalid(ref_name).at(
                 store_ref.position as u32,
                 (store_ref.position + ref_name.len()) as u32,
