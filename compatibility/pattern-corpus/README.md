@@ -359,6 +359,8 @@ Ids are `pattern/issues/<file>`, `pattern/matrix/<axis>/<file>` and
 | `3322-new-expression-call-callee.svelte` | [#3322](https://github.com/baseballyama/rsvelte/issues/3322) | `{new (getC())()}` — the call sits in the **callee**, not in the arguments, so it is the row that shows both child positions are walked rather than only the argument list |
 | `3322-new-expression-state-argument.svelte` | [#3322](https://github.com/baseballyama/rsvelte/issues/3322) | The control: a reassigned `$state` as the argument, which must STILL be reactive. Without it the fix reads as "a `new` is never reactive" rather than "a `new` contributes nothing of its own" |
 
+| `3582-reserved-word-tag-name.svelte` | [#3582](https://github.com/baseballyama/rsvelte/issues/3582) | An element whose tag name is a JS reserved word: the client named its variable after the tag, so `<var>x</var>` emitted `var var = root();` — 42 of 46 reserved words produced output no JS parser accepts, and the four that did not (`async`, `of`, `get`, `set`) are exactly the four that are not reserved. `Memoizer::generate_id` had three of upstream's four membership tests and not `is_reserved` (`phases/scope.js:728-734`). Carries `<var>` twice so the suffix path runs after the fast path, a `bind:this` host, SVG `<switch>`, and `<async>`/`<get>` as the negative controls that must keep their bare names |
+
 ## `matrix/` — the axes around those repros
 
 A single repro pins one point; the matrices walk the axes it sits on, because
