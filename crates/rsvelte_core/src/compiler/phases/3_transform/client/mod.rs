@@ -4091,6 +4091,32 @@ fn starts_export_specifier(trimmed: &str) -> bool {
     }
 }
 
+/// Everything after a leading `let|const|var <name> = $props.id();` declaration,
+/// or `None` when `trimmed` does not open one. The declaration is dropped here
+/// because the component body emits it as a hoisted `const`.
+///
+/// The initializer is a closed literal, so the declaration's end is read rather
+/// than inferred — nothing here has to answer where a general statement ends.
+fn props_id_declaration_tail(trimmed: &str) -> Option<&str> {
+    let head = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    if !(head.starts_with("let ") || head.starts_with("const ") || head.starts_with("var ")) {
+        return None;
+    }
+    let eq = trimmed.find('=')?;
+    let rhs = trimmed[eq + 1..].trim_start();
+    let mut rest = rhs
+        .strip_prefix("$props.id()")
+        .or_else(|| rhs.strip_prefix("$.props_id()"))?;
+    // Empty statements belong to the declaration's line, not to the tail.
+    loop {
+        rest = rest.trim_start();
+        match rest.strip_prefix(';') {
+            Some(after) => rest = after,
+            None => return Some(rest),
+        }
+    }
+}
+
 /// Clean up an import statement after TypeScript stripping.
 /// Removes empty specifier slots (trailing commas, double commas) that result from
 /// type-only specifier removal. Normalizes `import { A,  , C,  } from 'x'` to
@@ -7765,8 +7791,8 @@ fn transform_instance_script_for_visitors(
     super::profile::record_st_loop_lines(script_lines.len() as u64);
 
     while line_idx < script_lines.len() {
-        let line = script_lines[line_idx];
-        let trimmed = line.trim();
+        let mut line = script_lines[line_idx];
+        let mut trimmed = line.trim();
 
         // Skip empty lines (but preserve them if we're accumulating)
         if trimmed.is_empty() {
