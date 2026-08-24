@@ -5367,6 +5367,17 @@ fn identifier_has_reactive_state(
         }
     }
 
+    // A name assigned after a top-level `await` is written inside the `$.run`
+    // block, so it holds nothing at first render however constant its
+    // initializer is. Upstream models this as `binding.blocker` and keeps the
+    // `template_effect` (with the `$$promises[n]` dependency) rather than
+    // folding the read into a one-shot write.
+    if context.state.blocker_map.borrow().contains_key(name)
+        || context.state.const_blocker_map.borrow().contains_key(name)
+    {
+        return true;
+    }
+
     // Replay Phase 2's scope-correct resolution for this reference.
     // A template declaration (`{@const}` / `{#await}`) that shadows a
     // component-scope binding is invisible to the name-based lookups
