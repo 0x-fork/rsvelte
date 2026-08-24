@@ -1639,12 +1639,14 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             .filter(|elem| keep_empty || !elem.is_empty_stmt())
             .peekable();
         let mut prev: Option<(BodyElem<'_, '_>, bool)> = None;
+        let mut prev_joined = false;
         let mut last_end = None;
         while let Some(elem) = elems.next() {
             let layout_mark = ctx.event_mark();
             let mut has_margin = false;
+            let mut joined = false;
             if let Some((prev_elem, prev_multiline)) = &prev {
-                let joined = prev_elem.is_kept_empty() && elem.is_kept_empty();
+                joined = !prev_joined && prev_elem.is_kept_empty() && elem.is_kept_empty();
                 has_margin = !joined && (*prev_multiline || !elem.same_kind(prev_elem));
                 if has_margin {
                     ctx.margin();
@@ -1653,6 +1655,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                     ctx.newline();
                 }
             }
+            prev_joined = joined;
 
             let scope = ctx.begin_scope();
             comments.flush_until(ctx, elem.span_start(), None, true);
@@ -1723,12 +1726,16 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             })
             .peekable();
         let mut prev: Option<(&Statement<'_>, bool)> = None;
+        let mut prev_joined = false;
         let mut last_end = None;
         while let Some(statement) = statements.next() {
             let layout_mark = ctx.event_mark();
             let mut has_margin = false;
+            let mut joined = false;
             if let Some((prev_statement, prev_multiline)) = prev {
-                let joined = is_kept_empty_stmt(prev_statement) && is_kept_empty_stmt(statement);
+                joined = !prev_joined
+                    && is_kept_empty_stmt(prev_statement)
+                    && is_kept_empty_stmt(statement);
                 has_margin =
                     !joined && (prev_multiline || !same_statement_kind(prev_statement, statement));
                 if has_margin {
@@ -1738,6 +1745,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                     ctx.newline();
                 }
             }
+            prev_joined = joined;
 
             let scope = ctx.begin_scope();
             self.flush_leading(ctx, statement.span().start);
@@ -1785,10 +1793,12 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             .filter(|elem| keep_empty || !elem.is_empty_stmt())
             .peekable();
         let mut prev: Option<(BodyElem<'a, 'b>, bool)> = None;
+        let mut prev_joined = false;
         let mut last_end = None;
         while let Some(elem) = elems.next() {
             let layout_mark = ctx.event_mark();
             let mut has_margin = false;
+            let mut joined = false;
             if let Some((prev_elem, prev_multiline)) = &prev {
                 // The two kept empties of one `;;` hole are a single upstream
                 // statement, so nothing separates them — but two separate holes
@@ -1805,6 +1815,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                     ctx.newline();
                 }
             }
+            prev_joined = joined;
 
             let scope = ctx.begin_scope();
             if HAS_COMMENTS && DIRECT {
