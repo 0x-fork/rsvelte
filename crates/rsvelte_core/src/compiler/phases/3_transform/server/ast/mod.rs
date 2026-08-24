@@ -766,6 +766,27 @@ impl<'a> ServerTransformState<'a> {
         Some(&self.source[start..end])
     }
 
+    /// Visit a template expression that is PRINTED, letting it claim the
+    /// script's trailing comment run: esrap flushes pending comments at the next
+    /// node it finds a location on, and a printed template expression is that
+    /// node. A read `build_getter` replaces wholesale has no location of its own,
+    /// so it is not one.
+    pub fn visit_expr_claiming(&mut self, expr: &Expression) -> OxcExpression<'a> {
+        let mut visited = self.visit_expr(expr);
+        let source = self.expr_source(expr).map(str::to_owned);
+        self.claim_on_visited(source.as_deref(), &mut visited);
+        visited
+    }
+
+    /// [`Self::visit_expr_claiming`] for a caller that built the expression from
+    /// a source slice rather than from a template [`Expression`].
+    pub fn claim_on_visited(&mut self, source: Option<&str>, visited: &mut OxcExpression<'a>) {
+        if source.is_some_and(|src| visitors::shared::read_loses_its_location(self, src)) {
+            return;
+        }
+        self.claim_deferred_tail_comment(visited);
+    }
+
     pub fn visit_expr(&self, expr: &Expression) -> OxcExpression<'a> {
         let mut out = self.visit_expr_raw(expr);
         read_wrap::wrap_reads_with_shadows_and_local_derived(

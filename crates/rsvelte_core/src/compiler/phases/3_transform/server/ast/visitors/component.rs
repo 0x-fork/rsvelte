@@ -128,7 +128,7 @@ pub fn visit_svelte_component<'a>(
     build_inline_component(
         &node.attributes,
         &node.fragment,
-        |s| s.visit_expr(&node.expression),
+        |s| s.visit_expr_claiming(&node.expression),
         true,
         this_src,
         node.start,
@@ -958,7 +958,7 @@ fn visit_spread<'a>(
         let saved = save_wrap_expr_text(state, t);
         return optimiser.transform(state, t, saved);
     }
-    let visited = state.visit_expr(&spread.expression);
+    let visited = state.visit_expr_claiming(&spread.expression);
     if let Some(t) = text.as_deref() {
         return optimiser.transform(state, t, visited);
     }
@@ -1025,7 +1025,7 @@ fn component_attribute_value<'a>(
                             state.defer_template_expression_comments((tag.start + 1, tag.end - 1));
                             continue;
                         }
-                        let visited = state.visit_expr(&tag.expression);
+                        let visited = state.visit_expr_claiming(&tag.expression);
                         let emitted = if evaluation.is_string() && evaluation.is_defined() {
                             visited
                         } else {

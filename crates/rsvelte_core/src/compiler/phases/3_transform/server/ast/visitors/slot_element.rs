@@ -154,7 +154,7 @@ fn visit_spread<'a>(
     spread: &SpreadAttribute,
     state: &mut ServerTransformState<'a>,
 ) -> OxcExpression<'a> {
-    state.visit_expr(&spread.expression)
+    state.visit_expr_claiming(&spread.expression)
 }
 
 /// `build_attribute_value(value, …, is_component = true)` for slot props: raw
@@ -202,7 +202,7 @@ fn slot_attribute_value<'a>(
                             }
                             continue;
                         }
-                        let visited = state.visit_expr(&tag.expression);
+                        let visited = state.visit_expr_claiming(&tag.expression);
                         let emitted = if evaluation.is_string() && evaluation.is_defined() {
                             visited
                         } else {

@@ -1304,7 +1304,7 @@ fn build_element_spread_attributes<'a>(
                 {
                     super::shared::save_wrap_expr_text(state, t)
                 } else {
-                    state.visit_expr(&spread.expression)
+                    state.visit_expr_claiming(&spread.expression)
                 };
                 if let Some(t) = &spread_text {
                     expr = state.optimise_attr_value(t, expr);
@@ -1378,7 +1378,7 @@ fn build_element_spread_attributes<'a>(
         let members = class_directives
             .iter()
             .map(|dir| {
-                let val = state.visit_expr(&dir.expression);
+                let val = state.visit_expr_claiming(&dir.expression);
                 state.b.init(dir.name.as_str(), val)
             })
             .collect();
@@ -1774,7 +1774,7 @@ fn prepare_element_spread_object<'a>(
         match attr {
             Attribute::SpreadAttribute(spread) => {
                 has_spread = true;
-                let expr = state.visit_expr(&spread.expression);
+                let expr = state.visit_expr_claiming(&spread.expression);
                 props.push(state.b.spread(expr));
             }
             Attribute::Attribute(a) => {
@@ -1841,7 +1841,7 @@ fn prepare_element_spread_object<'a>(
         let members = class_directives
             .iter()
             .map(|dir| {
-                let val = state.visit_expr(&dir.expression);
+                let val = state.visit_expr_claiming(&dir.expression);
                 state.b.init(dir.name.as_str(), val)
             })
             .collect();
@@ -2015,7 +2015,7 @@ fn build_attr_class<'a>(
         let members = class_directives
             .iter()
             .map(|dir| {
-                let val = state.visit_expr(&dir.expression);
+                let val = state.visit_expr_claiming(&dir.expression);
                 // QUOTED key (`b.literal(directive.name)`) → string-literal key.
                 state.b.prop(
                     oxc_ast::ast::PropertyKind::Init,
@@ -2182,7 +2182,7 @@ fn build_attribute_value<'a>(
                         }
                         // Live expression: wrap in `$.stringify` unless it is
                         // provably a defined string (`is_string && is_defined`).
-                        let visited = state.visit_expr(&tag.expression);
+                        let visited = state.visit_expr_claiming(&tag.expression);
                         let emitted = if evaluation.is_string() && evaluation.is_defined() {
                             visited
                         } else {
