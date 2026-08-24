@@ -2604,10 +2604,11 @@ impl<'a> Parser<'a> {
             // a *point* error at the byte where acorn stopped consuming
             // input. svelte2tsx's `expected.error.json` fixtures rely on
             // this character-accurate location.
-            let abs_pos = super::super::read::expression::check_js_parse_error_with_pos(trimmed)
-                .map_or(trimmed_offset, |(_, content_pos)| {
-                    trimmed_offset + content_pos
-                });
+            let abs_pos =
+                super::super::read::expression::check_js_parse_error_with_pos(trimmed, self.ts)
+                    .map_or(trimmed_offset, |(_, content_pos)| {
+                        trimmed_offset + content_pos
+                    });
             crate::error::ParseError::svelte("js_parse_error", msg, (abs_pos, abs_pos))
         })
     }
@@ -2677,12 +2678,21 @@ impl<'a> Parser<'a> {
             self.ts,
         )
         .map_err(|(msg, _)| {
+            // `read_attribute_value` is `read_expression` + `eat('}', true)`, so
+            // leftover input after a complete expression is a missing close
+            // token, not a broken expression.
+            if let Some(pos) =
+                super::super::read::expression::trailing_token_offset(trimmed, self.ts)
+            {
+                return crate::error::ParseError::expected_token("}", trimmed_offset + pos);
+            }
             // Recover the precise failure position from OXC's labeled span,
             // mirroring upstream Svelte's `js_parse_error(err.pos, ...)`.
-            let abs_pos = super::super::read::expression::check_js_parse_error_with_pos(trimmed)
-                .map_or(trimmed_offset, |(_, content_pos)| {
-                    trimmed_offset + content_pos
-                });
+            let abs_pos =
+                super::super::read::expression::check_js_parse_error_with_pos(trimmed, self.ts)
+                    .map_or(trimmed_offset, |(_, content_pos)| {
+                        trimmed_offset + content_pos
+                    });
             crate::error::ParseError::svelte("js_parse_error", msg, (abs_pos, abs_pos))
         })
     }
