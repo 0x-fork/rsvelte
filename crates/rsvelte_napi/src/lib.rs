@@ -191,7 +191,13 @@ impl NapiParseOptions {
 )]
 #[napi(js_name = "parse", catch_unwind)]
 pub fn napi_parse(source: String, options: Option<NapiParseOptions>) -> napi::Result<String> {
-    use rsvelte_core::compiler::phases::phase1_parse::{ParseOptions, parse as rust_parse};
+    use rsvelte_core::compiler::phases::phase1_parse::{
+        ParseOptions, parse as rust_parse, remove_bom,
+    };
+
+    // Upstream strips it before the parser (and before the locator), so every
+    // position below has to be relative to the trimmed source too.
+    let source = remove_bom(&source);
 
     if options
         .as_ref()
@@ -282,8 +288,11 @@ pub fn napi_parse_envelope(
     source: String,
     options: Option<NapiParseOptions>,
 ) -> napi::Result<Buffer> {
-    use rsvelte_core::compiler::phases::phase1_parse::{ParseOptions, parse as rust_parse};
+    use rsvelte_core::compiler::phases::phase1_parse::{
+        ParseOptions, parse as rust_parse, remove_bom,
+    };
 
+    let source = remove_bom(&source);
     let parse_options = ParseOptions {
         skip_expression_loc: NapiParseOptions::flag(
             options
@@ -298,7 +307,7 @@ pub fn napi_parse_envelope(
         options.as_ref().and_then(|o| o.skip_css_ast.as_ref()),
         "skipCssAst",
     )?;
-    let ast = rust_parse(&source, &rsvelte_core::Allocator::default(), parse_options)
+    let ast = rust_parse(source, &rsvelte_core::Allocator::default(), parse_options)
         .map_err(|e| napi::Error::from_reason(format!("{e:?}")))?;
     // napi-rs's `Vec<u8> → Buffer` conversion is already zero-copy
     // (V8 adopts the `Vec`'s allocation); a bumpalo-backed variant
@@ -307,7 +316,7 @@ pub fn napi_parse_envelope(
     // `Vec::reserve` calls for envelopes that fit in a single growth
     // step.
     let buf = rsvelte_bindings_support::napi_raw_parse::encode_root_to_vec_with_flags(
-        &ast, &source, skip_loc, skip_css,
+        &ast, source, skip_loc, skip_css,
     );
     Ok(buf.into())
 }
