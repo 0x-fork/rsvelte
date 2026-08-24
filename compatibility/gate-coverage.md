@@ -1043,6 +1043,11 @@ The rest of that class — `runes`, `namespace`, `accessors`, `customElement`,
 does surface in `js.code` and is reachable. Cost is not the constraint: an option axis compiles
 exactly like a shape axis. **[S]**
 
+**[D]** #3384: the `compiler-option` family now declares 15 of them as an axis, so the
+*reachable* half of this row is closed — see 5r for what the family itself cannot see, which is
+not the same list. The vacuous half stands unchanged: `modernAst` is still expressible and still
+inert here, and `skipCssAst` is still an option of a function this harness never calls.
+
 ### Blind spot 5k — comments are observable HERE and nowhere else, and only inside `<script>`
 
 This gate compares oxfmt-normalized `js.code` **as text** (`run.mjs:260-262`, verdict

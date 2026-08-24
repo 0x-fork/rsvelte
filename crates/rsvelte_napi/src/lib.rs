@@ -1168,6 +1168,10 @@ pub struct NapiCompileOptions {
     /// it silently hands the caller a different scope class than it asked for.
     /// `compileWithCssHash` is the entry that honours it.
     pub css_hash: Option<LenientScalar>,
+    /// Upstream's `warningFilter` callback. Declared only to be *rejected*: an
+    /// unknown field is dropped in silence, and a build configured to be
+    /// warning-clean would then not be.
+    pub warning_filter: Option<LenientScalar>,
     /// Pre-computed deterministic hash for the test harness (the JS
     /// `cssHash` callback can't be called from Rust).
     pub css_hash_override: Option<String>,
@@ -1302,7 +1306,11 @@ impl NapiCompileOptions {
         }
         if let Some(v) = &self.accessors {
             opts.accessors = coerce_bool("accessors", v)?;
-            opts.legacy_options.accessors = true;
+            // Upstream reaches this one through `deprecate()`, which is `warn_once`
+            // like the removed options below — not once per compile.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            opts.legacy_options.accessors = warn_once(&WARNED);
         }
         if let Some(v) = &self.css_hash {
             return Err(match v {
@@ -1320,7 +1328,9 @@ impl NapiCompileOptions {
         }
         if let Some(v) = &self.immutable {
             opts.immutable = coerce_bool("immutable", v)?;
-            opts.legacy_options.immutable = true;
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            opts.legacy_options.immutable = warn_once(&WARNED);
         }
         if self.legacy.is_some() {
             return Err(removed_option(
@@ -1357,6 +1367,12 @@ impl NapiCompileOptions {
             opts.preserve_whitespace = coerce_bool("preserveWhitespace", v)?;
         }
         if let Some(v) = &self.runes {
+            // Upstream's `parametric` keeps the function and calls it with
+            // `{ filename }`; this boundary cannot, and auto-detecting instead
+            // compiles a file the caller asked to be runes as legacy.
+            if matches!(v, LenientScalar::Function) {
+                return Err(invalid_option(RESOLVE_IN_JS.replace("{}", "runes")));
+            }
             opts.runes = coerce_runes(v);
         }
         if let Some(v) = &self.hmr {
