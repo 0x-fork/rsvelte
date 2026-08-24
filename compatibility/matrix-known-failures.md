@@ -28,10 +28,13 @@ Normalization here is identical to `verify.mjs` (flatten template holes → oxfm
 blank lines), so formatting-only differences are tolerated exactly as the corpus gate
 tolerates them. An entry is a divergence that survives that.
 
-The **verdict is part of the key**, and three of them can appear: `js-mismatch` (the
+The **verdict is part of the key**, and these can appear: `js-mismatch` (the
 difference survives comment + whitespace normalization), `comment-mismatch` (it does not),
-and `output-unparseable` (acorn rejects what rsvelte emitted, whatever the bytes say).
-None of the three is more tolerated than another — every one is ratcheted two-sided. The
+`output-unparseable` (acorn rejects what rsvelte emitted, whatever the bytes say),
+`warning-missing:<code>` / `warning-extra:<code>`, `over-accept` (rsvelte compiles a
+program official rejects) and `over-reject` (the reverse), and
+`error-code-mismatch:<official>-vs-<rsvelte>` (both reject, with different codes).
+None of them is more tolerated than another — every one is ratcheted two-sided. The
 split exists because a listed entry suppresses everything its key cannot tell apart: under
 one flat `js-mismatch`, an id whose comments already diverge absorbs a later code
 regression on that id for free. That is not hypothetical — when the split was added, every
