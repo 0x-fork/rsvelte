@@ -3581,14 +3581,14 @@ mod feature_walk_gate_tests {
     }
 }
 
-/// Collect `$`-prefixed identifier names from a function-parameter *pattern*
+/// Collect `$`-prefixed identifier names DECLARED by a binding *pattern*
 /// (typed `JsNode` form) into `out`. Default values (`AssignmentPattern.right`)
 /// are expressions, not declarations, so they are not collected.
 ///
 /// Used for shadow-aware rune detection: upstream determines runes mode from
-/// `module.scope.references` — a reference that resolves to a function
-/// parameter (e.g. `function bar($derived) { $derived(...) }`) never reaches
-/// the module scope and therefore never flips runes mode on.
+/// `module.scope.references` — a reference that resolves to a local binding
+/// (e.g. `function bar($derived) { $derived(...) }`) never reaches the module
+/// scope and therefore never flips runes mode on.
 fn collect_dollar_param_names(node: &JsNode, arena: &ParseArena, out: &mut Vec<String>) {
     match node {
         JsNode::Identifier { name, .. } if name.starts_with('$') => {
@@ -4127,7 +4127,105 @@ fn for_each_js_reference_child(node: &JsNode, arena: &ParseArena, f: &mut impl F
                 f(arena.get_js_node(*value));
             }
         }
+        // A `break`/`continue` target names a statement label, not a binding.
+        JsNode::BreakStatement { .. } | JsNode::ContinueStatement { .. } => {}
+        JsNode::VariableDeclarator { id, init, .. } => {
+            for_each_pattern_reference_child(arena.get_js_node(*id), arena, f);
+            if let Some(init) = init {
+                f(arena.get_js_node(*init));
+            }
+        }
+        JsNode::FunctionDeclaration { params, body, .. }
+        | JsNode::FunctionExpression { params, body, .. } => {
+            for param in arena.get_js_children(*params) {
+                for_each_pattern_reference_child(param, arena, f);
+            }
+            if let Some(body) = body {
+                f(arena.get_js_node(*body));
+            }
+        }
+        JsNode::ArrowFunctionExpression { params, body, .. } => {
+            for param in arena.get_js_children(*params) {
+                for_each_pattern_reference_child(param, arena, f);
+            }
+            f(arena.get_js_node(*body));
+        }
+        JsNode::ClassDeclaration {
+            super_class,
+            body,
+            decorators,
+            ..
+        } => {
+            if let Some(super_class) = super_class {
+                f(arena.get_js_node(*super_class));
+            }
+            for decorator in arena.get_js_children(*decorators) {
+                f(decorator);
+            }
+            f(arena.get_js_node(*body));
+        }
+        JsNode::ClassExpression {
+            super_class, body, ..
+        } => {
+            if let Some(super_class) = super_class {
+                f(arena.get_js_node(*super_class));
+            }
+            f(arena.get_js_node(*body));
+        }
+        JsNode::CatchClause { body, .. } => f(arena.get_js_node(*body)),
+        // Every identifier an import or an export specifier carries is a
+        // declared or an exported name; the rest of the node is literals.
+        JsNode::ImportDeclaration { .. } | JsNode::ExportSpecifier { .. } => {}
         _ => for_each_js_child(node, arena, f),
+    }
+}
+
+/// Call `f` for the *expression* children of a binding pattern — a default
+/// value and a computed key. The names the pattern declares are bindings, not
+/// references, so they are not passed on.
+fn for_each_pattern_reference_child(
+    node: &JsNode,
+    arena: &ParseArena,
+    f: &mut impl FnMut(&JsNode),
+) {
+    match node {
+        JsNode::Identifier { .. } => {}
+        JsNode::ObjectPattern { properties, .. } => {
+            for prop in arena.get_js_children(*properties) {
+                match prop {
+                    JsNode::Property {
+                        key,
+                        value,
+                        computed,
+                        ..
+                    } => {
+                        if *computed {
+                            f(arena.get_js_node(*key));
+                        }
+                        for_each_pattern_reference_child(arena.get_js_node(*value), arena, f);
+                    }
+                    JsNode::RestElement { argument, .. }
+                    | JsNode::SpreadElement { argument, .. } => {
+                        for_each_pattern_reference_child(arena.get_js_node(*argument), arena, f);
+                    }
+                    other => f(other),
+                }
+            }
+        }
+        JsNode::ArrayPattern { elements, .. } => {
+            for elem in elements.iter().flatten() {
+                for_each_pattern_reference_child(elem, arena, f);
+            }
+        }
+        JsNode::RestElement { argument, .. } | JsNode::SpreadElement { argument, .. } => {
+            for_each_pattern_reference_child(arena.get_js_node(*argument), arena, f);
+        }
+        JsNode::AssignmentPattern { left, right, .. } => {
+            for_each_pattern_reference_child(arena.get_js_node(*left), arena, f);
+            f(arena.get_js_node(*right));
+        }
+        // A member expression as a destructuring target (`[o.x] = …`) reads `o`.
+        other => f(other),
     }
 }
 

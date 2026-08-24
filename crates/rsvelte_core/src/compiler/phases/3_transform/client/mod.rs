@@ -4668,6 +4668,17 @@ pub(crate) fn transform_module_script_runes(
 
 /// `pre_class_script` is the script before the class-field lowering — the dev
 /// `$.tag` label needs the name the user wrote, which the lowering erases.
+/// Whether this module declares a rune-spelled name at all — the cheap
+/// precondition for [`rune_shadow::RuneShadows`]: with no such declaration no
+/// call can resolve to one, so nothing needs a scope pass.
+fn module_binds_rune_name(analysis: &ComponentAnalysis) -> bool {
+    analysis
+        .root
+        .bindings
+        .iter()
+        .any(|b| rune_shadow::is_rune_name(&b.name))
+}
+
 fn transform_module_script_runes_with_target(
     script: &str,
     pre_class_script: &str,
@@ -4679,6 +4690,10 @@ fn transform_module_script_runes_with_target(
     module_entry: bool,
 ) -> String {
     let mut result = script.to_string();
+    let mut shadows = rune_shadow::RuneShadows::new(
+        module_binds_rune_name(analysis),
+        analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts"),
+    );
 
     // Strip TypeScript generic parameters from $state<...>() and $derived<...>() calls.
     // These are type-only annotations that have no runtime meaning.
@@ -4949,6 +4964,10 @@ fn transform_module_script_runes_with_target(
         if pos + 7 < result.len() && result.as_bytes()[pos + 6] != b'(' {
             break;
         }
+        if shadows.is_bound(&result, pos) {
+            state_from = pos + 1;
+            continue;
+        }
 
         let var_name = extract_var_name_before_rune(&result[..pos]);
 
@@ -5030,7 +5049,9 @@ fn transform_module_script_runes_with_target(
     // expression positions and can't make that mistake.
     {
         let is_ts = analysis.filename.ends_with(".ts") || analysis.filename.ends_with(".svelte.ts");
-        if let Some(rewritten) = derived_by_ast::transform_derived_by_ast(&result, is_ts) {
+        if let Some(rewritten) =
+            derived_by_ast::transform_derived_by_ast(&result, is_ts, shadows.enabled())
+        {
             result = rewritten;
         }
     }
@@ -5077,6 +5098,10 @@ fn transform_module_script_runes_with_target(
         if result[..pos].ends_with('$') {
             // Already transformed to $.derived() - skip
             break;
+        }
+        if shadows.is_bound(&result, pos) {
+            derived_from = pos + 1;
+            continue;
         }
         let derived_start = pos + 9; // after "$derived("
         if let Some(content_end) = find_matching_paren(&result[derived_start..]) {
