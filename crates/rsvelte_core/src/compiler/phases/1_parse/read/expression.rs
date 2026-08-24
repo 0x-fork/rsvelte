@@ -7482,6 +7482,7 @@ fn convert_parsed_program<'ast>(
                 content,
                 offset: offset as u32,
                 map: &mut ignore_comment_map,
+                captured: capture_comments.then(std::collections::HashMap::default),
             };
             let last_index = program.body.len().saturating_sub(1);
 
@@ -7505,6 +7506,19 @@ fn convert_parsed_program<'ast>(
                 }
             }
             claimed = attacher.next;
+
+            claimed = attacher.next;
+            if let Some(captured) = attacher.captured.take() {
+                for ((node_type, start, end), (leading, trailing)) in captured {
+                    arena.record_node_comments(
+                        &node_type,
+                        start,
+                        end,
+                        (!leading.is_empty()).then_some(leading),
+                        (!trailing.is_empty()).then_some(trailing),
+                    );
+                }
+            }
 
             body_nodes
         } else {
@@ -7618,10 +7632,12 @@ fn build_comment_value(comment: &oxc_ast::ast::Comment, content: &str, offset: u
 }
 
 /// A pre-computed comment entry: absolute start offset plus the comment text with
-/// its `//` / `/* */` delimiters stripped.
+/// its `//` / `/* */` delimiters stripped, and the ESTree object upstream's
+/// `add_comments` hands to a node (`{ type, value, start, end }`, no `loc`).
 struct CommentEntry {
     start: u32,
     text: CompactString,
+    value: Value,
 }
 
 /// What the walk needs to know about a node's parent to decide trailing-comment
@@ -7653,6 +7669,13 @@ struct CommentAttacher<'a> {
     content: &'a str,
     offset: u32,
     map: &'a mut Vec<(u32, Vec<CompactString>)>,
+    /// `Some` on the public `parse()` path only: `(type, start, end) ->
+    /// (leadingComments, trailingComments)`, flushed into the arena's comment
+    /// side table so `JsNode`'s `Serialize` impl emits them. The compile path
+    /// leaves it `None` — codegen re-parses script text, so materialising them
+    /// there would cost every component and change no output.
+    captured:
+        Option<std::collections::HashMap<(CompactString, u32, u32), (Vec<Value>, Vec<Value>)>>,
 }
 
 impl CommentAttacher<'_> {
@@ -7662,6 +7685,7 @@ impl CommentAttacher<'_> {
         };
         let start = obj.get("start").and_then(|v| v.as_u64()).map(|v| v as u32);
         let end = obj.get("end").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let node_type = obj.get("type").and_then(|t| t.as_str());
 
         let mut leading: Option<Vec<Value>> = None;
         if let Some(start) = start {
@@ -7679,7 +7703,7 @@ impl CommentAttacher<'_> {
         }
 
         // Only these parents let their last child swallow the comments that follow it.
-        let last_body_field = match obj.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        let last_body_field = match node_type.unwrap_or("") {
             "Program" | "BlockStatement" => Some("body"),
             "ArrayExpression" => Some("elements"),
             "ObjectExpression" => Some("properties"),
@@ -7766,9 +7790,9 @@ impl CommentAttacher<'_> {
                 }
                 self.next += 1;
             }
-        } else if let Some(end) = end
-            && end <= comment.start
-            && self.is_separator_slice(end, comment.start)
+        } else if let Some(node_end) = end
+            && node_end <= comment.start
+            && self.is_separator_slice(node_end, comment.start)
         {
             if let Some(value) = self.arena.and(self.values.get(self.next)) {
                 claimed = Some(vec![value.clone()]);
@@ -7787,7 +7811,14 @@ impl CommentAttacher<'_> {
             .is_some_and(|slice| slice.chars().all(|c| matches!(c, ',' | ')' | ' ' | '\t')))
     }
 
-    fn record_leading(&mut self, start: u32, index: usize) {
+    fn record_leading(
+        &mut self,
+        node_type: Option<&str>,
+        start: u32,
+        end: Option<u32>,
+        index: usize,
+    ) {
+        self.capture(node_type, Some(start), end, index, true);
         let text = self.comments[index].text.clone();
         if !text.trim_start_ws().starts_with("svelte-ignore") {
             return;
