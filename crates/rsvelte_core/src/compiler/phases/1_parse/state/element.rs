@@ -1153,7 +1153,15 @@ impl<'a> Parser<'a> {
             {
                 break;
             }
-            if b == b'<' && self.index + 1 < self.bytes.len() && self.bytes[self.index + 1] == b'/'
+            // Upstream reads `<` as an attribute NAME (`regex_token_ending_character`
+            // does not list it) and only unwinds it afterwards, in loose mode, when
+            // the `>` never arrived — so stopping here is the loose recovery, not the
+            // strict one, and doing it in strict mode reports `expected_token` at the
+            // `<` instead of past the name upstream consumed.
+            if self.options.loose
+                && b == b'<'
+                && self.index + 1 < self.bytes.len()
+                && self.bytes[self.index + 1] == b'/'
             {
                 break;
             }
