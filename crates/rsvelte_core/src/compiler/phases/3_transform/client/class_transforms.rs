@@ -2528,7 +2528,7 @@ pub(super) fn transform_constructor_assignment(
         for field in fields {
             if field.is_private {
                 // Handle logical assignment operators: ||=, &&=, ??=
-                // this.#a ||= {val: 0} -> $.set(this.#a, this.#a.v || { val: 0 }, true);
+                // this.#a ||= {val: 0} -> this.#a.v || $.set(this.#a, { val: 0 }, true);
                 let logical_ops = [("||=", "||"), ("&&=", "&&"), ("??=", "??")];
                 for (assign_op, binary_op) in logical_ops {
                     let pattern = format!("this.#{} {}", field.name, assign_op);

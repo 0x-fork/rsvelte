@@ -47,6 +47,27 @@ fn has_non_css_lang<'a>(attributes: &[crate::ast::Attribute<'a>]) -> bool {
 // Public API
 // ============================================================================
 
+/// Where the `<an+b> of <selector>` keyword ends inside an `:nth-*()` argument.
+///
+/// The space after `of` is optional when the selector begins with a token that
+/// already ends the identifier, which is what minifiers emit.
+fn find_nth_of_split(trimmed: &str) -> Option<usize> {
+    let bytes = trimmed.as_bytes();
+    let mut from = 0;
+
+    while let Some(rel) = memmem::find(&bytes[from..], b" of") {
+        let at = from + rel;
+        match bytes.get(at + 3) {
+            Some(b' ') => return Some(at + 4),
+            Some(b'.' | b'#' | b'[' | b'*' | b':' | b'&') => return Some(at + 3),
+            _ => {}
+        }
+        from = at + 1;
+    }
+
+    None
+}
+
 /// Parse CSS content and return the children array for StyleSheet.
 pub fn parse_css(content: &str, offset: usize) -> Vec<Value> {
     let mut parser = CssParser::new(content, offset);
@@ -2765,37 +2786,30 @@ impl<'a> SelectorParser<'a> {
                 );
                 rel_sel.insert("end".to_string(), Value::Number((actual_end as i64).into()));
 
-                // Wrap in ComplexSelector
-                let mut complex_sel = Map::new();
-                complex_sel.insert(
-                    "type".to_string(),
-                    Value::String("ComplexSelector".to_string()),
-                );
-                complex_sel.insert(
-                    "start".to_string(),
-                    Value::Number((nth_start as i64).into()),
-                );
-                complex_sel.insert("end".to_string(), Value::Number((actual_end as i64).into()));
-                complex_sel.insert(
-                    "children".to_string(),
-                    Value::Array(vec![Value::Object(rel_sel)]),
-                );
+                    let mut complex_sel = Map::new();
+                    complex_sel.insert(
+                        "type".to_string(),
+                        Value::String("ComplexSelector".to_string()),
+                    );
+                    complex_sel.insert("start".to_string(), nth_start_value.clone());
+                    complex_sel
+                        .insert("end".to_string(), Value::Number((actual_end as i64).into()));
+                    complex_sel.insert(
+                        "children".to_string(),
+                        Value::Array(vec![Value::Object(rel_sel)]),
+                    );
 
-                // Wrap in SelectorList
-                let mut sel_list = Map::new();
-                sel_list.insert(
-                    "type".to_string(),
-                    Value::String("SelectorList".to_string()),
-                );
-                sel_list.insert(
-                    "start".to_string(),
-                    Value::Number((nth_start as i64).into()),
-                );
-                sel_list.insert("end".to_string(), Value::Number((actual_end as i64).into()));
-                sel_list.insert(
-                    "children".to_string(),
-                    Value::Array(vec![Value::Object(complex_sel)]),
-                );
+                    let mut sel_list = Map::new();
+                    sel_list.insert(
+                        "type".to_string(),
+                        Value::String("SelectorList".to_string()),
+                    );
+                    sel_list.insert("start".to_string(), nth_start_value);
+                    sel_list.insert("end".to_string(), Value::Number((actual_end as i64).into()));
+                    sel_list.insert(
+                        "children".to_string(),
+                        Value::Array(vec![Value::Object(complex_sel)]),
+                    );
 
                 Some(of_list.unwrap_or(Value::Object(sel_list)))
             } else {
@@ -3568,6 +3582,10 @@ impl<'a> SelectorParser<'a> {
     /// reads with the same `read_identifier` — so an empty one is an error.
     fn read_namespaced_local_name(&mut self) -> Option<String> {
         let pos = self.offset + self.index;
+        if self.current_char() == '*' {
+            self.advance();
+            return Some("*".to_string());
+        }
         let local = self.read_identifier();
         if local.is_empty() {
             record_first_error(

@@ -121,6 +121,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 27 | LSP differential parity | normalized JSON response field per request against the pinned official server and selected upstream snapshots | **every server notification**; incremental edit and resolve sequences; **inside a corpus `(file, method)`, everything but the divergent-request count** | [S] [D] |
 | 39 | svelte2tsx option axis | full TSX text per (option variant x source) against the official tool, options carried in the fixture | option values outside its grid (`rewriteExternalImports`, `runes`, most `namespace` x `mode` products); `emitDts`; the map, `exportedNames` and `events` | [S] [D] |
 | 38 | NAPI `cssHash` | the scope class the callback produces, and the callback's own argument list, against **official** | one component shape and one option set; only `css.code` / the class in `js.code`; nothing about the wasm or facade ports of the same option | [S] |
+| 39 | Print fixture suite (`tests/print.rs`) | per-sample printed Svelte text vs upstream's `output.svelte` | it compares the text, not **which code produced it** — a source-text shortcut around the whole AST printer was invisible for 43 of 43 samples | [D] |
 
 Cross-cutting blind spots (**ratchet keys losing in both directions**, path filters, ratchet-doc
 drift, vacuity floors, the **performance**
