@@ -523,6 +523,7 @@ pub(crate) fn transform_client(
         preserve_comments: options.preserve_comments,
         experimental_async: options.experimental.r#async,
         hmr: options.hmr,
+        source: source.into(),
     });
 
     // Create the component client transform state

@@ -1722,6 +1722,17 @@ pub fn apply_transforms_to_expression_with_shadowed(
             );
             JsExpr::Spanned(context.arena.alloc_expr(transformed), *start, *end)
         }
+
+        JsExpr::SourceAnchored(anchor) => {
+            let transformed = apply_transforms_to_expression_with_shadowed(
+                context.arena.get_expr(anchor.inner),
+                context,
+                local_scope,
+            );
+            let mut anchor = anchor.clone();
+            anchor.inner = context.arena.alloc_expr(transformed);
+            JsExpr::SourceAnchored(anchor)
+        }
     }
 }
 
@@ -3127,6 +3138,14 @@ fn collect_reactive_references_inner(
         | JsExpr::ImportExpression { .. }
         | JsExpr::Chain(_)
         | JsExpr::Void(_) => {}
+        JsExpr::SourceAnchored(anchor) => {
+            collect_reactive_references_inner(
+                context.arena.get_expr(anchor.inner),
+                context,
+                getters,
+                seen,
+            );
+        }
         JsExpr::Spanned(inner, _, _) => {
             collect_reactive_references_inner(
                 context.arena.get_expr(*inner),

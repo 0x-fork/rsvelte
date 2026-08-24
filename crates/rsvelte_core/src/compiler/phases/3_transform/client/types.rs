@@ -1574,6 +1574,11 @@ pub struct TransformOptions {
 
     /// Whether HMR (Hot Module Replacement) is enabled.
     pub hmr: bool,
+
+    /// The component source. Upstream prints the whole client output against
+    /// one comment cursor over this text, so a template comment's landing spot
+    /// is decided by source line and column — see [`JsSourceAnchor`].
+    pub source: std::rc::Rc<str>,
 }
 
 impl Default for TransformOptions {
@@ -1585,6 +1590,7 @@ impl Default for TransformOptions {
             preserve_comments: false,
             experimental_async: false,
             hmr: false,
+            source: "".into(),
         }
     }
 }
