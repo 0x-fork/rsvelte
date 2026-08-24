@@ -2960,6 +2960,71 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The diagnostic upstream produces for a broken `{#await …}` head starting at
+/// `start`. Upstream reads one acorn expression from there, so it can consume
+/// the `then` / `catch` keyword the template scan stops at (`{#await 1 + then v}`
+/// parses as `1 + then`, leaving `v` where the `}` was expected) — the
+/// classification therefore has to run against the whole head, not the slice.
+pub(crate) fn await_head_parse_error(
+    source: &str,
+    start: usize,
+    message: String,
+) -> crate::error::ParseError {
+    use super::super::read::expression::{check_js_parse_error_with_pos, trailing_close_offset};
+
+    let end = find_matching_bracket(source, start, '{').unwrap_or(source.len());
+    let head = source[start..end].trim_end_ws();
+    if let Some(pos) = trailing_close_offset(head) {
+        return crate::error::ParseError::expected_token("}", start + pos);
+    }
+    let (message, pos) =
+        check_js_parse_error_with_pos(head).unwrap_or((message, head.trim_end_ws().len()));
+    let at = start + pos;
+    crate::error::ParseError::svelte("js_parse_error", message, (at, at))
+}
+
+/// Byte offset just past the binding pattern at the start of `content` and the
+/// whitespace after it — where upstream's `read_pattern` + `allow_whitespace`
+/// leave the parser, and so where a missing `=` is reported.
+fn pattern_extent(content: &str) -> usize {
+    let bytes = content.as_bytes();
+    let mut i = content.len() - content.trim_start_ws().len();
+    match bytes.get(i) {
+        Some(&open @ (b'{' | b'[')) => {
+            let close = if open == b'{' { b'}' } else { b']' };
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                let c = bytes[i];
+                i += 1;
+                if c == open {
+                    depth += 1;
+                } else if c == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {
+            while let Some(c) = content[i..].chars().next() {
+                if c.is_alphanumeric() || c == '_' || c == '$' {
+                    i += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    let rest = content[i..].trim_start_ws();
+    // A TypeScript annotation is part of the pattern, and with no `=` in the
+    // tag at all it runs to the end.
+    if rest.starts_with(':') {
+        return content.len();
+    }
+    content.len() - rest.len()
+}
+
 /// Whether `s` contains a `//` or `/*` comment opener. A `/` inside a string or
 /// regex can produce a false positive, which only costs an eager parse.
 fn contains_js_comment(s: &str) -> bool {

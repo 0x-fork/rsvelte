@@ -1571,6 +1571,36 @@ impl<'a> Parser<'a> {
         })))
     }
 
+    /// Consume an attribute's value and discard it, propagating any error it
+    /// raises. Upstream reads the value before rejecting a nameless directive,
+    /// so the value's own diagnostic has to win.
+    fn read_attribute_value_for_error(&mut self) -> ParseResult<()> {
+        if self.eat_optional("=") {
+            self.skip_whitespace();
+            let mut value = self.parse_attribute_value()?;
+            // The value is thrown away, so a deferred expression inside it would
+            // never reach `resolve_lazy_expressions` — resolve it here.
+            let mut deferred = None;
+            super::super::resolve_lazy::resolve_attribute_value(
+                &self.arena,
+                &mut value,
+                self.expression_line_offsets(),
+                self.source,
+                &mut deferred,
+            );
+            if let Some(err) = deferred {
+                return Err(err);
+            }
+        } else if !self.is_eof() && (self.current_char() == '"' || self.current_char() == '\'') {
+            return Err(crate::error::ParseError::svelte(
+                "expected_token",
+                "Expected token =\nhttps://svelte.dev/e/expected_token",
+                (self.index, self.index),
+            ));
+        }
+        Ok(())
+    }
+
     /// Parse an on: directive (event handler).
     pub fn parse_on_directive(
         &mut self,
@@ -2270,22 +2300,10 @@ impl<'a> Parser<'a> {
                 // comments (// and /* */), and regex expressions.
                 // The simple depth-tracking approach fails when JS comments
                 // contain quote characters (e.g., `don't` in a // comment).
-                if let Some(close_pos) =
-                    crate::compiler::phases::phase1_parse::utils::find_matching_bracket(
-                        self.source,
-                        expr_start + 1,
-                        '{',
-                    )
-                {
-                    self.index = close_pos + 1;
-                } else {
+                let close_pos = self.attribute_expression_close(expr_start + 1).inspect_err(|_| {
                     self.index = self.source.len();
-                    return Err(crate::error::ParseError::svelte(
-                        "expected_token",
-                        "Expected token }",
-                        (self.index, self.index),
-                    ));
-                }
+                })?;
+                self.index = close_pos + 1;
 
                 let expr_end = self.index;
 

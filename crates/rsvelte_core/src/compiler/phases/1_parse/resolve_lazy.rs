@@ -371,7 +371,7 @@ fn resolve_attributes(
     }
 }
 
-fn resolve_attribute_value(
+pub(crate) fn resolve_attribute_value(
     arena: &ParseArena,
     value: &mut AttributeValue,
     line_offsets: &[usize],
@@ -471,6 +471,7 @@ fn lazy_parse_error(
 ) -> Option<crate::error::ParseError> {
     let close = match kind {
         LazyKind::Lenient => return None,
+        LazyKind::AwaitHead => super::state::tag::await_head_parse_error(source, start, msg),
         // Upstream's `read_expression` parses ONE maximal expression with acorn
         // and then `eat('}', true)`: a complete leading expression followed by
         // leftover tokens (e.g. `{foo();}` — the `;` is left over) surfaces as
