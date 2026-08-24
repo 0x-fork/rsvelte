@@ -336,7 +336,7 @@ impl<'a> ServerTransformState<'a> {
             attr_optimiser: None,
             shadowed_names: Vec::new(),
             slot_let_shadows: Vec::new(),
-            current_scope_index: analysis.root.instance_scope_index,
+            current_scope_index: analysis.root.root_fragment_scope_index,
             comments: comments::ChunkRegistry::default(),
             pending_tail_comments: Vec::new(),
             reparse_failure: std::cell::RefCell::new(None),
