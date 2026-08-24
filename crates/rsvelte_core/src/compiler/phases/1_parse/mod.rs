@@ -239,6 +239,8 @@ pub fn parse_module_to_estree(source: &str, is_typescript: bool) -> serde_json::
                 offset: 0,
                 line_offsets: &line_offsets,
                 is_typescript,
+                // A `.svelte.(js|ts)` module, not a component <script>.
+                is_script: false,
                 leading_comments: &[],
                 script_tag_start: 0,
                 script_tag_end: source.len(),
@@ -263,6 +265,8 @@ pub fn ts_snippet_is_valid(source: &str, is_typescript: bool) -> bool {
                 offset: 0,
                 line_offsets: &line_offsets,
                 is_typescript,
+                // A synthesized type-alias snippet, which cannot export.
+                is_script: false,
                 leading_comments: &[],
                 script_tag_start: 0,
                 script_tag_end: source.len(),
