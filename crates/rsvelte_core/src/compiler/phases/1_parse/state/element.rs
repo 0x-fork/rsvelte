@@ -723,6 +723,23 @@ impl<'a> Parser<'a> {
                 fragment,
             }),
             ElementType::SvelteComponent => {
+                // element.js L273-276: a `this` that is not a single
+                // `{expression}` is rejected at parse time, before analysis
+                // ever looks at the node.
+                if let Some(definition) = attributes.iter().find_map(|attr| match attr {
+                    crate::ast::Attribute::Attribute(node) if node.name.as_str() == "this" => {
+                        Some(node)
+                    }
+                    _ => None,
+                }) && !Self::is_expression_attribute(definition)
+                {
+                    return Err(crate::error::ParseError::svelte(
+                        "svelte_component_invalid_this",
+                        "Invalid component definition — must be an `{expression}`\nhttps://svelte.dev/e/svelte_component_invalid_this",
+                        (definition.start as usize, definition.start as usize),
+                    ));
+                }
+
                 // Extract the "this" attribute to get the expression
                 let expression = self.extract_this_attribute(&attributes);
 
@@ -821,6 +838,18 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Some(node))
+    }
+
+    /// Mirrors `utils/ast.js` `is_expression_attribute`: the value is a single
+    /// `{expression}`, either bare or as the sole chunk of a quoted value.
+    fn is_expression_attribute(node: &crate::ast::template::AttributeNode<'a>) -> bool {
+        match &node.value {
+            AttributeValue::Expression(_) => true,
+            AttributeValue::Sequence(parts) => {
+                parts.len() == 1 && matches!(&parts[0], AttributeValuePart::ExpressionTag(_))
+            }
+            AttributeValue::True(_) => false,
+        }
     }
 
     /// Extract the "this" attribute from a svelte:element to get the tag expression.

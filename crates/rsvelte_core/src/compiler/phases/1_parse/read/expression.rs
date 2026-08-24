@@ -1792,6 +1792,23 @@ pub fn check_js_parse_error_with_pos(content: &str) -> Option<(String, usize)> {
             let parser = OxcParser::new(allocator, &wrapped, source_type);
             let result = parser.parse();
             if let Some(first_error) = result.diagnostics.first() {
+                // Acorn raises the shorthand-assignment error at the `=` token,
+                // while OXC labels the whole `a = 1` property.
+                if first_error.message.as_ref() == "Invalid assignment in object literal"
+                    && let Some(label) = first_error.labels.first()
+                {
+                    let label_start = label.offset() as usize;
+                    let label_end = label_start + label.len() as usize;
+                    if let Some(slice) = wrapped.get(label_start..label_end)
+                        && let Some(eq) = shorthand_assign_offset(slice)
+                    {
+                        return Some((
+                            "Shorthand property assignments are valid only in destructuring patterns"
+                                .to_string(),
+                            (label_start + eq).saturating_sub(1).min(content.len()),
+                        ));
+                    }
+                }
                 // Acorn raises "Assigning to rvalue" at the target's start, not
                 // where it stopped consuming, so this one label reads left.
                 let at_label_start = matches!(
