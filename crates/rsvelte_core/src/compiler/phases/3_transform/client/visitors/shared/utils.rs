@@ -6837,22 +6837,12 @@ fn is_initial_value_literal_or_known(initial: &Option<String>) -> bool {
     false
 }
 
-/// Check if a JSON expression is "known" (can be evaluated at compile time).
-///
-/// This approximates the official Svelte compiler's `scope.evaluate().is_known` check.
-/// An expression is "known" if it evaluates to exactly one concrete value at compile time.
-///
-/// Key differences from `has_reactive_state_json`:
-/// - `has_reactive_state_json` checks if identifiers reference reactive bindings
-/// - `is_expression_known_json` checks if the expression can be compile-time evaluated
-///   (e.g., function calls to local functions are UNKNOWN even if the callee is non-reactive)
-fn is_expression_known_json(json_value: &serde_json::Value, context: &ComponentContext) -> bool {
-    let Some(obj) = json_value.as_object() else {
-        return false;
-    };
-    let Some(expr_type) = obj.get("type").and_then(|v| v.as_str()) else {
-        return false;
-    };
+/// `EvalScope` for the client transform: the same `scope.evaluate` walk the
+/// server runs, with Phase 2's reference-position resolution in place of the
+/// server's scope-index chain.
+struct ClientEvalScope<'a, 'b> {
+    context: &'a ComponentContext<'b>,
+}
 
     match expr_type {
         "Literal" => true,
@@ -7114,6 +7104,43 @@ fn is_expression_known_json(json_value: &serde_json::Value, context: &ComponentC
         // Default: not known
         _ => false,
     }
+
+    fn evaluate_identifier(&self, node: &serde_json::Value, name: &str, depth: u8) -> Evaluation {
+        // An enclosing `{#each … as item, index}` shadows any outer binding of
+        // the same name, and the loop scope is not on `state.scope`.
+        for c in self.context.state.each_binding_context.iter().rev() {
+            if c.item_name == name {
+                return Evaluation::unknown();
+            }
+            if !c.index_name.is_empty() && c.index_name == name {
+                return Evaluation::single(EvalValue::NumberMarker);
+            }
+        }
+        let binding = node
+            .get("start")
+            .and_then(|v| v.as_u64())
+            .and_then(|start| {
+                self.context
+                    .state
+                    .scope_root
+                    .binding_at_reference(name, start as u32)
+            })
+            .or_else(|| self.context.state.get_binding(name));
+        match binding {
+            Some(b) => evaluate_binding_initial(self, b, depth),
+            None if name == "undefined" => Evaluation::single(EvalValue::Undefined),
+            None => Evaluation::unknown(),
+        }
+    }
+
+    fn binding_initial_is_props_id(&self, name: &str) -> bool {
+        self.context.state.analysis.props_id.as_deref() == Some(name)
+    }
+}
+
+/// Upstream's `scope.evaluate(node).is_known`.
+fn is_expression_known_json(json_value: &serde_json::Value, context: &ComponentContext) -> bool {
+    evaluate_estree(&ClientEvalScope { context }, json_value, 0).is_known()
 }
 
 /// Sanitize a template string by escaping special characters.
