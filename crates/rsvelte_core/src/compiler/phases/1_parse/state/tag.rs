@@ -436,6 +436,7 @@ impl<'a> Parser<'a> {
                 &pattern_clean,
                 body_start,
                 self.expression_line_offsets(),
+                self.ts,
             )
             .unwrap_or_else(|| self.parse_js_expression(&pattern_clean, body_start))
         } else {
@@ -539,6 +540,7 @@ impl<'a> Parser<'a> {
                     &pattern_clean,
                     seg_off,
                     self.expression_line_offsets(),
+                    self.ts,
                 )
                 .unwrap_or_else(|| self.parse_js_expression(&pattern_clean, seg_off))
             } else {
@@ -1552,6 +1554,7 @@ impl<'a> Parser<'a> {
             content,
             offset,
             self.expression_line_offsets(),
+            self.ts,
         )
     }
 
@@ -2376,13 +2379,23 @@ impl<'a> Parser<'a> {
                     // standalone expressions.
                     let pattern_expr =
                         if pattern_clean.starts_with('{') || pattern_clean.starts_with('[') {
-                            super::super::read::expression::parse_destructuring_pattern(
+                            match super::super::read::expression::parse_destructuring_pattern(
                                 &self.arena,
                                 &pattern_clean,
                                 expr_start,
                                 self.expression_line_offsets(),
-                            )
-                            .unwrap_or_else(|| self.parse_js_expression(&pattern_clean, expr_start))
+                                self.ts,
+                            ) {
+                                Some(expr) => expr,
+                                // A pattern that does not parse in the component's
+                                // mode is upstream's `read_pattern` throwing, not a
+                                // reason to fall back to expression parsing.
+                                None => self.parse_js_expression_head_strict(
+                                    &pattern_clean,
+                                    expr_start,
+                                    false,
+                                )?,
+                            }
                         } else {
                             self.parse_js_expression_eager_strict(&pattern_clean, expr_start)?
                         };

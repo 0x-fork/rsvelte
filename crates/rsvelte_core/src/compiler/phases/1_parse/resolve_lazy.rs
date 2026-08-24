@@ -469,7 +469,7 @@ fn lazy_parse_error(
     start: usize,
     ts: bool,
 ) -> Option<crate::error::ParseError> {
-    Some(match kind {
+    let close = match kind {
         LazyKind::Lenient => return None,
         // Upstream's `read_expression` parses ONE maximal expression with acorn
         // and then `eat('}', true)`: a complete leading expression followed by

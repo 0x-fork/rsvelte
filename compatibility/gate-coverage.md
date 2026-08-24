@@ -79,6 +79,34 @@ different defects it maps onto the same string.
 
 ---
 
+## A named blind-spot class: the one-directional verdict vocabulary
+
+**A grid scored in the vocabulary of the issue that motivated it reports the opposite
+direction as zero.** Not an empty population and not a coarse key — a *complete* verdict
+set that omits a direction, so cells moving that way are counted as agreement or are never
+constructed at all. It gets a name because it has now happened on both axes it can happen on:
+
+| instance | the vocabulary | what it could not report |
+|---|---|---|
+| the `bind:` family (AGENTS.md § Generated shape matrix) | inputs chosen because official **rejects** them | an over-**rejection** — a TypeScript assertion, `bind:group={c as T}`, which CI caught from a corpus file instead |
+| `param-default` | the same, until its legal rows were added | `async (p = { async m() { … } }) => p` **is** legal, so a check that scans the parameter subtree rejects real code |
+| #3261 (§39) | the issue is titled "330 over-acceptances", so the grid scores accept-vs-reject | **18 over-rejections of 38**, measured on a tree whose own grid read 330 → 66 |
+| #3261, one level down (s2tF, recorded in AGENTS.md) | `agree` / `over-accept` / `under-accept` | `both reject, different code` — 178 cells moved into a fourth verdict the three-value set cannot spell |
+
+The defence is not "add more inputs". It is two questions asked **before** measuring:
+**does my verdict set have a cell for the opposite direction**, and **does my population
+contain an input that would land in it?** A grid that answers no to either reports a clean
+number while the other direction moves freely underneath it — and the number *goes down*,
+which reads as progress.
+
+Corollary worth stating separately, because it is what makes this expensive: **the author of
+the grid is the person least able to see it.** The vocabulary comes from the issue, the issue
+is written from the defect that was noticed, and the defect that was noticed is the one whose
+direction someone already had a name for. §39's 18 were found by running a *different* gate on
+the same tree, not by extending the original grid.
+
+---
+
 ## Reading the corpus in one sentence
 
 The collected corpus samples the *marginal* distribution of published Svelte code. That is
