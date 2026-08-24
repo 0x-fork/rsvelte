@@ -22,7 +22,7 @@ use crate::compiler::phases::phase3_transform::shared::js_scan::slash_starts_reg
 use crate::compiler::utils::is_escaped;
 use crate::error::ParseResult;
 
-use super::super::parser::{Parser, StackEntry, is_js_whitespace};
+use super::super::parser::{Parser, StackEntry, is_js_whitespace, is_js_whitespace_byte};
 use super::super::utils::TrimWs;
 
 /// A `{:…}` continuation clause.
@@ -2254,6 +2254,14 @@ impl<'a> Parser<'a> {
                 // render_tag.rs` performs the precise AST-based check, so we must
                 // not reject it here at parse time (svelte2tsx, which only parses,
                 // would otherwise diverge from official by erroring).
+                // Upstream reaches the call test with the leftover unread, so
+                // the test runs on the maximal leading expression — and a JS
+                // failure inside it is a `js_parse_error`, not the placeholder
+                // the call test would otherwise report as a semantic error.
+                // The retry runs only on the failing path, so a well-formed
+                // render tag still costs one parse.
+                let leading_ws = expr_content.len() - expr_content.trim_start_ws().len();
+                let offset = expr_start + leading_ws;
                 let trimmed = expr_content.trim_ws();
                 let expression = self.parse_head_expression(trimmed, expr_start, false, '}')?;
 
@@ -2680,6 +2688,12 @@ impl<'a> Parser<'a> {
             self.ts,
         )
         .map_err(|(msg, _)| {
+            // The deferred twin of this arm (`LazyKind::Mustache`) classifies
+            // leftover input as a missing `}`; without the same test here the
+            // two disagree whenever the parse is not deferred.
+            if let Some(pos) = leftover_token_offset(trimmed) {
+                return crate::error::ParseError::expected_token("}", trimmed_offset + pos);
+            }
             // Recover the precise failure position from OXC's labeled span,
             // mirroring upstream Svelte's `js_parse_error(err.pos, ...)` —
             // a *point* error at the byte where acorn stopped consuming
@@ -2825,7 +2839,6 @@ impl<'a> Parser<'a> {
         let leading_ws = content.len() - content.trim_start_ws().len();
         let trimmed = content.trim_ws();
         let trimmed_offset = offset + leading_ws;
-        let opening_token = if close_char == ')' { '(' } else { '{' };
 
         let kind = if close_char == ')' {
             LazyKind::HeadParen
@@ -2835,6 +2848,22 @@ impl<'a> Parser<'a> {
         if allow_defer && let Some(lazy) = self.defer_expression(trimmed, trimmed_offset, kind) {
             return Ok((lazy, None));
         }
+        self.parse_head_expression_eager(content, offset, disallow_loose, close_char)
+    }
+
+    /// `parse_head_expression` without the deferral, for the slots that inspect
+    /// the parsed node during the parse itself (`{@const}`, `{@debug}`).
+    pub fn parse_head_expression_eager(
+        &self,
+        content: &str,
+        offset: usize,
+        disallow_loose: bool,
+        close_char: char,
+    ) -> crate::error::ParseResult<Expression<'a>> {
+        let leading_ws = content.len() - content.trim_start_ws().len();
+        let trimmed = content.trim_ws();
+        let trimmed_offset = offset + leading_ws;
+        let opening_token = if close_char == ')' { '(' } else { '{' };
 
         let parse = |source: &str, at: usize| {
             super::super::read::expression::parse_expression(
