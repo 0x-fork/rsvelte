@@ -6,6 +6,8 @@
 //! spliced an injected `)` into the comment body (#907, #2253). Every such
 //! scanner steps over opaque runs with `skip_opaque` first.
 
+use crate::compiler::phases::phase1_parse::utils::TrimWs;
+
 /// Iterator over the *code* bytes of `bytes`: every byte that is not inside a
 /// string, template literal, regex literal or comment, as `(byte index, byte)`.
 ///
@@ -106,6 +108,32 @@ const KEYWORDS_BEFORE_REGEX: &[&[u8]] = &[
 
 pub(crate) fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$') || b >= 0x80
+}
+
+/// Byte offset just past the standalone keyword `kw` at the start of `s` and
+/// the JS whitespace separating it from whatever follows, or `None` when `s`
+/// does not begin with that keyword.
+///
+/// A literal `"export "` / `"class "` needle bakes in exactly one ASCII space,
+/// which the source is not obliged to honour (#3470); the separator between two
+/// JS tokens is any run of JS whitespace. The predicate must be
+/// JS whitespace and not Unicode `White_Space`, which excludes `U+FEFF`.
+pub(crate) fn after_keyword(s: &str, kw: &str) -> Option<usize> {
+    let rest = s.strip_prefix(kw)?;
+    if rest.starts_with(crate::compiler::utils::is_js_ident_continue) {
+        return None;
+    }
+    Some(s.len() - rest.trim_start_ws().len())
+}
+
+/// `after_keyword` for a keyword sequence: `["export", "let"]` matches
+/// `export let`, `export\tlet`, `export\u{feff}let`.
+pub(crate) fn after_keywords(s: &str, keywords: &[&str]) -> Option<usize> {
+    let mut at = 0;
+    for kw in keywords {
+        at += after_keyword(&s[at..], kw)?;
+    }
+    Some(at)
 }
 
 /// `slash_starts_regex`, but reading the preceding *token* rather than the
