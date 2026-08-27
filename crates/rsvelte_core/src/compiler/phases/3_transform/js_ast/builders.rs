@@ -257,6 +257,31 @@ pub fn getter(
     })
 }
 
+/// Attach a source span to a static property key.
+///
+/// The key remains a property-key variant rather than becoming a spanned
+/// expression, so object/member lowering can continue to match its structure.
+pub fn with_property_key_span(mut member: JsObjectMember, start: u32, end: u32) -> JsObjectMember {
+    if let JsObjectMember::Property(property) = &mut member {
+        property.key = match &property.key {
+            JsPropertyKey::Identifier(name) => JsPropertyKey::SpannedIdentifier {
+                name: name.clone(),
+                start,
+                end,
+            },
+            JsPropertyKey::Literal(JsLiteral::String(value)) => {
+                JsPropertyKey::SpannedStringLiteral {
+                    value: value.clone(),
+                    start,
+                    end,
+                }
+            }
+            key => key.clone(),
+        };
+    }
+    member
+}
+
 /// Create a setter property.
 /// If the name is not a valid identifier (e.g., contains hyphens), uses a string literal key.
 pub fn setter(
@@ -1558,7 +1583,7 @@ pub fn literal_number(value: f64) -> JsExpr {
 }
 
 #[cfg(test)]
-mod await_walker_tests {
+mod tests {
     use super::*;
 
     fn awaited(arena: &JsArena, name: &str) -> JsExpr {
@@ -1603,5 +1628,41 @@ mod await_walker_tests {
             expression: arena.alloc_expr(inner_call),
         });
         assert!(!js_expr_has_await(&arena, &chain));
+    }
+
+    #[test]
+    fn property_key_span_preserves_identifier_shape() {
+        let arena = JsArena::new();
+        let member = with_property_key_span(getter(&arena, "value", vec![]), 4, 14);
+
+        assert!(matches!(
+            member,
+            JsObjectMember::Property(JsProperty {
+                key: JsPropertyKey::SpannedIdentifier {
+                    ref name,
+                    start: 4,
+                    end: 14,
+                },
+                ..
+            }) if name == "value"
+        ));
+    }
+
+    #[test]
+    fn property_key_span_preserves_quoted_key_shape() {
+        let arena = JsArena::new();
+        let member = with_property_key_span(getter(&arena, "foo-bar", vec![]), 4, 16);
+
+        assert!(matches!(
+            member,
+            JsObjectMember::Property(JsProperty {
+                key: JsPropertyKey::SpannedStringLiteral {
+                    ref value,
+                    start: 4,
+                    end: 16,
+                },
+                ..
+            }) if value == "foo-bar"
+        ));
     }
 }

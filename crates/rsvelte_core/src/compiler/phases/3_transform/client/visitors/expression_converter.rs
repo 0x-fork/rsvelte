@@ -171,6 +171,21 @@ fn without_outer_source_span(expr: JsExpr, context: &ComponentContext) -> JsExpr
     }
 }
 
+/// Allocate an expression while preserving a source span out of band.
+///
+/// Member-expression consumers walk their object chain by IR variant, so a
+/// `Spanned` wrapper in object position is not semantically transparent.
+#[inline]
+fn alloc_without_outer_source_span(expr: JsExpr, context: &ComponentContext) -> ExprId {
+    match expr {
+        JsExpr::Spanned(inner, start, end) => {
+            context.arena.set_bare_expr_span(inner, start, end);
+            inner
+        }
+        other => context.arena.alloc_expr(other),
+    }
+}
+
 /// Convert a JsNode directly to JsExpr via pattern matching, bypassing serde_json::Value
 /// for simple expression types. Complex types fall back to convert_json_value.
 fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
@@ -683,11 +698,8 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
 
                 if let Some((field_type, in_constructor)) = field_info {
                     let base_object = {
-                        let __tmp = without_outer_source_span(
-                            convert_js_node(pa.get_js_node(*object), context),
-                            context,
-                        );
-                        context.arena.alloc_expr(__tmp)
+                        let converted = convert_js_node(pa.get_js_node(*object), context);
+                        alloc_without_outer_source_span(converted, context)
                     };
                     let base_member = JsExpr::Member(JsMemberExpression {
                         object: base_object,
@@ -723,14 +735,27 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
             }
 
             let conv_object = {
+                // Downstream matchers walk a member chain by variant, so a span
+                // wrapper in object position hides the root identifier from them.
+                // A prop read changes that root to a Call anyway; apply that read
+                // before removing the wrapper so its identifier remains the
+                // source carrier inside `foo().bar`.
+                let object_node = pa.get_js_node(*object);
+                let converted = convert_js_node(object_node, context);
+                let is_spanned_identifier = matches!(
+                    &converted,
+                    JsExpr::Spanned(inner, _, _)
+                        if matches!(context.arena.get_expr(*inner), JsExpr::Identifier(_))
+                );
+                if is_spanned_identifier
+                    && let Some(name) = get_jsnode_identifier_name(object_node)
+                    && let Some(binding) = context.state.get_binding(&name)
+                    && matches!(binding.kind, BindingKind::Prop | BindingKind::BindableProp)
+                    && let Some(read) = context.state.transform.get(&name).and_then(|t| t.read)
                 {
-                    // Downstream matchers walk a member chain by variant, so a span
-                    // wrapper in object position hides the root identifier from them.
-                    let __tmp = without_outer_source_span(
-                        convert_js_node(pa.get_js_node(*object), context),
-                        context,
-                    );
-                    context.arena.alloc_expr(__tmp)
+                    context.arena.alloc_expr(read(&context.arena, converted))
+                } else {
+                    alloc_without_outer_source_span(converted, context)
                 }
             };
 
@@ -3669,7 +3694,13 @@ pub fn pattern_to_string(pattern: &JsPattern) -> String {
                                 s.push('[');
                             }
                             match key {
-                                JsPropertyKey::Identifier(n) => s.push_str(n),
+                                JsPropertyKey::Identifier(n)
+                                | JsPropertyKey::SpannedIdentifier { name: n, .. } => s.push_str(n),
+                                JsPropertyKey::SpannedStringLiteral { value, .. } => {
+                                    s.push('"');
+                                    s.push_str(value);
+                                    s.push('"');
+                                }
                                 JsPropertyKey::Literal(lit) => match lit {
                                     JsLiteral::String(n) => {
                                         s.push('"');

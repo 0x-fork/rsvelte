@@ -418,6 +418,7 @@ pub fn print_with_comments<'a>(
             PAD.len() as u32,
             None,
             &[],
+            &[],
             &rsvelte_esrap::PrintOptions::default(),
         )
         .code

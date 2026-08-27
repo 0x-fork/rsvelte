@@ -91,6 +91,7 @@ pub fn generate_expr(expr: &super::nodes::JsExpr, arena: &JsArena) -> String {
         raw_spans: Vec::new(),
         source_code: None,
         arena,
+        identifier_span_scopes: Vec::new(),
         measuring: false,
         measures: Rc::new(MeasureCache::default()),
     };
@@ -133,6 +134,9 @@ struct JsCodegen<'a> {
     source_code: Option<&'a str>,
     /// Arena containing all expressions and statements
     arena: &'a JsArena,
+    /// Identifier locations inherited from the generated expression currently
+    /// being emitted. Explicit `Spanned(Identifier)` nodes take precedence.
+    identifier_span_scopes: Vec<(&'a str, (u32, u32))>,
     /// Whether this codegen is a throwaway pre-render feeding `measures`
     measuring: bool,
     measures: Rc<MeasureCache>,
@@ -148,6 +152,7 @@ impl<'a> JsCodegen<'a> {
             raw_spans: Vec::new(),
             source_code: None,
             arena,
+            identifier_span_scopes: Vec::new(),
             measuring: false,
             measures: Rc::new(MeasureCache::default()),
         }
@@ -879,8 +884,41 @@ impl<'a> JsCodegen<'a> {
 
     fn emit_expression_inner(&mut self, expr: &JsExpr) {
         match expr {
-            JsExpr::Identifier(name) => self.output.push_str(name),
-            JsExpr::OpaqueIdentifier(name) => self.output.push_str(name),
+            JsExpr::Identifier(name) => {
+                let span = self.arena.identifier_span(name).or_else(|| {
+                    self.identifier_span_scopes
+                        .iter()
+                        .rev()
+                        .find_map(|(scope_name, span)| {
+                            (*scope_name == name.as_str()).then_some(*span)
+                        })
+                });
+                if self.track_mappings
+                    && let Some((start, end)) = span
+                {
+                    self.record_span_start(start, end);
+                    self.output.push_str(name);
+                    self.record_span_start(end, end);
+                } else {
+                    self.output.push_str(name);
+                }
+            }
+            JsExpr::OpaqueIdentifier(name) => {
+                let span = self
+                    .identifier_span_scopes
+                    .iter()
+                    .rev()
+                    .find_map(|(scope_name, span)| (*scope_name == name.as_str()).then_some(*span));
+                if self.track_mappings
+                    && let Some((start, end)) = span
+                {
+                    self.record_span_start(start, end);
+                    self.output.push_str(name);
+                    self.record_span_start(end, end);
+                } else {
+                    self.output.push_str(name);
+                }
+            }
             JsExpr::Literal(lit) => self.emit_literal(lit),
             JsExpr::TemplateLiteral(template) => self.emit_template_literal(template),
             JsExpr::TaggedTemplate(tagged) => self.emit_tagged_template(tagged),
@@ -960,7 +998,18 @@ impl<'a> JsCodegen<'a> {
             }
             JsExpr::Spanned(inner_id, start, end) => {
                 self.record_span_start(*start, *end);
-                self.emit_expression(self.arena.get_expr(*inner_id));
+                let suppress_scope = matches!(
+                    self.arena.get_expr(*inner_id),
+                    JsExpr::Identifier(name) | JsExpr::OpaqueIdentifier(name)
+                        if self.identifier_span_scopes.iter().any(|(scope_name, _)| *scope_name == name.as_str())
+                );
+                if suppress_scope {
+                    let scopes = std::mem::take(&mut self.identifier_span_scopes);
+                    self.emit_expression_id(*inner_id);
+                    self.identifier_span_scopes = scopes;
+                } else {
+                    self.emit_expression_id(*inner_id);
+                }
                 self.record_span_start(*end, *end);
             }
             // The comment coordinates only reach the oxc printer; the text
@@ -968,6 +1017,18 @@ impl<'a> JsCodegen<'a> {
             JsExpr::SourceAnchored(anchor) => {
                 self.emit_expression(self.arena.get_expr(anchor.inner));
             }
+        }
+    }
+
+    /// Emit an arena expression under any identifier-location scope attached
+    /// to that stable handle.
+    fn emit_expression_id(&mut self, id: super::arena::ExprId) {
+        if let Some((name, span)) = self.arena.expression_identifier_span(id) {
+            self.identifier_span_scopes.push((name, span));
+            self.emit_expression(self.arena.get_expr(id));
+            self.identifier_span_scopes.pop();
+        } else {
+            self.emit_expression(self.arena.get_expr(id));
         }
     }
 
@@ -1284,6 +1345,16 @@ impl<'a> JsCodegen<'a> {
     fn emit_property_key(&mut self, key: &JsPropertyKey) {
         match key {
             JsPropertyKey::Identifier(name) => self.output.push_str(name),
+            JsPropertyKey::SpannedIdentifier { name, start, end } => {
+                self.record_span_start(*start, *end);
+                self.output.push_str(name);
+                self.record_span_start(*end, *end);
+            }
+            JsPropertyKey::SpannedStringLiteral { value, start, end } => {
+                self.record_span_start(*start, *end);
+                self.emit_literal(&JsLiteral::String(value.clone()));
+                self.record_span_start(*end, *end);
+            }
             JsPropertyKey::Literal(lit) => self.emit_literal(lit),
             JsPropertyKey::Computed(expr_id) => self.emit_expression(self.arena.get_expr(*expr_id)),
         }
@@ -1461,7 +1532,13 @@ impl<'a> JsCodegen<'a> {
         if needs_parens {
             self.output.push('(');
         }
-        self.emit_expression(object);
+        if let Some((start, end)) = self.arena.bare_expr_span(member.object) {
+            self.record_span_start(start, end);
+            self.emit_expression(object);
+            self.record_span_start(end, end);
+        } else {
+            self.emit_expression(object);
+        }
         if needs_parens {
             self.output.push(')');
         }
@@ -1957,6 +2034,7 @@ impl<'a> JsCodegen<'a> {
             raw_spans: Vec::new(),
             source_code: None,
             arena: self.arena,
+            identifier_span_scopes: Vec::new(),
             measuring: true,
             measures: Rc::clone(&self.measures),
         }
@@ -3187,6 +3265,58 @@ mod tests {
     use crate::compiler::phases::phase3_transform::js_ast::builders::*;
 
     #[test]
+    fn generated_identifier_uses_carry_the_registered_source_span() {
+        let arena = JsArena::new();
+        arena.note_identifier_span("div", 1, 4);
+        let program = program(vec![stmt(&arena, id("div")), stmt(&arena, id("div"))]);
+
+        let generated = generate_with_sourcemap(&program, "<div>", &arena).unwrap();
+        assert_eq!(generated.code, "div;\ndiv;");
+        for expected in [(0, 0, 0, 1), (0, 3, 0, 4), (1, 0, 0, 1), (1, 3, 0, 4)] {
+            assert!(
+                generated.mappings.iter().any(|mapping| {
+                    (
+                        mapping.gen_line,
+                        mapping.gen_col,
+                        mapping.orig_line,
+                        mapping.orig_col,
+                    ) == expected
+                }),
+                "missing generated identifier mapping {expected:?}: {:?}",
+                generated.mappings
+            );
+        }
+    }
+
+    #[test]
+    fn expression_identifier_spans_are_scoped_and_keep_explicit_children() {
+        let arena = JsArena::new();
+        let explicit = JsExpr::Spanned(arena.alloc_expr(id("foo")), 1, 4);
+        let call = call(
+            &arena,
+            id("consume"),
+            vec![id("foo"), explicit, JsExpr::OpaqueIdentifier("foo".into())],
+        );
+        let call_id = arena.alloc_expr(call);
+        arena.note_expression_identifier_span(call_id, "foo", 8, 11);
+        let program = program(vec![stmt(&arena, JsExpr::Spanned(call_id, 0, 0))]);
+
+        let generated = generate_with_sourcemap(&program, "xfoo....foo", &arena).unwrap();
+        assert_eq!(generated.code, "consume(foo, foo, foo);");
+        let starts = generated
+            .code
+            .match_indices("foo")
+            .map(|(offset, _)| offset as u32)
+            .collect::<Vec<_>>();
+        for (generated_column, original_column) in [(starts[0], 8), (starts[1], 1), (starts[2], 8)]
+        {
+            assert!(generated.mappings.iter().any(|mapping| {
+                (mapping.gen_col, mapping.orig_col) == (generated_column, original_column)
+            }));
+        }
+    }
+
+    #[test]
     fn sourcemap_can_externalize_single_source_content() {
         let json = generate_sourcemap_json(Some("out.js"), "App.svelte", None, "AAAA", &[]);
         let map: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -3219,6 +3349,36 @@ mod tests {
             offset_to_line_col_utf16(source, &starts, source.len()),
             (1, 0)
         );
+    }
+
+    #[test]
+    fn text_fallback_maps_bare_member_object_span() {
+        let arena = JsArena::new();
+        let object = arena.alloc_expr(JsExpr::Identifier("Math".into()));
+        arena.set_bare_expr_span(object, 7, 11);
+        let member = JsExpr::Member(JsMemberExpression {
+            object,
+            property: JsMemberProperty::Identifier("random".into()),
+            computed: false,
+            optional: false,
+        });
+        let program = JsProgram::with_body(vec![stmt(&arena, member)]);
+
+        let generated = generate_with_sourcemap(&program, "xxxxxxxMath.random", &arena).unwrap();
+
+        assert_eq!(generated.code, "Math.random;");
+        assert!(generated.mappings.iter().any(|mapping| {
+            mapping.gen_line == 0
+                && mapping.gen_col == 0
+                && mapping.orig_line == 0
+                && mapping.orig_col == 7
+        }));
+        assert!(generated.mappings.iter().any(|mapping| {
+            mapping.gen_line == 0
+                && mapping.gen_col == 4
+                && mapping.orig_line == 0
+                && mapping.orig_col == 11
+        }));
     }
 
     #[test]

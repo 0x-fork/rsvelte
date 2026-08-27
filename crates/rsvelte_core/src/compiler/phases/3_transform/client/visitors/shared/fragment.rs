@@ -328,6 +328,13 @@ pub fn process_children<F>(
             // Generate a unique identifier
             let id_name = ctx.state.memoizer.generate_id(name);
             id = b::id(&id_name);
+            if let Some((start, end)) = loc {
+                // Upstream creates one located Identifier and reuses it for the
+                // declaration and every runtime use. Record that identity by
+                // its component-wide unique generated name without changing
+                // the Identifier variant seen by the rest of lowering.
+                arena_ref.note_identifier_span(&id_name, start, end);
+            }
             ctx.state.init.push(b::var_decl_anchored(
                 arena_ref,
                 &id_name,

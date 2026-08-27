@@ -391,6 +391,7 @@ fn bind_directive_inner(
         JsExpr::Spanned(inner, _, _) => context.arena.get_expr(inner).clone(),
         expression => expression,
     };
+    let has_custom_accessors = is_sequence_expression(&expression);
 
     // In dev mode with runes, validate binding to non-reactive properties.
     // Reference: BindDirective.js lines 26-41
@@ -437,7 +438,7 @@ fn bind_directive_inner(
     }
 
     // Check if it's a sequence expression (getter/setter pair)
-    let (get, set) = if is_sequence_expression(&expression) {
+    let (get, set) = if has_custom_accessors {
         let (raw_get, raw_set) = extract_getter_setter(&expression);
         // For a user-provided getter/setter pair, BOTH bodies need read transforms
         // (e.g. wrapping $state/each-item/`@const` reads with `$.get()`). The setter
@@ -560,8 +561,20 @@ fn bind_directive_inner(
         call
     };
 
+    let call_id = context.arena.alloc_expr(call);
+    if !has_custom_accessors
+        && binding_name == "value"
+        && parent
+            .as_regular_element()
+            .is_some_and(|element| element.name != "select")
+        && let Some((name, start, end)) = get_ast_root_identifier_span(&node.expression)
+    {
+        context
+            .arena
+            .note_expression_identifier_span(call_id, &name, start, end);
+    }
     let call = JsExpr::Spanned(
-        context.arena.alloc_expr(call),
+        call_id,
         parent
             .as_regular_element()
             .map_or(node.start, |element| element.start),
@@ -2721,7 +2734,7 @@ pub fn emit_validate_binding(
     use crate::compiler::phases::phase2_analyze::scope::BindingKind;
 
     // Extract the root object name from the original AST expression
-    let root_name = extract_root_name_from_json(node.expression.as_json());
+    let root_name = get_ast_root_identifier(&node.expression);
     let root_name = match root_name {
         Some(n) => n,
         None => return,
@@ -2822,19 +2835,27 @@ pub fn emit_validate_binding(
 }
 
 /// Extract the root identifier name from a JSON expression.
-fn extract_root_name_from_json(val: &serde_json::Value) -> Option<String> {
+fn extract_root_identifier_span_from_json(val: &serde_json::Value) -> Option<(String, u32, u32)> {
     let obj = val.as_object()?;
     match obj.get("type")?.as_str()? {
-        "Identifier" => obj.get("name")?.as_str().map(|s| s.to_string()),
-        "MemberExpression" => extract_root_name_from_json(obj.get("object")?),
+        "Identifier" => Some((
+            obj.get("name")?.as_str()?.to_string(),
+            u32::try_from(obj.get("start")?.as_u64()?).ok()?,
+            u32::try_from(obj.get("end")?.as_u64()?).ok()?,
+        )),
+        "MemberExpression" => extract_root_identifier_span_from_json(obj.get("object")?),
         _ => None,
     }
+}
+
+fn get_ast_root_identifier_span(expr: &Expression) -> Option<(String, u32, u32)> {
+    extract_root_identifier_span_from_json(expr.as_json())
 }
 
 /// Get the root identifier name from an AST Expression (JSON-based).
 /// For `form.count` returns `Some("form")`.
 fn get_ast_root_identifier(expr: &Expression) -> Option<String> {
-    extract_root_name_from_json(expr.as_json())
+    get_ast_root_identifier_span(expr).map(|(name, _, _)| name)
 }
 
 /// Build the member property path from an AST Expression (JSON-based).

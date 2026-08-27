@@ -24,6 +24,8 @@
 //!   aliases exist
 
 use super::nodes::{JsExpr, JsStatement};
+use compact_str::CompactString;
+use rustc_hash::FxHashMap;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 
@@ -96,6 +98,22 @@ impl<T> Drop for NodeStore<T> {
 pub struct JsArena {
     exprs: UnsafeCell<NodeStore<JsExpr>>,
     stmts: UnsafeCell<NodeStore<JsStatement>>,
+    /// Source spans for generated identifiers whose names are unique within
+    /// this compilation unit. Keeping this out of [`JsExpr`] lets lowering
+    /// continue to match ordinary `Identifier` nodes while both printers can
+    /// recover the location carried by upstream's shared identifier object.
+    identifier_spans: UnsafeCell<FxHashMap<CompactString, (u32, u32)>>,
+    /// Source spans inherited by otherwise-unlocated identifiers while one
+    /// generated expression is printed. Keying the scope by `ExprId` keeps
+    /// user identifiers with the same spelling elsewhere independent.
+    expression_identifier_spans: UnsafeCell<FxHashMap<ExprId, (CompactString, (u32, u32))>>,
+    /// Source spans for expressions that must remain bare IR variants.
+    ///
+    /// In particular, member-expression consumers inspect the object by
+    /// variant, so wrapping its root identifier in `JsExpr::Spanned` changes
+    /// transform semantics. Keep those uncommon spans out of band instead of
+    /// growing every expression node.
+    bare_expr_spans: UnsafeCell<Option<FxHashMap<ExprId, (u32, u32)>>>,
 }
 
 // JsArena is explicitly NOT Sync - it's single-threaded only.
@@ -111,6 +129,52 @@ impl JsArena {
         Self {
             exprs: UnsafeCell::new(NodeStore::new()),
             stmts: UnsafeCell::new(NodeStore::new()),
+            identifier_spans: UnsafeCell::new(FxHashMap::default()),
+            expression_identifier_spans: UnsafeCell::new(FxHashMap::default()),
+            bare_expr_spans: UnsafeCell::new(None),
+        }
+    }
+
+    /// Associate every use of a generated, compilation-unit-unique identifier
+    /// with the source location from which it was derived.
+    pub fn note_identifier_span(&self, name: &str, start: u32, end: u32) {
+        // SAFETY: like node allocation, span registration is single-threaded.
+        unsafe {
+            (*self.identifier_spans.get()).insert(CompactString::new(name), (start, end));
+        }
+    }
+
+    /// Return the source span attached to a generated identifier name.
+    #[inline]
+    pub fn identifier_span(&self, name: &str) -> Option<(u32, u32)> {
+        // SAFETY: callers only read during/after single-threaded construction.
+        unsafe { (*self.identifier_spans.get()).get(name).copied() }
+    }
+
+    /// Associate unlocated uses of `name` below one generated expression with
+    /// the source identifier that upstream cloned into that expression.
+    pub fn note_expression_identifier_span(
+        &self,
+        expression: ExprId,
+        name: &str,
+        start: u32,
+        end: u32,
+    ) {
+        // SAFETY: like node allocation, span registration is single-threaded.
+        unsafe {
+            (*self.expression_identifier_spans.get())
+                .insert(expression, (CompactString::new(name), (start, end)));
+        }
+    }
+
+    /// Return the identifier span scope attached to an expression handle.
+    #[inline]
+    pub fn expression_identifier_span(&self, expression: ExprId) -> Option<(&str, (u32, u32))> {
+        // SAFETY: callers only read during/after single-threaded construction.
+        unsafe {
+            (*self.expression_identifier_spans.get())
+                .get(&expression)
+                .map(|(name, span)| (name.as_str(), *span))
         }
     }
 
@@ -135,6 +199,31 @@ impl JsArena {
         unsafe {
             let store = &*self.exprs.get();
             &*store.ptr(id.0 as usize)
+        }
+    }
+
+    /// Attach a source span without changing the expression's IR variant.
+    #[inline]
+    pub fn set_bare_expr_span(&self, id: ExprId, start: u32, end: u32) {
+        // SAFETY: like node allocation, span metadata is mutated only by the
+        // single thread that owns this arena.
+        unsafe {
+            let spans = &mut *self.bare_expr_spans.get();
+            spans
+                .get_or_insert_with(FxHashMap::default)
+                .insert(id, (start, end));
+        }
+    }
+
+    /// Return an out-of-band source span, when this expression carries one.
+    #[inline]
+    pub fn bare_expr_span(&self, id: ExprId) -> Option<(u32, u32)> {
+        // SAFETY: the arena is single-threaded and callers do not retain a
+        // reference into the map across a mutation.
+        unsafe {
+            (&*self.bare_expr_spans.get())
+                .as_ref()
+                .and_then(|spans| spans.get(&id).copied())
         }
     }
 
@@ -195,9 +284,18 @@ impl std::fmt::Debug for JsArena {
         // SAFETY: only reading len, no mutation
         let (exprs_count, stmts_count) =
             unsafe { ((*self.exprs.get()).len, (*self.stmts.get()).len) };
+        // SAFETY: only reading the map length, no mutation.
+        let identifier_spans_count = unsafe { (*self.identifier_spans.get()).len() };
+        let expression_identifier_spans_count =
+            unsafe { (*self.expression_identifier_spans.get()).len() };
         f.debug_struct("JsArena")
             .field("exprs_count", &exprs_count)
             .field("stmts_count", &stmts_count)
+            .field("identifier_spans_count", &identifier_spans_count)
+            .field(
+                "expression_identifier_spans_count",
+                &expression_identifier_spans_count,
+            )
             .finish()
     }
 }
@@ -296,7 +394,28 @@ mod tests {
         let arena = JsArena::default();
         assert_eq!(
             format!("{:?}", arena),
-            "JsArena { exprs_count: 0, stmts_count: 0 }"
+            "JsArena { exprs_count: 0, stmts_count: 0, identifier_spans_count: 0, expression_identifier_spans_count: 0 }"
+        );
+    }
+
+    #[test]
+    fn test_generated_identifier_span() {
+        let arena = JsArena::new();
+        arena.note_identifier_span("div", 7, 10);
+
+        assert_eq!(arena.identifier_span("div"), Some((7, 10)));
+        assert_eq!(arena.identifier_span("main"), None);
+    }
+
+    #[test]
+    fn test_expression_identifier_span() {
+        let arena = JsArena::new();
+        let expression = arena.alloc_expr(JsExpr::Identifier("foo".into()));
+        arena.note_expression_identifier_span(expression, "foo", 7, 10);
+
+        assert_eq!(
+            arena.expression_identifier_span(expression),
+            Some(("foo", (7, 10)))
         );
     }
 

@@ -599,7 +599,7 @@ cache/direct, object and map-entry counts, reader sets) lives behind the existin
 `measure-json` feature on branch `tools/measure-json-instrumentation`
 (`e4f47227`), deliberately unmerged.
 
-## Findings (2026-08-18 — the client map is 86% span-carried, and two of the eleven passes delete)
+## Findings (2026-08-18 — the client map is span-carried, and all eleven passes delete)
 
 #2954 rebuilt the client source map by matching generated text back against the
 source, in eleven passes over `transform_component_with_scripts`. #3015 asks for the
@@ -666,37 +666,63 @@ Segments lost when exactly one client pass is disabled, everything else on:
 | --- | ---: | ---: |
 | `default_function_wrapper` | 84 | **0 — deleted** |
 | `effect_callback` | 8 | **0 — deleted** |
-| `token` | 80 | 23 |
-| `template_element_runtime` | 25 | 21 |
-| `legacy_prop_read` | 16 | 16 |
-| `inline_script` | 7 | 4 |
-| `bind_value` | 5 | 5 |
-| `component_bind` | 5 | 4 |
-| `verbatim_import` | 4 | 4 |
-| `collapsed_declaration` | 0 | 0 |
-| `rune` | 0 | 0 |
+| `token` | 80 | **0 — deleted after the residual-owner audit** |
+| `template_element_runtime` | 25 | **0 — deleted** |
+| `legacy_prop_read` | 16 | **0 — deleted** |
+| `inline_script` | 7 | **0 — deleted** |
+| `bind_value` | 5 | **0 — deleted** |
+| `component_bind` | 5 | **0 — deleted** |
+| `verbatim_import` | 4 | **0 — deleted** |
+| `collapsed_declaration` | 0 | **0 — deleted** |
+| `rune` | 0 | **0 — deleted** |
 
-`default_function_wrapper` and `effect_callback` are deleted: both are now produced by a
-span, and the before/after column is the attribution. The other nine stay, and what each
-still carries is a named lowering, not a mystery:
+`default_function_wrapper`, `effect_callback`, `template_element_runtime`, `legacy_prop_read`,
+`inline_script`, `bind_value`, `component_bind`, `verbatim_import`, `collapsed_declaration`,
+`rune`, and `token` are deleted: the positions that agree with official are now produced by
+source spans,
+and the before/after column is the attribution.
+The wrapper keeps its block span in comment space and passes its two source-backed brace
+positions separately to the printer, so comment placement no longer requires a fallback pass.
+For element handles, `flush_node` records the tag-name span against the component-wide unique
+generated name; both printers apply it to ordinary `Identifier` nodes only at emission time.
+That keeps every lowering matcher on `JsExpr::Identifier` unchanged while reproducing
+upstream's reuse of one located identifier for the declaration and all runtime uses. A
+`bind:value` call similarly records a scope on its stable arena ID: only otherwise-unlocated
+copies of the expression's root identifier inherit that span while the completed accessor call
+is printed. Explicitly located children keep their own spans, and no wrapper enters the member
+chain while lowering can still inspect it. Before its deletion, the token pass's remaining
+generated positions came from two named lowering shapes rather than an unknown population:
 
 | still carried by a pass | why the position is lost |
 | --- | --- |
 | `let x = $.prop($$props, …)` and its default | the declaration is written by the *script text* rewriter, which records nothing; the chunk projection has to re-derive it by alignment |
-| hoisted verbatim `import` lines | `extract_imports` returns text with no offset, so they are emitted as `JsStatement::Raw` |
-| element/component identifier *uses* (`pre.textContent`, `$.sibling(div, 2)`) | `flush_node` stamps the declaration; `SiblingPrev::Reuse` carries a bare `b::id` |
-| component `bind:` accessor pairs (`get potato()`) | built from `JsExpr::Raw` text |
 | the `(deps, $.untrack(…))` sequence tail | builder-made, with no source anchor |
 
-Every row is a `Raw` fragment or a builder call that had a span available and dropped it —
-i.e. #3015's step 1 really is the prerequisite it claims to be, and this measurement names
-which fragments to eradicate first by how many segments they hold.
+Every row was a `Raw` fragment or a builder call that had a span available and dropped it —
+i.e. #3015's step 1 really was the prerequisite it claimed to be, and this measurement named
+which fragments to eradicate first by how many segments they held. After those carriers landed,
+the current diagnostic found **32** generated positions owned only by token matching. Its
+byte-identical-line oracle classified all 32 as incomparable, so that aggregate gate could not
+justify retaining or deleting them. Decoding the pinned official maps independently showed that
+the remaining heuristic positions were absent from official or attached to a different generated
+token; none was an official segment reproduced by the pass. The client token matcher and its
+priority partition therefore delete together. The server has a separate text-generated map and
+is explicitly outside this client-only measurement.
 
-**`collapsed_declaration` and `rune` cost 0 on both trees, and that is not evidence they
-are redundant.** They were already contributing nothing before this change, so deleting
-them cannot be attributed to it, and the gate is 29 samples — a pass that never fires in
-those samples is indistinguishable from a pass whose output is now produced elsewhere. Both
-stay, and the distinction is recorded as gate-coverage 14f.
+Hoisted imports now pair the extractor's output with the phase-1 import declaration that produced
+it. TypeScript erasure and import cleanup are applied only to prove the pair; the retained
+declaration range supplies `RawMapped` token spans, so no generated-output/source line match is
+needed.
+
+**`rune` costs 0 on both trees, and that alone is not evidence it is redundant.** It was already
+contributing nothing before this change, so deleting it cannot be attributed to the span work,
+and the gate is 29 samples — a pass that never fires in those samples is indistinguishable from
+a pass whose output is now produced elsewhere. The pass is deleted only after a separate
+compile-level population fires all eight source/runtime pairs and pins both endpoints of every
+generated runtime name to its rune. `collapsed_declaration` is likewise deleted only after a
+compile-level regression deliberately fires its multiline-declaration predicate and pins the
+generated client and server names to the source name. The distinction is recorded as
+gate-coverage 14g.
 
 ### Two hazards the change created and paid for
 

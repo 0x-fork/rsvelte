@@ -93,6 +93,26 @@ fn identifiers_and_literals_map_both_span_boundaries() {
 }
 
 #[test]
+fn object_accessor_keys_map_both_span_boundaries() {
+    let m = mapped("const x = { get potato() {}, set potato(value) {} };");
+    let generated_starts: Vec<_> = m.code.match_indices("potato").map(|(i, _)| i).collect();
+    let source_starts: Vec<_> = m.source.match_indices("potato").map(|(i, _)| i).collect();
+
+    assert_eq!(generated_starts.len(), 2, "unexpected output: {}", m.code);
+    assert_eq!(source_starts.len(), 2, "unexpected source: {}", m.source);
+    for (generated, source) in generated_starts.into_iter().zip(source_starts) {
+        assert_eq!(
+            mapping_at_index(&m.code, generated, &m.mappings)[2..],
+            [0, source as i64]
+        );
+        assert_eq!(
+            mapping_at_index(&m.code, generated + "potato".len(), &m.mappings)[2..],
+            [0, (source + "potato".len()) as i64]
+        );
+    }
+}
+
+#[test]
 fn block_braces_map_to_their_source_positions() {
     let m = mapped("function f() {}");
     let open = m.code.find('{').expect("opening brace");

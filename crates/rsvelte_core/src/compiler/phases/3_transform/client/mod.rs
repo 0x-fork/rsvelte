@@ -414,6 +414,7 @@ pub(crate) fn print_module_program(
                         converted.loc_base,
                         None,
                         &converted.loc_map,
+                        &converted.brace_mappings,
                         &print_opts,
                     )
                     .code
@@ -691,7 +692,13 @@ pub(crate) fn transform_client(
         } else {
             composed_body_projection.as_ref()
         };
-        instance_script_imports = imports;
+        instance_script_imports = attach_import_origins(
+            imports,
+            retained_scripts.and_then(|scripts| scripts.instance.as_ref()),
+            instance_script.start,
+            analysis.is_typescript,
+            options.enable_sourcemap,
+        );
         let split_top_level_declarations =
             instance_has_top_level_multi_declarator(ast, instance_raw);
         let _script_start = super::profile::timer_start();
@@ -2159,6 +2166,13 @@ pub(crate) fn transform_client(
             // the grouping parens around one have to be gone before the first runs.
             let raw = super::shared::rune_parens::strip_rune_parens(&raw).unwrap_or(raw);
             let (module_imports, rest) = extract_imports(&raw);
+            let module_imports = attach_import_origins(
+                module_imports,
+                retained_scripts.and_then(|scripts| scripts.module.as_ref()),
+                module_content.start,
+                analysis.is_typescript,
+                options.enable_sourcemap,
+            );
             let retained_comment_stripped = if !analysis.is_typescript {
                 retained_scripts
                     .and_then(|scripts| scripts.module.as_ref())
@@ -2175,19 +2189,10 @@ pub(crate) fn transform_client(
                 None
             };
             // Add module script imports first (from module.body in official compiler)
-            for import_line in module_imports {
-                let cleaned = cleanup_import_line(&import_line);
-                if cleaned.is_empty() {
-                    continue;
+            for import in module_imports {
+                if let Some(statement) = mapped_import_statement(import, options.enable_sourcemap) {
+                    body.push(statement);
                 }
-                let trimmed = cleaned.trim();
-                // Ensure import statements end with semicolons, matching esrap behavior.
-                let with_semi = if !trimmed.ends_with(';') {
-                    format!("{};", trimmed)
-                } else {
-                    trimmed.to_string()
-                };
-                body.push(JsStatement::Raw(with_semi.into()));
             }
             let rest_trimmed = rest.trim();
             // A module `<script module>` whose only non-import content is comments
@@ -2216,21 +2221,10 @@ pub(crate) fn transform_client(
     // Extract and add imports from instance script
     // These are in state.hoisted after import * as $ (from analysis.instance_body.hoisted)
     if analysis.instance_script_content.is_some() {
-        for import_line in instance_script_imports {
-            let cleaned = cleanup_import_line(&import_line);
-            if cleaned.is_empty() {
-                continue;
+        for import in instance_script_imports {
+            if let Some(statement) = mapped_import_statement(import, options.enable_sourcemap) {
+                body.push(statement);
             }
-            let trimmed = cleaned.trim();
-            // Ensure import statements end with semicolons, matching esrap behavior.
-            // User code may omit semicolons (ASI), but the Svelte compiler's esrap
-            // printer always adds them.
-            let with_semi = if !trimmed.ends_with(';') {
-                format!("{};", trimmed)
-            } else {
-                trimmed.to_string()
-            };
-            body.push(JsStatement::Raw(with_semi.into()));
         }
     }
 
@@ -2682,6 +2676,7 @@ pub(crate) fn transform_client(
                             converted.loc_base,
                             map_source,
                             &converted.loc_map,
+                            &converted.brace_mappings,
                             &print_opts,
                         );
                         super::profile::record_esrap_client_split(super::profile::timer_elapsed(
@@ -3305,6 +3300,114 @@ fn retained_instance_statement_indices(
 // ============================================================================
 // Script Transformation Functions
 // ============================================================================
+
+#[derive(Debug)]
+struct ExtractedImport {
+    text: String,
+    origin: Option<ImportOrigin>,
+}
+
+#[derive(Debug)]
+struct ImportOrigin {
+    source_offset: u32,
+    source: String,
+}
+
+/// Pair extracted import text with the declaration span retained by phase 1.
+///
+/// TypeScript stripping can remove a whole type-only import, and the legacy
+/// extractor can split several imports packed onto one line, so the two lists
+/// cannot be joined by index. Compare each emitted declaration with the next
+/// retained declaration after applying the same TypeScript erasure and import
+/// cleanup. The comparison proves identity; the retained span is the source-map
+/// position and no generated-output/source search is needed later.
+fn attach_import_origins(
+    imports: Vec<String>,
+    retained: Option<&crate::ast::oxc_program::RetainedProgram<'_>>,
+    script_offset: u32,
+    is_typescript: bool,
+    enable_sourcemap: bool,
+) -> Vec<ExtractedImport> {
+    use oxc_span::GetSpan;
+
+    if !enable_sourcemap {
+        return imports
+            .into_iter()
+            .map(|text| ExtractedImport { text, origin: None })
+            .collect();
+    }
+
+    let candidates = retained.map(|retained| {
+        retained
+            .program()
+            .body
+            .iter()
+            .filter_map(|statement| {
+                matches!(statement, oxc_ast::ast::Statement::ImportDeclaration(_)).then(|| {
+                    let span = statement.span();
+                    let source = &retained.source()[span.start as usize..span.end as usize];
+                    let comparable = if is_typescript {
+                        crate::compiler::phases::phase2_analyze::types::strip_typescript(source)
+                    } else {
+                        source.to_string()
+                    };
+                    (span.start, source, cleaned_import_code(&comparable))
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut next_candidate = 0usize;
+
+    imports
+        .into_iter()
+        .map(|text| {
+            let expected = cleaned_import_code(&text);
+            let origin = candidates.as_ref().and_then(|candidates| {
+                candidates[next_candidate..]
+                    .iter()
+                    .position(|(_, _, comparable)| comparable == &expected)
+                    .map(|relative| {
+                        let index = next_candidate + relative;
+                        next_candidate = index + 1;
+                        let (start, source, _) = &candidates[index];
+                        ImportOrigin {
+                            source_offset: script_offset + *start,
+                            source: (*source).to_string(),
+                        }
+                    })
+            });
+            ExtractedImport { text, origin }
+        })
+        .collect()
+}
+
+fn cleaned_import_code(import: &str) -> String {
+    let cleaned = cleanup_import_line(import);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() || trimmed.ends_with(';') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed};")
+    }
+}
+
+fn mapped_import_statement(import: ExtractedImport, enable_sourcemap: bool) -> Option<JsStatement> {
+    let code = cleaned_import_code(&import.text);
+    if code.is_empty() {
+        return None;
+    }
+    let Some(origin) = import.origin.filter(|_| enable_sourcemap) else {
+        return Some(JsStatement::Raw(code.into()));
+    };
+    let copied_spans =
+        copied_spans_for_normalized_code(&code, &origin.source, origin.source_offset, None);
+    Some(JsStatement::RawMapped {
+        code: code.into(),
+        source_offset: origin.source_offset,
+        comment_anchor: None,
+        copied_spans,
+    })
+}
 
 /// Extract import statements from script content.
 /// Returns (imports, rest_of_script).

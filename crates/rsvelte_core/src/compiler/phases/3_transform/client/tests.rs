@@ -40,6 +40,21 @@ fn retained_instance_script_preserves_identifier_and_literal_source_map_spans() 
         "hoisted import must retain its normal output: {}",
         result.js.code
     );
+    let import_line = result
+        .js
+        .code
+        .lines()
+        .position(|line| line.contains("import dependency from 'dependency';"))
+        .expect("hoisted import is printed");
+    let generated_import = result.js.code.lines().nth(import_line).unwrap();
+    let dependency_column = generated_import.find("dependency").unwrap() as i64;
+    assert!(
+        mappings[import_line]
+            .iter()
+            .any(|segment| segment.as_slice() == [dependency_column, 0, 1, 7]),
+        "the hoisted import identifier must carry its retained span; generated={generated_import:?}, segments={:?}",
+        mappings[import_line]
+    );
     let generated_line = result
         .js
         .code
@@ -60,6 +75,70 @@ fn retained_instance_script_preserves_identifier_and_literal_source_map_spans() 
         line.iter()
             .any(|segment| segment.as_slice() == [literal_column, 0, 2, 15]),
         "literal must retain its original token span; generated={generated:?}, segments={line:?}"
+    );
+}
+
+#[test]
+fn typescript_import_cleanup_keeps_retained_identifier_spans() {
+    let source = "import { type Shape, value } from 'pkg';";
+    let retained = crate::ast::oxc_program::RetainedProgram::parse(source, true);
+    let stripped = crate::compiler::phases::phase2_analyze::types::strip_typescript(source);
+    let (imports, rest) = extract_imports(&stripped);
+    assert!(rest.trim().is_empty());
+
+    let imports = attach_import_origins(imports, Some(&retained), 17, true, true);
+    let statement = mapped_import_statement(imports.into_iter().next().unwrap(), true).unwrap();
+    let JsStatement::RawMapped {
+        code, copied_spans, ..
+    } = statement
+    else {
+        panic!("a retained import must use the mapped raw path");
+    };
+    let code_value = code.find("value").unwrap() as u32;
+    let source_value = 17 + source.find("value").unwrap() as u32;
+    assert!(copied_spans.iter().any(|span| {
+        span.code.start <= code_value
+            && span.code.end >= code_value + "value".len() as u32
+            && span.source.start + code_value - span.code.start == source_value
+    }));
+}
+
+#[test]
+fn template_member_root_identifier_preserves_source_map_span() {
+    let source = "<p>{Math.random()}</p>";
+    let result = crate::compiler::compile(
+        source,
+        crate::compiler::CompileOptions {
+            filename: Some("member-root-source-map.svelte".to_string()),
+            enable_sourcemap: true,
+            ..Default::default()
+        },
+    )
+    .expect("compiles");
+    let map: serde_json::Value =
+        serde_json::from_str(result.js.map.as_deref().expect("map")).expect("valid source map");
+    let mappings = crate::compiler::phases::phase3_transform::js_ast::codegen::decode_vlq_mappings(
+        map["mappings"].as_str().expect("VLQ mappings"),
+    );
+    let generated_line = result
+        .js
+        .code
+        .lines()
+        .position(|line| line.contains("Math.random()"))
+        .expect("template expression is printed");
+    let generated = result.js.code.lines().nth(generated_line).unwrap();
+    let root_column = generated.find("Math.random()").unwrap() as i64;
+    let line = &mappings[generated_line];
+
+    assert!(
+        line.iter()
+            .any(|segment| segment.as_slice() == [root_column, 0, 0, 4]),
+        "member root must retain its start; generated={generated:?}, segments={line:?}"
+    );
+    assert!(
+        line.iter()
+            .any(|segment| segment.as_slice() == [root_column + 4, 0, 0, 8]),
+        "member root must retain its end; generated={generated:?}, segments={line:?}"
     );
 }
 

@@ -66,7 +66,7 @@ use oxc_syntax::number::{BigintBase, NumberBase};
 use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use rsvelte_esrap::LocRange;
+use rsvelte_esrap::{BraceMapping, LocRange};
 use std::cell::RefCell;
 
 /// A converted program plus the comment coordinate space it needs to be printed
@@ -77,6 +77,7 @@ pub struct Converted<'a> {
     pub comment_source: Option<String>,
     pub loc_base: u32,
     pub loc_map: Vec<LocRange>,
+    pub brace_mappings: Vec<BraceMapping>,
 }
 
 impl<'a> Converted<'a> {
@@ -189,6 +190,8 @@ fn convert_once<'a, 'source>(
         arena,
         islands,
         synth: RefCell::new(Synth::new(loc_base)),
+        identifier_span_scopes: RefCell::new(Vec::new()),
+        brace_mappings: RefCell::new(Vec::new()),
         component_brace_span: program
             .component_brace_span
             .as_ref()
@@ -206,6 +209,7 @@ fn convert_once<'a, 'source>(
     })?;
 
     let synth = cx.synth.into_inner();
+    let brace_mappings = cx.brace_mappings.into_inner();
     let ab = AstBuilder::new(allocator);
     let body = ArenaVec::from_iter_in(body, &ab);
     let comments = ArenaVec::from_iter_in(synth.comments.iter().cloned(), &ab);
@@ -224,6 +228,7 @@ fn convert_once<'a, 'source>(
         comment_source: synth.enabled.then(|| synth.source.clone()),
         loc_base: synth.loc_base,
         loc_map: synth.loc_map.clone(),
+        brace_mappings,
     };
     Some((converted, synth))
 }
@@ -499,6 +504,10 @@ struct Cx<'a, 'arena, 'source> {
     arena: &'arena JsArena,
     islands: &'arena [AstIsland<'source>],
     synth: RefCell<Synth>,
+    /// Identifier locations inherited from the generated expression currently
+    /// being converted. A nested `Spanned` node stamps its own final location.
+    identifier_span_scopes: RefCell<Vec<(&'arena str, (u32, u32))>>,
+    brace_mappings: RefCell<Vec<BraceMapping>>,
     /// [`JsProgram::component_brace_span`], matched by function name.
     component_brace_span: Option<(&'arena str, u32, u32)>,
 }
@@ -512,10 +521,50 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
         self.ab.allocator().alloc_str(s)
     }
 
+    /// Resolve an out-of-band generated-identifier span.
+    ///
+    /// This is an original-source coordinate, so it must not raise
+    /// [`Synth::max_span`]: `loc_base` separates synthesized/comment-space
+    /// coordinates from source coordinates, and moving that boundary to one
+    /// source offset would make later source offsets look comment-bearing.
+    fn identifier_span(&self, name: &str) -> Span {
+        self.arena
+            .identifier_span(name)
+            .or_else(|| self.scoped_identifier_span(name))
+            .map_or(SPAN, |(start, end)| Span::new(start, end))
+    }
+
+    fn scoped_identifier_span(&self, name: &str) -> Option<(u32, u32)> {
+        self.identifier_span_scopes
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|(scope_name, span)| (*scope_name == name).then_some(*span))
+    }
+
     /// Resolve an `ExprId` handle and convert the pointed-to expression.
     #[inline]
     fn expr_id(&self, id: ExprId) -> Option<Expression<'a>> {
-        self.expr(self.arena.get_expr(id))
+        if let Some((name, span)) = self.arena.expression_identifier_span(id) {
+            self.identifier_span_scopes.borrow_mut().push((name, span));
+            let expression = self.expr(self.arena.get_expr(id));
+            self.identifier_span_scopes.borrow_mut().pop();
+            expression
+        } else {
+            self.expr(self.arena.get_expr(id))
+        }
+    }
+
+    /// Convert a member object and restore a span that could not be represented
+    /// by an in-band `Spanned` wrapper without hiding its IR variant.
+    #[inline]
+    fn member_object(&self, id: ExprId) -> Option<Expression<'a>> {
+        let mut object = self.expr_id(id)?;
+        if let Some((start, end)) = self.arena.bare_expr_span(id) {
+            *object.span_mut() = Span::new(start, end);
+            self.note_span(end);
+        }
+        Some(object)
     }
 
     /// Run `f` and report the comment-buffer region it consumed, so a container
@@ -1195,6 +1244,12 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
         let span = if span.is_empty() {
             Span::new(start, end)
         } else {
+            self.brace_mappings.borrow_mut().push(BraceMapping {
+                body_start: span.start,
+                body_end: span.end,
+                source_start: start,
+                source_end: end,
+            });
             span
         };
         Some((stmts, span))
@@ -1379,11 +1434,19 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
 
     fn expr(&self, expr: &JsExpr) -> Option<Expression<'a>> {
         match expr {
-            JsExpr::Identifier(name) => {
-                Some(Expression::new_identifier(SPAN, self.str(name), &self.ab))
-            }
+            JsExpr::Identifier(name) => Some(Expression::new_identifier(
+                self.identifier_span(name),
+                self.str(name),
+                &self.ab,
+            )),
             JsExpr::OpaqueIdentifier(name) => {
-                Some(Expression::new_identifier(SPAN, self.str(name), &self.ab))
+                let span = self
+                    .scoped_identifier_span(name)
+                    .map_or(SPAN, |(start, end)| {
+                        self.note_span(end);
+                        Span::new(start, end)
+                    });
+                Some(Expression::new_identifier(span, self.str(name), &self.ab))
             }
             JsExpr::Literal(lit) => self.literal(lit),
             JsExpr::This => Some(Expression::ThisExpression(ThisExpression::boxed(
@@ -2134,7 +2197,7 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
     /// Build a [`MemberExpression`] node from the IR member expression. Shared
     /// by the `Member` expression arm and the assignment-target helper.
     fn member_expr(&self, m: &JsMemberExpression) -> Option<oxc_ast::ast::MemberExpression<'a>> {
-        let object = self.expr_id(m.object)?;
+        let object = self.member_object(m.object)?;
         let member = match &m.property {
             JsMemberProperty::Identifier(name) => {
                 let property = IdentifierName::new(SPAN, self.str(name), &self.ab);
@@ -2199,7 +2262,7 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
         match expr {
             JsExpr::Identifier(name) => {
                 Some(SimpleAssignmentTarget::new_assignment_target_identifier(
-                    SPAN,
+                    self.identifier_span(name),
                     self.str(name),
                     &self.ab,
                 ))
@@ -2337,7 +2400,8 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
                 }
                 _ => return None,
             };
-            let binding = IdentifierReference::new(SPAN, self.str(name), &self.ab);
+            let binding =
+                IdentifierReference::new(self.identifier_span(name), self.str(name), &self.ab);
             return Some(
                 oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
                     AssignmentTargetPropertyIdentifier::boxed(SPAN, binding, init, &self.ab),
@@ -2425,6 +2489,22 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
                     let expr = Expression::new_identifier(SPAN, self.str(name), &self.ab);
                     PropertyKey::from(expr)
                 }
+                JsPropertyKey::SpannedIdentifier { name, start, end } => {
+                    let expr = Expression::new_identifier(
+                        Span::new(*start, *end),
+                        self.str(name),
+                        &self.ab,
+                    );
+                    PropertyKey::from(expr)
+                }
+                JsPropertyKey::SpannedStringLiteral { value, start, end } => {
+                    PropertyKey::from(Expression::new_string_literal(
+                        Span::new(*start, *end),
+                        self.str(value),
+                        None,
+                        &self.ab,
+                    ))
+                }
                 JsPropertyKey::Literal(lit) => {
                     let expr = self.literal(lit)?;
                     PropertyKey::from(expr)
@@ -2455,6 +2535,21 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
                 self.str(name),
                 &self.ab,
             )),
+            JsPropertyKey::SpannedIdentifier { name, start, end } => {
+                Some(PropertyKey::new_static_identifier(
+                    Span::new(*start, *end),
+                    self.str(name),
+                    &self.ab,
+                ))
+            }
+            JsPropertyKey::SpannedStringLiteral { value, start, end } => {
+                Some(PropertyKey::from(Expression::new_string_literal(
+                    Span::new(*start, *end),
+                    self.str(value),
+                    None,
+                    &self.ab,
+                )))
+            }
             JsPropertyKey::Literal(lit) => {
                 // A literal key is the literal expression in key position.
                 let expr = self.literal(lit)?;
@@ -2785,11 +2880,93 @@ mod tests {
     use super::{AstIsland, program_to_oxc, program_to_oxc_with_islands};
     use crate::ast::oxc_program::RetainedProgram;
     use crate::compiler::phases::phase3_transform::js_ast::{
-        JsArena, JsProgram, JsStatement, builders as b,
+        JsArena, JsExpr, JsMemberExpression, JsMemberProperty, JsProgram, JsStatement,
+        builders as b,
     };
     use oxc_allocator::Allocator;
-    use oxc_span::GetSpan;
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_span::{GetSpan, Span};
 
+    #[test]
+    fn generated_identifier_uses_keep_the_registered_span() {
+        let arena = JsArena::new();
+        arena.note_identifier_span("div", 7, 10);
+        let program = JsProgram::with_body(vec![b::stmt(&arena, b::id("div"))]);
+        let allocator = Allocator::default();
+        let converted =
+            program_to_oxc(&program, &arena, &allocator).expect("identifier is supported");
+
+        let oxc_ast::ast::Statement::ExpressionStatement(statement) = &converted.program.body[0]
+        else {
+            panic!("expected expression statement");
+        };
+        assert_eq!(statement.expression.span().start, 7);
+        assert_eq!(statement.expression.span().end, 10);
+    }
+
+    #[test]
+    fn generated_identifier_source_span_does_not_raise_comment_boundary() {
+        let arena = JsArena::new();
+        arena.note_identifier_span("div", 1_000, 1_003);
+        let program = JsProgram::with_body(vec![
+            JsStatement::Raw("/* comment */ value;".into()),
+            b::stmt(&arena, b::id("div")),
+        ]);
+        let allocator = Allocator::default();
+        let converted =
+            program_to_oxc(&program, &arena, &allocator).expect("commented chunk is supported");
+
+        assert!(converted.comment_source.is_some());
+        assert!(converted.loc_base < 1_000);
+        let oxc_ast::ast::Statement::ExpressionStatement(statement) = &converted.program.body[1]
+        else {
+            panic!("expected expression statement");
+        };
+        assert_eq!(
+            statement.expression.span(),
+            oxc_span::Span::new(1_000, 1_003)
+        );
+    }
+
+    #[test]
+    fn expression_identifier_spans_are_scoped_and_keep_explicit_children() {
+        let arena = JsArena::new();
+        let explicit = crate::compiler::phases::phase3_transform::js_ast::JsExpr::Spanned(
+            arena.alloc_expr(b::id("foo")),
+            1,
+            4,
+        );
+        let call = b::call(
+            &arena,
+            b::id("consume"),
+            vec![
+                b::id("foo"),
+                explicit,
+                crate::compiler::phases::phase3_transform::js_ast::JsExpr::OpaqueIdentifier(
+                    "foo".into(),
+                ),
+            ],
+        );
+        let call_id = arena.alloc_expr(call);
+        arena.note_expression_identifier_span(call_id, "foo", 8, 11);
+        let program = JsProgram::with_body(vec![b::stmt(
+            &arena,
+            crate::compiler::phases::phase3_transform::js_ast::JsExpr::Spanned(call_id, 0, 0),
+        )]);
+        let allocator = Allocator::default();
+        let converted = program_to_oxc(&program, &arena, &allocator).expect("call is supported");
+
+        let oxc_ast::ast::Statement::ExpressionStatement(statement) = &converted.program.body[0]
+        else {
+            panic!("expected expression statement");
+        };
+        let oxc_ast::ast::Expression::CallExpression(call) = &statement.expression else {
+            panic!("expected call expression");
+        };
+        assert_eq!(call.arguments[0].span(), Span::new(8, 11));
+        assert_eq!(call.arguments[1].span(), Span::new(1, 4));
+        assert_eq!(call.arguments[2].span(), Span::new(8, 11));
+    }
     #[test]
     fn retained_island_keeps_absolute_source_spans() {
         let retained = RetainedProgram::parse("import dep from 'dep'; let value = 1;", false);
@@ -2849,5 +3026,33 @@ mod tests {
                 .starts_with("export default function Input() {")
         );
         assert!(printed.mappings.iter().all(|mapping| mapping.gen_line != 0));
+    }
+
+    #[test]
+    fn member_object_keeps_out_of_band_identifier_span() {
+        let arena = JsArena::new();
+        let object = arena.alloc_expr(JsExpr::Identifier("Math".into()));
+        arena.set_bare_expr_span(object, 7, 11);
+        let member = JsExpr::Member(JsMemberExpression {
+            object,
+            property: JsMemberProperty::Identifier("random".into()),
+            computed: false,
+            optional: false,
+        });
+        let program = JsProgram::with_body(vec![b::stmt(&arena, member)]);
+        let allocator = Allocator::default();
+        let converted = program_to_oxc(&program, &arena, &allocator).expect("member is supported");
+
+        let Statement::ExpressionStatement(statement) = &converted.program.body[0] else {
+            panic!("expected expression statement");
+        };
+        let Expression::StaticMemberExpression(member) = &statement.expression else {
+            panic!("expected static member");
+        };
+        let Expression::Identifier(object) = &member.object else {
+            panic!("expected bare identifier object");
+        };
+        assert_eq!(object.span.start, 7);
+        assert_eq!(object.span.end, 11);
     }
 }

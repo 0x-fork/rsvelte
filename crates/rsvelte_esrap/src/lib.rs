@@ -40,7 +40,7 @@ mod printer;
 mod internal_tests;
 
 pub use command::Mapping;
-pub use printer::LocRange;
+pub use printer::{BraceMapping, LocRange};
 
 use oxc_ast::ast::Program;
 use oxc_span::Span;
@@ -186,6 +186,7 @@ pub fn print_split(
     loc_base: u32,
     map_source: Option<&str>,
     loc_map: &[LocRange],
+    brace_mappings: &[BraceMapping],
     options: &PrintOptions,
 ) -> PrintWithMap {
     let (comments, line_starts) = comments_and_line_starts(program, comment_source);
@@ -197,6 +198,7 @@ pub fn print_split(
             comment_source,
             map_source,
             loc_map,
+            brace_mappings,
             options,
             comments,
             line_starts,
@@ -209,6 +211,7 @@ pub fn print_split(
             comment_source,
             map_source,
             loc_map,
+            brace_mappings,
             options,
             comments,
             line_starts,
@@ -224,6 +227,7 @@ fn print_split_impl<const HAS_COMMENTS: bool>(
     comment_source: &str,
     map_source: Option<&str>,
     loc_map: &[LocRange],
+    brace_mappings: &[BraceMapping],
     options: &PrintOptions,
     comments: Vec<printer::Cmt>,
     line_starts: Vec<u32>,
@@ -233,7 +237,7 @@ fn print_split_impl<const HAS_COMMENTS: bool>(
         let mut printer =
             printer::Printer::<HAS_COMMENTS, true>::with_comments(options, comments, line_starts)
                 .with_placement_source(comment_source)
-                .with_split_coordinates(map_line_starts, loc_base, loc_map, false);
+                .with_split_coordinates(map_line_starts, loc_base, loc_map, brace_mappings, false);
         let mut ctx = context::Context::new_direct(&options.indent, program.source_text.len());
         printer.print_program(program, &mut ctx);
         let (buffer, returned, indent, dirty) = ctx.into_direct_parts();
@@ -247,7 +251,13 @@ fn print_split_impl<const HAS_COMMENTS: bool>(
     let mut printer =
         printer::Printer::<HAS_COMMENTS, false>::with_comments(options, comments, line_starts)
             .with_placement_source(comment_source)
-            .with_split_coordinates(map_line_starts, loc_base, loc_map, map_source.is_some());
+            .with_split_coordinates(
+                map_line_starts,
+                loc_base,
+                loc_map,
+                brace_mappings,
+                map_source.is_some(),
+            );
     let mut ctx = context::Context::new();
     printer.print_program(program, &mut ctx);
     let capacity = ctx.measure();

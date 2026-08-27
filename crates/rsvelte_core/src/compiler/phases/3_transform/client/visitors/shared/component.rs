@@ -1559,6 +1559,27 @@ fn process_bind_directive<'a>(
         return;
     }
 
+    // Upstream stamps both generated accessor keys with `attribute.name_loc`,
+    // whose range is the complete raw directive name (`bind:name|modifiers`).
+    // Parsed directives retain that exact range; the fallback only serves
+    // synthetic directives whose source location was deliberately omitted.
+    let (bind_key_start, bind_key_end) = bind.name_loc.as_ref().map_or_else(
+        || {
+            (
+                bind.start,
+                bind.start
+                    + "bind:".len() as u32
+                    + bind.name.len() as u32
+                    + bind
+                        .modifiers
+                        .iter()
+                        .map(|modifier| 1 + modifier.len() as u32)
+                        .sum::<u32>(),
+            )
+        },
+        |loc| (loc.start.character, loc.end.character),
+    );
+
     // In runes mode, when a bind directive's expression is rooted at an each block
     // item (e.g., bind:checked={partner.inTimeline}), flag the each block so it
     // emits the $$index parameter. This mirrors the official compiler's `mutate`
@@ -1617,9 +1638,13 @@ fn process_bind_directive<'a>(
                 use crate::compiler::phases::phase3_transform::js_ast::codegen::generate_expr;
                 generate_expr(&get_expr, &context.arena)
             };
-            let getter = b::getter(&context.arena,
-                bind.name.as_str(),
-                vec![b::return_value(&context.arena, JsExpr::Raw(get_body_str.into()))],
+            let getter = b::with_property_key_span(
+                b::getter(&context.arena,
+                    bind.name.as_str(),
+                    vec![b::return_value(&context.arena, JsExpr::Raw(get_body_str.into()))],
+                ),
+                bind_key_start,
+                bind_key_end,
             );
 
             if let Some(set_fn) = set_expr {
@@ -1643,10 +1668,14 @@ fn process_bind_directive<'a>(
                     use crate::compiler::phases::phase3_transform::js_ast::codegen::generate_expr;
                     format!("({})($$value)", generate_expr(&set_fn, &context.arena))
                 };
-                let setter = b::setter(&context.arena,
-                    bind.name.as_str(),
-                    "$$value",
-                    vec![b::stmt(&context.arena, JsExpr::Raw(set_body_str.into()))],
+                let setter = b::with_property_key_span(
+                    b::setter(&context.arena,
+                        bind.name.as_str(),
+                        "$$value",
+                        vec![b::stmt(&context.arena, JsExpr::Raw(set_body_str.into()))],
+                    ),
+                    bind_key_start,
+                    bind_key_end,
                 );
                 delayed_props.push(DelayedProp { prop: getter });
                 delayed_props.push(DelayedProp { prop: setter });
@@ -1793,7 +1822,11 @@ fn process_bind_directive<'a>(
         )]
     };
 
-    let getter = b::getter(&context.arena, bind.name.as_str(), getter_body);
+    let getter = b::with_property_key_span(
+        b::getter(&context.arena, bind.name.as_str(), getter_body),
+        bind_key_start,
+        bind_key_end,
+    );
 
     // Create setter
     // For store member expressions, we need to use $.store_mutate
@@ -2062,7 +2095,11 @@ fn process_bind_directive<'a>(
         }
     };
 
-    let setter = b::setter(&context.arena, bind.name.as_str(), "$$value", setter_body);
+    let setter = b::with_property_key_span(
+        b::setter(&context.arena, bind.name.as_str(), "$$value", setter_body),
+        bind_key_start,
+        bind_key_end,
+    );
 
     // Add as delayed props (bindings come at the end)
     delayed_props.push(DelayedProp { prop: getter });

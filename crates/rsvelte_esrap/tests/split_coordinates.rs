@@ -101,6 +101,27 @@ impl<'a> Assembler<'a> {
         self.body.extend(program.body);
     }
 
+    /// A verbatim-copied chunk whose individual byte positions map back to the
+    /// corresponding bytes in the original source.
+    fn push_linear_chunk(&mut self, text: &str, maps_to: u32) {
+        let base = source_offset(self.source.len());
+        let mut padded = " ".repeat(base as usize - 1);
+        padded.push('\n');
+        padded.push_str(text);
+        let owned = self.ab.allocator().alloc_str(&padded);
+        let program = self.parse(owned);
+        self.source.push_str(text);
+        self.source.push('\n');
+        self.comments.extend(program.comments.iter().copied());
+        self.loc_map.push(LocMapEntry {
+            start: base,
+            end: base + source_offset(text.len()),
+            source: Some(maps_to),
+            linear: true,
+        });
+        self.body.extend(program.body);
+    }
+
     fn wrap_body(&mut self, span: Span) {
         let body = ArenaVec::from_iter_in(std::mem::take(&mut self.body), &self.ab);
         self.body
@@ -149,6 +170,7 @@ impl Assembled<'_> {
             self.loc_base,
             None,
             &self.loc_map,
+            &[],
             &PrintOptions::default(),
         )
         .code
@@ -161,6 +183,7 @@ impl Assembled<'_> {
             self.loc_base,
             Some(map_source),
             &self.loc_map,
+            &[],
             &PrintOptions::default(),
         )
     }
@@ -319,6 +342,32 @@ fn loc_map_resolves_chunk_positions_back_into_the_source() {
 }
 
 #[test]
+fn named_import_tokens_keep_their_linear_source_positions() {
+    let import = "import { dependency } from 'dependency';";
+    let map_source = format!("<script>\n{import}\n</script>\n");
+    let anchor = source_offset(map_source.find(import).expect("import in map source"));
+
+    let allocator = Allocator::default();
+    let mut a = Assembler::new(&allocator, 512);
+    a.push_linear_chunk(import, anchor);
+    let mapped = a.finish().print_mapped(&map_source);
+    assert_eq!(mapped.code, import);
+
+    for (generated, source) in [(0, 0), (7, 7), (9, 9), (19, 19), (27, 27), (39, 39)] {
+        assert!(
+            mapped.mappings.iter().any(|segment| {
+                segment.gen_line == 0
+                    && segment.gen_column == generated
+                    && segment.source_line == 1
+                    && segment.source_column == source
+            }),
+            "missing import token boundary {generated}->{source}: mappings={:?}",
+            mapped.mappings
+        );
+    }
+}
+
+#[test]
 fn unmapped_chunks_emit_no_source_positions() {
     let map_source = "<script>\n\tlet count = 0;\n</script>\n";
     let allocator = Allocator::default();
@@ -330,6 +379,55 @@ fn unmapped_chunks_emit_no_source_positions() {
     assert!(
         mapped.mappings.is_empty(),
         "a chunk with no source anchor must not emit segments: {:?}",
+        mapped.mappings
+    );
+}
+
+#[test]
+fn linear_range_maps_a_token_end_before_a_generated_suffix() {
+    let expression = "dependency";
+    let generated = "dependency()";
+    let map_source = format!("<script>\n{expression}\n</script>\n");
+    let anchor = source_offset(
+        map_source
+            .find(expression)
+            .expect("expression in map source"),
+    );
+
+    let allocator = Allocator::default();
+    let mut a = Assembler::new(&allocator, 512);
+    let base = source_offset(a.source.len());
+    let mut padded = " ".repeat(base as usize - 1);
+    padded.push('\n');
+    padded.push_str(generated);
+    let owned = a.ab.allocator().alloc_str(&padded);
+    let program = a.parse(owned);
+    a.source.push_str(generated);
+    a.source.push('\n');
+    a.loc_map.push(LocMapEntry {
+        start: base,
+        end: base + source_offset(expression.len()),
+        source: Some(anchor),
+        linear: true,
+    });
+    a.loc_map.push(LocMapEntry {
+        start: base + source_offset(expression.len()),
+        end: base + source_offset(generated.len()),
+        source: None,
+        linear: false,
+    });
+    a.body.extend(program.body);
+
+    let mapped = a.finish().print_mapped(&map_source);
+    assert_eq!(mapped.code, "dependency();");
+    assert!(
+        mapped.mappings.iter().any(|segment| {
+            segment.gen_line == 0
+                && segment.gen_column == source_offset(expression.len())
+                && segment.source_line == 1
+                && segment.source_column == source_offset(expression.len())
+        }),
+        "missing copied token end before the generated suffix: {:?}",
         mapped.mappings
     );
 }
@@ -372,7 +470,16 @@ fn an_unlocated_program_keeps_its_statements_interior_comments() {
             program.span.start, 0,
             "{name}: program starts below loc_base"
         );
-        let printed = print_split(&program, source, 1, None, &[], &PrintOptions::default()).code;
+        let printed = print_split(
+            &program,
+            source,
+            1,
+            None,
+            &[],
+            &[],
+            &PrintOptions::default(),
+        )
+        .code;
         assert!(
             printed.contains(needle),
             "{name}: lost {needle} from\n{printed}"

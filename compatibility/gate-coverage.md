@@ -2028,11 +2028,43 @@ pass at a time: `collapsed_declaration` and `rune` cost **0 segments on `main` a
 same reading is produced by "these samples contain no `$state`/`$derived`/`$props` lowering
 whose position the pass would have supplied" and by "a span now supplies it", and nothing in
 the gate separates them. Deleting a pass on a 0 therefore needs a population that fires it;
-the passes deleted in #3015 (`default_function_wrapper` 84 → 0, `effect_callback` 8 → 0)
+the passes deleted in #3015 (`default_function_wrapper` 84 → 0, `effect_callback` 8 → 0,
+`template_element_runtime` 25 → 0, `legacy_prop_read` 16 → 0, `inline_script` 7 → 0,
+`bind_value` 5 → 0, `component_bind` 5 → 0, and `verbatim_import` 4 → 0)
 carry a *movement*, which is the reading a 0 cannot give.
+The last row also exposed a second blind spot in that measurement: counting generated segment
+positions alone reported 0 after the span landed even while the token fallback won the same
+position with the wrong original `foo`. Its compile-level regression therefore pins both ends
+of each carrier, not merely the presence of a generated segment.
+Both passes now have independent populations before deletion. The `collapsed_declaration`
+regression uses `let` and its name on separate source lines, verifies that both client and server
+code generation collapse them, and pins the generated name to the original name. The `rune`
+regression constructs all eight source/runtime pairs — including the two pairs each sharing
+`$.state` and `$.derived` — and pins both generated endpoints to the corresponding rune endpoints.
+The wrapper's original deletion still
+left a comment-only fallback behind; its final regression therefore constructs a component with
+an instance comment and checks all four brace-boundary segments, a population this aggregate
+count does not identify.
+
+The final `token` pass exposes a third outcome this gate cannot distinguish. After every named
+client pass was replaced, a diagnostic found **32** generated positions owned only by token
+matching, but all 32 were incomparable because the generated line/source pairing did not match
+official byte-for-byte. A non-zero contribution is therefore not evidence that the contribution
+belongs in the official map. Independently decoding the pinned official maps showed those
+heuristic positions were absent or attached to a different generated token; the token pass was
+deleted with no official segment attributed to it. This is **[D]** for the diagnostic's
+incomparability and an independent-oracle result for the deletion, not a claim derived from the
+aggregate segment count.
 
  There is no corpus-wide source-map gate to fall back on: `verify.mjs` compares generated
  code, and the svelte2tsx map gate (§ 12) covers a different artifact.
+
+The component-bind pass illustrates why the discriminating test must survive a partial
+deletion too: its generated-text search formerly supplied both `get`/`set` property-key
+segments and a template-interpolation segment. The accessor keys now carry the complete raw
+directive-name range as dedicated spanned property-key variants, and the pass no longer searches
+for `get` or `set`; its remaining `${name() ?? …}` scan is a separate carrier and must not be
+declared redundant from the accessor movement alone.
 
 ### Blind spot 14h — the unit is a segment, so a change that improves the map and breaks the *code* scores green
 

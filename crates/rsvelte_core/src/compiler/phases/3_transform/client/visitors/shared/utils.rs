@@ -2522,13 +2522,31 @@ fn collect_reactive_references_from_metadata(
             continue;
         }
 
+        let declaration_start = binding.declaration_start.or_else(|| {
+            binding
+                .references
+                .iter()
+                .find(|reference| reference.is_self_declaration)
+                .map(|reference| reference.start)
+        });
+        let span_declaration_identifier = |identifier: JsExpr| match declaration_start {
+            Some(start) => JsExpr::Spanned(
+                context.arena.alloc_expr(identifier),
+                start,
+                start.saturating_add(name.len() as u32),
+            ),
+            None => identifier,
+        };
+
         // Build the getter by applying the read transform if one exists
-        // (mirrors build_getter in the official compiler)
+        // (mirrors build_getter in the official compiler). The source location
+        // belongs to the identifier passed to the transform, not the call or
+        // member expression the transform builds around it.
         let getter = if let Some(transform) = context.state.transform.get(name.as_str()) {
             if let Some(ref read_source) = transform.read_source {
                 // read_source is set for destructured @const and let directive bindings.
                 // The getter should be $.get(read_source).name instead of $.get(name).
-                b::member(
+                span_declaration_identifier(b::member(
                     &context.arena,
                     b::call(
                         &context.arena,
@@ -2536,20 +2554,20 @@ fn collect_reactive_references_from_metadata(
                         vec![b::id(read_source)],
                     ),
                     name,
-                )
+                ))
             } else if let Some(read_fn) = transform.read {
                 let input_id = if let Some(ref replacement) = transform.replacement_id {
                     JsExpr::Identifier(replacement.clone().into())
                 } else {
                     JsExpr::Identifier(name.clone().into())
                 };
-                read_fn(&context.arena, input_id)
+                read_fn(&context.arena, span_declaration_identifier(input_id))
             } else {
-                JsExpr::Identifier(name.clone().into())
+                span_declaration_identifier(JsExpr::Identifier(name.clone().into()))
             }
         } else {
             // No transform registered (e.g., imports) - use the identifier directly
-            JsExpr::Identifier(name.clone().into())
+            span_declaration_identifier(JsExpr::Identifier(name.clone().into()))
         };
 
         // Check if we need to wrap in $.deep_read_state()
@@ -2590,22 +2608,6 @@ fn collect_reactive_references_from_metadata(
                 || (binding.kind == BindingKind::BindableProp && !has_read_transform)
                 || (binding.kind == BindingKind::EachIndex && has_read_transform)
                 || binding.declaration_kind == DeclarationKind::Import
-        };
-
-        let declaration_start = binding.declaration_start.or_else(|| {
-            binding
-                .references
-                .iter()
-                .find(|reference| reference.is_self_declaration)
-                .map(|reference| reference.start)
-        });
-        let getter = match declaration_start {
-            Some(start) => JsExpr::Spanned(
-                context.arena.alloc_expr(getter),
-                start,
-                start.saturating_add(name.len() as u32),
-            ),
-            None => getter,
         };
 
         let final_getter = if needs_deep_read {
@@ -2754,8 +2756,27 @@ fn collect_reactive_references_inner(
                 return;
             }
 
+            let declaration_start = binding_info.and_then(|binding| {
+                binding.declaration_start.or_else(|| {
+                    binding
+                        .references
+                        .iter()
+                        .find(|reference| reference.is_self_declaration)
+                        .map(|reference| reference.start)
+                })
+            });
+            let span_declaration_identifier = |identifier: JsExpr| match declaration_start {
+                Some(start) => JsExpr::Spanned(
+                    context.arena.alloc_expr(identifier),
+                    start,
+                    start.saturating_add(name.len() as u32),
+                ),
+                None => identifier,
+            };
+
             // Build the getter by applying the read transform if one exists
-            // (mirrors build_getter in the official compiler)
+            // (mirrors build_getter in the official compiler). Keep the source
+            // span on the identifier consumed by the transform.
             let has_read_transform = context
                 .state
                 .transform
@@ -2765,7 +2786,7 @@ fn collect_reactive_references_inner(
                 if let Some(ref read_source) = transform.read_source {
                     // read_source is set for destructured @const and let directive bindings.
                     // The getter should be $.get(read_source).name instead of $.get(name).
-                    b::member(
+                    span_declaration_identifier(b::member(
                         &context.arena,
                         b::call(
                             &context.arena,
@@ -2773,7 +2794,7 @@ fn collect_reactive_references_inner(
                             vec![b::id(read_source)],
                         ),
                         name.clone(),
-                    )
+                    ))
                 } else if let Some(read_fn) = transform.read {
                     // If this transform has a replacement_id, use it instead of the original name.
                     // This is used for legacy reactive imports where `numbers` -> `$$_import_numbers()`.
@@ -2782,13 +2803,13 @@ fn collect_reactive_references_inner(
                     } else {
                         JsExpr::Identifier(name.clone())
                     };
-                    read_fn(&context.arena, input_id)
+                    read_fn(&context.arena, span_declaration_identifier(input_id))
                 } else {
-                    JsExpr::Identifier(name.clone())
+                    span_declaration_identifier(JsExpr::Identifier(name.clone()))
                 }
             } else {
                 // No transform registered (e.g., imports) - use the identifier directly
-                JsExpr::Identifier(name.clone())
+                span_declaration_identifier(JsExpr::Identifier(name.clone()))
             };
 
             // Check if we need to wrap in $.deep_read_state().
@@ -2841,24 +2862,6 @@ fn collect_reactive_references_inner(
                         && !has_read_transform)
             } else {
                 false
-            };
-
-            let declaration_start = binding_info.and_then(|binding| {
-                binding.declaration_start.or_else(|| {
-                    binding
-                        .references
-                        .iter()
-                        .find(|reference| reference.is_self_declaration)
-                        .map(|reference| reference.start)
-                })
-            });
-            let getter = match declaration_start {
-                Some(start) => JsExpr::Spanned(
-                    context.arena.alloc_expr(getter),
-                    start,
-                    start.saturating_add(name.len() as u32),
-                ),
-                None => getter,
             };
 
             let final_getter = if needs_deep_read {

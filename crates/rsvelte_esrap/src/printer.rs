@@ -123,6 +123,9 @@ pub struct Printer<'opt, const HAS_COMMENTS: bool = true, const DIRECT: bool = f
     /// Sorted, disjoint ranges translating a comment-space offset back to a
     /// source-map-space offset.
     loc_map: Vec<LocRange>,
+    /// Source-backed brace ranges for default-exported wrapper functions whose
+    /// ordinary body span must remain in comment space.
+    brace_mappings: Vec<BraceMapping>,
     /// Decorator expressions have no esrap mapping visitor, so their nested
     /// tokens must stay unmapped too.
     map_nodes: bool,
@@ -143,6 +146,21 @@ pub struct LocRange {
     pub source: Option<u32>,
     /// Whether the range advances through the source byte for byte.
     pub linear: bool,
+}
+
+/// A block body whose braces map somewhere other than its comment-placement
+/// span. This lets a synthetic wrapper retain its comment island while its
+/// generated braces map to an enclosing source construct.
+#[derive(Debug, Clone, Copy)]
+pub struct BraceMapping {
+    /// Start of the wrapper body in comment-placement coordinates.
+    pub body_start: u32,
+    /// End of the wrapper body in comment-placement coordinates.
+    pub body_end: u32,
+    /// Source offset of the construct that owns the opening brace.
+    pub source_start: u32,
+    /// Source offset immediately after the construct's closing brace.
+    pub source_end: u32,
 }
 
 /// esrap's `write_comment`: re-emit a comment, splitting a multi-line block
@@ -699,6 +717,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             map_line_starts: None,
             loc_base: None,
             loc_map: Vec::new(),
+            brace_mappings: Vec::new(),
             map_nodes: true,
         }
     }
@@ -723,6 +742,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             placement_source: None,
             loc_base: None,
             loc_map: Vec::new(),
+            brace_mappings: Vec::new(),
             map_nodes: true,
         }
     }
@@ -753,12 +773,14 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         map_line_starts: Vec<u32>,
         loc_base: u32,
         loc_map: &[LocRange],
+        brace_mappings: &[BraceMapping],
         emit_locations: bool,
     ) -> Self {
         self.emit_locations = emit_locations;
         self.map_line_starts = Some(map_line_starts);
         self.loc_base = Some(loc_base);
         self.loc_map = loc_map.to_vec();
+        self.brace_mappings = brace_mappings.to_vec();
         self
     }
 
@@ -865,6 +887,29 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         Some((line, offset.saturating_sub(line_start)))
     }
 
+    /// Resolve the exclusive end of a source-backed node. A linear `LocRange`
+    /// carries a copied byte run as `[start, end)`, while an AST span also uses
+    /// `end` as the token's final source-map position. Prefer the copied run
+    /// ending at `offset` over a following range starting at the same boundary;
+    /// this matches `RawMapped`'s fallback span restorer.
+    fn map_end_position(&self, offset: u32) -> Option<(u32, u32)> {
+        if !self.loc_map.is_empty() {
+            let index = self.loc_map.partition_point(|range| range.end < offset);
+            if let Some(range) = self.loc_map.get(index)
+                && range.end == offset
+                && range.linear
+                && let Some(source) = range.source
+            {
+                let mapped = source + (offset - range.start);
+                let line_starts = self.map_line_starts.as_deref().unwrap_or(&self.line_starts);
+                let line = usize_to_u32(line_starts.partition_point(|&s| s <= mapped));
+                let line_start = line_starts[(line - 1) as usize];
+                return Some((line, mapped.saturating_sub(line_start)));
+            }
+        }
+        self.map_position(offset)
+    }
+
     /// esrap's `write_source_keyword`: bracket the literal `keyword` with
     /// source-map anchors for its exact span, so breakpoints land on the keyword.
     fn write_source_keyword(ctx: &mut Context<DIRECT>, line: u32, column: u32, keyword: &str) {
@@ -926,7 +971,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             ctx.location(line, column);
         }
         ctx.write(content);
-        if let Some((line, column)) = self.map_position(span.end) {
+        if let Some((line, column)) = self.map_end_position(span.end) {
             ctx.location(line, column);
         }
     }
@@ -938,8 +983,18 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         ctx: &mut Context<DIRECT>,
         body_start: u32,
         body_end: u32,
+        mapping: Option<&BraceMapping>,
         open: bool,
     ) {
+        if let Some(mapping) = mapping {
+            let span = if open {
+                Span::new(mapping.source_start, mapping.source_start + 1)
+            } else {
+                Span::new(mapping.source_end - 1, mapping.source_end)
+            };
+            self.write_node(ctx, span, if open { "{" } else { "}" });
+            return;
+        }
         if body_start >= body_end {
             ctx.write_ascii(if open { b'{' } else { b'}' });
             return;
@@ -2056,8 +2111,8 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
 
     fn import_declaration(&mut self, node: &ImportDeclaration, ctx: &mut Context<DIRECT>) {
         if node.specifiers.as_ref().is_none_or(|v| v.is_empty()) {
-            ctx.write("import ");
-            ctx.write(Self::string_literal(&node.source));
+            self.write_keyword(ctx, node.span.start, "import", " ");
+            self.write_node(ctx, node.source.span, Self::string_literal(&node.source));
             ctx.write_ascii(b';');
             return;
         }
@@ -2075,19 +2130,23 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             }
         }
 
-        ctx.write("import ");
+        let mut kw = self.keyword_cursor(node.span.start, true);
+        kw.write(ctx, "import ");
         if import_type {
-            ctx.write("type ");
+            kw.write(ctx, "type ");
         }
         if let Some(d) = default_spec {
-            ctx.write(d.local.name.as_str());
+            self.write_node(ctx, d.span, d.local.name.as_str());
             if namespace_spec.is_some() || !named.is_empty() {
                 ctx.write_ascii_bytes(b", ");
             }
         }
         if let Some(ns) = namespace_spec {
-            ctx.write("* as ");
-            ctx.write(ns.local.name.as_str());
+            self.write_node(
+                ctx,
+                ns.span,
+                format_compact!("* as {}", ns.local.name.as_str()),
+            );
         }
         if !named.is_empty() {
             ctx.write_ascii(b'{');
@@ -2102,8 +2161,8 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                         is_elision: false,
                     }
                 },
-                |_p, s, child| {
-                    Printer::<HAS_COMMENTS, DIRECT>::import_specifier(s, child);
+                |p, s, child| {
+                    p.import_specifier(s, child);
                 },
                 None,
                 true,
@@ -2114,7 +2173,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             ctx.write_ascii(b'}');
         }
         ctx.write(" from ");
-        ctx.write(Self::string_literal(&node.source));
+        self.write_node(ctx, node.source.span, Self::string_literal(&node.source));
         Self::import_attributes(node.with_clause.as_deref(), ctx);
         ctx.write_ascii(b';');
     }
@@ -2140,7 +2199,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         ctx.write_ascii_bytes(b" }");
     }
 
-    fn import_specifier(node: &ImportSpecifier, ctx: &mut Context<DIRECT>) {
+    fn import_specifier(&self, node: &ImportSpecifier, ctx: &mut Context<DIRECT>) {
         if matches!(node.import_kind, ImportOrExportKind::Type) {
             ctx.write("type ");
         }
@@ -2154,10 +2213,10 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         if let Some(name) = imported
             && name != node.local.name.as_str()
         {
-            ctx.write(name);
+            self.write_node(ctx, node.imported.span(), name);
             ctx.write_ascii_bytes(b" as ");
         }
-        ctx.write(node.local.name.as_str());
+        self.write_node(ctx, node.local.span, node.local.name.as_str());
     }
 
     fn export_declaration(&mut self, node: &ExportDeclaration, ctx: &mut Context<DIRECT>) {
@@ -2245,7 +2304,16 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         match &node.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                 // No trailing `;` after a function declaration.
-                self.function(f, ctx);
+                let mapping = f.body.as_ref().and_then(|body| {
+                    let span = body.span();
+                    self.brace_mappings
+                        .iter()
+                        .find(|mapping| {
+                            mapping.body_start == span.start && mapping.body_end == span.end
+                        })
+                        .copied()
+                });
+                self.function_with_brace_mapping(f, mapping.as_ref(), ctx);
             }
             ExportDefaultDeclarationKind::ClassDeclaration(c) => self.class_node(c, ctx),
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
@@ -2322,6 +2390,19 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
     /// esrap's `FunctionDeclaration|FunctionExpression`:
     /// `[async ]function[* ] id(params) { body }`.
     fn function(&mut self, node: &Function, ctx: &mut Context<DIRECT>) {
+        self.function_with_brace_mapping(node, None, ctx);
+    }
+
+    /// Print a function, optionally overriding the source positions of its body
+    /// braces. The override is supplied only by the default-export declaration
+    /// path, so a nested block with the same comment-space span cannot consume
+    /// the component wrapper's mapping.
+    fn function_with_brace_mapping(
+        &mut self,
+        node: &Function,
+        brace_mapping: Option<&BraceMapping>,
+        ctx: &mut Context<DIRECT>,
+    ) {
         if node.declare {
             ctx.write("declare ");
         }
@@ -2386,11 +2467,12 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             Some(body) => {
                 ctx.write_ascii(b' ');
                 let span = body.span();
-                self.block_with_directives(
+                self.block_with_directives_mapped(
                     &body.directives,
                     &body.statements,
                     span.start,
                     span.end,
+                    brace_mapping,
                     ctx,
                 );
             }
@@ -3196,6 +3278,18 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         body_end: u32,
         ctx: &mut Context<DIRECT>,
     ) {
+        self.block_with_directives_mapped(directives, body, body_start, body_end, None, ctx);
+    }
+
+    fn block_with_directives_mapped(
+        &mut self,
+        directives: &[Directive],
+        body: &[Statement],
+        body_start: u32,
+        body_end: u32,
+        brace_mapping: Option<&BraceMapping>,
+        ctx: &mut Context<DIRECT>,
+    ) {
         if !HAS_COMMENTS {
             let keep_empty = self.options.keep_empty_statements;
             let has_content = !directives.is_empty() || body.iter().any(|statement| {
@@ -3203,12 +3297,12 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                     || !matches!(statement, Statement::EmptyStatement(empty) if empty.span.end != u32::MAX)
             });
             if !has_content {
-                self.write_block_brace(ctx, body_start, body_end, true);
-                self.write_block_brace(ctx, body_start, body_end, false);
+                self.write_block_brace(ctx, body_start, body_end, brace_mapping, true);
+                self.write_block_brace(ctx, body_start, body_end, brace_mapping, false);
                 return;
             }
 
-            self.write_block_brace(ctx, body_start, body_end, true);
+            self.write_block_brace(ctx, body_start, body_end, brace_mapping, true);
             ctx.indent();
             ctx.newline();
             self.body_elems(
@@ -3222,7 +3316,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             );
             ctx.dedent();
             ctx.newline();
-            self.write_block_brace(ctx, body_start, body_end, false);
+            self.write_block_brace(ctx, body_start, body_end, brace_mapping, false);
             return;
         }
 
@@ -3242,18 +3336,18 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                 .comment_at(first_comment)
                 .is_some_and(|comment| comment.start < body_end);
             if has_statement || has_comment {
-                self.write_block_brace(ctx, body_start, body_end, true);
+                self.write_block_brace(ctx, body_start, body_end, brace_mapping, true);
                 ctx.indent();
                 ctx.newline();
                 self.block_comment_island(body, body_start, body_end, ctx);
                 ctx.dedent();
                 ctx.newline();
-                self.write_block_brace(ctx, body_start, body_end, false);
+                self.write_block_brace(ctx, body_start, body_end, brace_mapping, false);
                 return;
             }
         }
 
-        self.write_block_brace(ctx, body_start, body_end, true);
+        self.write_block_brace(ctx, body_start, body_end, brace_mapping, true);
         let mark = ctx.event_mark();
         let scope = ctx.begin_scope();
         self.body_elems(
@@ -3274,7 +3368,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             ctx.dedent();
             ctx.newline();
         }
-        self.write_block_brace(ctx, body_start, body_end, false);
+        self.write_block_brace(ctx, body_start, body_end, brace_mapping, false);
     }
 
     /// esrap's `handle_var_declaration` (not the generic `sequence`): break the
@@ -3850,7 +3944,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         }
         self.call_arguments(&node.arguments, node.span().end, ctx);
         if node.span.start != 0
-            && let Some((line, column)) = self.map_position(node.span.end)
+            && let Some((line, column)) = self.map_end_position(node.span.end)
         {
             ctx.location(line, column);
         }
@@ -4240,12 +4334,16 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
 
     fn property_key(&mut self, key: &PropertyKey, ctx: &mut Context<DIRECT>) {
         match key {
-            PropertyKey::StaticIdentifier(id) => ctx.write(id.name.as_str()),
+            PropertyKey::StaticIdentifier(id) => {
+                self.write_node(ctx, id.span, id.name.as_str());
+            }
             PropertyKey::PrivateIdentifier(id) => {
                 ctx.write_ascii(b'#');
                 ctx.write(id.name.as_str());
             }
-            PropertyKey::StringLiteral(s) => ctx.write(Self::string_literal(s)),
+            PropertyKey::StringLiteral(s) => {
+                self.write_node(ctx, s.span, Self::string_literal(s));
+            }
             PropertyKey::NumericLiteral(n) => ctx.write(literal_raw(
                 n.raw.as_ref().map(oxc_ast::ast::Str::as_str),
                 || format_compact!("{}", n.value),

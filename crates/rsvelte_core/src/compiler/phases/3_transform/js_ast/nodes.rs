@@ -560,6 +560,22 @@ pub struct JsProperty {
 #[derive(Debug, Clone)]
 pub enum JsPropertyKey {
     Identifier(CompactString),
+    /// An identifier key whose source range belongs to the key itself.
+    ///
+    /// Keep this distinct from `JsExpr::Spanned`: property keys are not
+    /// expressions, and wrapping an expression changes the variants seen by
+    /// downstream structural lowering.
+    SpannedIdentifier {
+        name: CompactString,
+        start: u32,
+        end: u32,
+    },
+    /// A string-literal key whose source range belongs to the key itself.
+    SpannedStringLiteral {
+        value: CompactString,
+        start: u32,
+        end: u32,
+    },
     Literal(JsLiteral),
     Computed(ExprId),
 }
