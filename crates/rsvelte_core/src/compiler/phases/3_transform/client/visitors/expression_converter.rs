@@ -1156,6 +1156,12 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
                     right: context.arena.alloc_expr(conv_right),
                 })
             };
+            let result = preserve_each_mutation_sequence(
+                result,
+                original_root_name.as_deref(),
+                matches!(left_node, JsNode::MemberExpression { .. }),
+                context,
+            );
 
             wrap_with_ownership_mutation(ownership_info, result, context)
         }
@@ -1225,6 +1231,12 @@ fn convert_js_node(node: &JsNode, context: &mut ComponentContext) -> JsExpr {
                     prefix,
                 })
             };
+            let result = preserve_each_mutation_sequence(
+                result,
+                extract_root_identifier_from_jsnode(arg_node, pa).as_deref(),
+                matches!(arg_node, JsNode::MemberExpression { .. }),
+                context,
+            );
 
             wrap_with_ownership_mutation(ownership_info, result, context)
         }
@@ -4803,6 +4815,15 @@ fn convert_assignment_expression(
             right,
         })
     };
+    let result = preserve_each_mutation_sequence(
+        result,
+        original_root_name.as_deref(),
+        obj.get("left")
+            .and_then(|left| left.get("type"))
+            .and_then(|node_type| node_type.as_str())
+            == Some("MemberExpression"),
+        context,
+    );
 
     // Wrap with ownership validation if needed
     if let Some((prop_alias, path, source_loc)) = ownership_info {
@@ -5267,6 +5288,37 @@ fn try_transform_assignment(
     }
 
     None
+}
+
+/// Preserve the sequence that upstream's each-item `mutate` transform always
+/// builds, including when its invalidation tail is empty. A plain mutation is
+/// equivalent at runtime, but esrap prints the one-element sequence with
+/// parentheses. Existing sequences must remain untouched: they can contain
+/// legacy/store invalidations whose ordering is semantically significant.
+pub(crate) fn preserve_each_mutation_sequence(
+    result: JsExpr,
+    original_root_name: Option<&str>,
+    is_member_mutation: bool,
+    context: &ComponentContext,
+) -> JsExpr {
+    use crate::compiler::phases::phase3_transform::js_ast::builders as b;
+
+    if !is_member_mutation || matches!(result, JsExpr::Sequence(_)) {
+        return result;
+    }
+
+    let Some(root_name) = original_root_name else {
+        return result;
+    };
+    let is_each_item = context.state.each_binding_context.iter().rev().any(|each| {
+        each.item_name == root_name || each.destructured_update_paths.contains_key(root_name)
+    });
+
+    if is_each_item {
+        b::sequence(vec![result])
+    } else {
+        result
+    }
 }
 
 /// Wrap a prop-member-mutation expression in
@@ -6845,6 +6897,17 @@ fn convert_update_expression(
             prefix,
         })
     };
+    let result = preserve_each_mutation_sequence(
+        result,
+        argument_value
+            .and_then(extract_root_identifier_from_json)
+            .as_deref(),
+        argument_value
+            .and_then(|argument| argument.get("type"))
+            .and_then(|node_type| node_type.as_str())
+            == Some("MemberExpression"),
+        context,
+    );
 
     // Wrap with ownership validation if needed
     if let Some((prop_alias, path, source_loc)) = ownership_info {
