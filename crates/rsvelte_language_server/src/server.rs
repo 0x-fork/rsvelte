@@ -1926,6 +1926,16 @@ impl Server {
             return;
         }
         let completion_site = self.completion_site(&request);
+        if completion_site == Some(CompletionSite::BlockMarker)
+            && fallback_result.is_none()
+            && self.is_opening_block_completion(&request)
+        {
+            // An unfinished unknown `{#...` now makes the compiler reject the
+            // projection. Preserve the pre-diagnostic completion response when
+            // the native provider also has nothing to offer.
+            self.respond_nothing(request.id);
+            return;
+        }
         let component_site = self.component_completion_site(&request);
         let code_action_diagnostic_codes = code_action_diagnostic_codes(&request);
         let Some(runtime) = &self.tsgo else {
@@ -2073,6 +2083,33 @@ impl Server {
             });
         }
         Some(CompletionSite::RawTemplateText)
+    }
+
+    fn is_opening_block_completion(&self, request: &Request) -> bool {
+        let uri = request
+            .params
+            .pointer("/textDocument/uri")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|uri| uri.parse::<Uri>().ok());
+        let position = request
+            .params
+            .get("position")
+            .cloned()
+            .and_then(|position| serde_json::from_value(position).ok());
+        let (Some(uri), Some(position)) = (uri, position) else {
+            return false;
+        };
+        let Some(document) = self.documents.get(&uri) else {
+            return false;
+        };
+        let offset = document.offset_at(position);
+        let Some(before) = document.text().get(..offset) else {
+            return false;
+        };
+        before
+            .rfind('{')
+            .and_then(|brace| before.get(brace + 1..))
+            .is_some_and(|marker| marker.trim_start().starts_with('#'))
     }
 
     fn component_completion_site(&self, request: &Request) -> Option<ComponentCompletionSite> {
