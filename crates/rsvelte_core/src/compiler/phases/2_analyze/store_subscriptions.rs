@@ -382,7 +382,10 @@ pub fn detect_store_subscriptions(
             // the module scope (0) or instance scope.
             if binding.scope_index != 0 && binding.scope_index != instance_scope {
                 // This is a scoped subscription - the store is not at top level
-                return Err(errors::store_invalid_scoped_subscription());
+                return Err(errors::store_invalid_scoped_subscription().at(
+                    store_ref.position as u32,
+                    (store_ref.position + ref_name.len()) as u32,
+                ));
             }
 
             // Check for bindings that represent local variables (EachItem, SnippetParam, etc.)
@@ -396,7 +399,10 @@ pub fn detect_store_subscriptions(
                     | BindingKind::AwaitThen
                     | BindingKind::AwaitCatch
             ) {
-                return Err(errors::store_invalid_scoped_subscription());
+                return Err(errors::store_invalid_scoped_subscription().at(
+                    store_ref.position as u32,
+                    (store_ref.position + ref_name.len()) as u32,
+                ));
             }
         }
 
