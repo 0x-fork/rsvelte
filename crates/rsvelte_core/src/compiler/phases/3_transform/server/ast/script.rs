@@ -54,6 +54,7 @@ use crate::ast::template::Script;
 use crate::compiler::phases::phase2_analyze::scope::BindingKind;
 use crate::compiler::phases::phase3_transform::builders::B;
 use crate::compiler::phases::phase3_transform::client::expression_utils::wrap_await_with_save_in_async_derived;
+use oxc_allocator::CloneIn;
 use oxc_ast::ast::{Comment, Expression as OxcExpression, Statement, VariableDeclarationKind};
 use oxc_ast_visit::VisitMut;
 use oxc_span::{GetSpan, Span};
@@ -847,6 +848,20 @@ fn record_classification_failure(
     ));
 }
 
+/// Prepare a TypeScript script for the server's independent JavaScript
+/// classification parse. Phase 1 accepts one deprecated import-attributes
+/// spelling through a same-length parser-only repair, so every server port must
+/// apply that repair before erasing types as well.
+fn strip_typescript_for_classification(source: &str) -> String {
+    let repaired =
+        crate::compiler::phases::phase1_parse::expression::repair_ts_newline_import_assert(
+            source, true,
+        );
+    crate::compiler::phases::phase2_analyze::types::strip_typescript(
+        repaired.as_deref().unwrap_or(source),
+    )
+}
+
 fn transform_script<'a>(
     script: &Script,
     state: &mut ServerTransformState<'a>,
@@ -870,21 +885,21 @@ fn transform_script<'a>(
     // index into the local `src`, and the reparse helpers copy the slice text into
     // the state allocator — none of them index `state.source` directly. So binding
     // `src` to the stripped buffer keeps offsets internally consistent.
+    let script_is_typescript =
+        super::super::helpers::script_is_typescript(script) || state.analysis.is_typescript;
+    let source_slice = &state.source[start..end];
     let stripped;
     // TS is detected COMPONENT-wide, not per-script: if EITHER script carries
     // `lang="ts"` the whole component is parsed as TS (upstream `force_typescript`),
     // so a `<script>` with no `lang` attribute can still hold TS syntax
     // (`import type …`, `satisfies …`) when a sibling `<script lang="ts">` exists.
     // Strip in that case too — mirrors the OLD oracle's component-wide `is_ts`.
-    let src: &str =
-        if super::super::helpers::script_is_typescript(script) || state.analysis.is_typescript {
-            stripped = crate::compiler::phases::phase2_analyze::types::strip_typescript(
-                &state.source[start..end],
-            );
-            &stripped
-        } else {
-            &state.source[start..end]
-        };
+    let src: &str = if script_is_typescript {
+        stripped = strip_typescript_for_classification(source_slice);
+        &stripped
+    } else {
+        source_slice
+    };
 
     // Every decision below reads this text (directly, or through spans into it),
     // so the grouping parens around a rune call have to be gone first.
@@ -943,12 +958,13 @@ fn transform_script<'a>(
                 // inside it, so replaying them in place would put them in the
                 // wrong function.
                 Statement::ImportDeclaration(imp) => {
-                    let slice = &src[imp.span.start as usize..imp.span.end as usize];
-                    if let Some(rehomed) = state.reparse_statement(slice) {
-                        match import_sink.as_deref_mut() {
-                            Some(sink) => sink.push(rehomed),
-                            None => out.push(rehomed),
-                        }
+                    // Keep parser repairs such as deprecated `assert` import
+                    // attributes normalized to `with`; re-parsing the original
+                    // source would either undo the repair or reject the import.
+                    let rehomed = Statement::ImportDeclaration(imp.clone_in(state.allocator));
+                    match import_sink.as_deref_mut() {
+                        Some(sink) => sink.push(rehomed),
+                        None => out.push(rehomed),
                     }
                 }
                 Statement::VariableDeclaration(vd) => {
@@ -3473,21 +3489,21 @@ fn transform_script_legacy<'a>(
 
     // TypeScript components: strip TS from the slice before parsing (see the
     // matching note in `transform_script` for the offset-consistency rationale).
+    let script_is_typescript =
+        super::super::helpers::script_is_typescript(script) || state.analysis.is_typescript;
+    let source_slice = &state.source[start..end];
     let stripped;
     // TS is detected COMPONENT-wide, not per-script: if EITHER script carries
     // `lang="ts"` the whole component is parsed as TS (upstream `force_typescript`),
     // so a `<script>` with no `lang` attribute can still hold TS syntax
     // (`import type …`, `satisfies …`) when a sibling `<script lang="ts">` exists.
     // Strip in that case too — mirrors the OLD oracle's component-wide `is_ts`.
-    let src: &str =
-        if super::super::helpers::script_is_typescript(script) || state.analysis.is_typescript {
-            stripped = crate::compiler::phases::phase2_analyze::types::strip_typescript(
-                &state.source[start..end],
-            );
-            &stripped
-        } else {
-            &state.source[start..end]
-        };
+    let src: &str = if script_is_typescript {
+        stripped = strip_typescript_for_classification(source_slice);
+        &stripped
+    } else {
+        source_slice
+    };
 
     // Every decision below reads this text (directly, or through spans into it),
     // so the grouping parens around a rune call have to be gone first.
@@ -3569,12 +3585,13 @@ fn transform_script_legacy<'a>(
                 // inside it, so replaying them in place would put them in the
                 // wrong function.
                 Statement::ImportDeclaration(imp) => {
-                    let slice = &src[imp.span.start as usize..imp.span.end as usize];
-                    if let Some(rehomed) = state.reparse_statement(slice) {
-                        match import_sink.as_deref_mut() {
-                            Some(sink) => sink.push(rehomed),
-                            None => out.push(rehomed),
-                        }
+                    // Keep parser repairs such as deprecated `assert` import
+                    // attributes normalized to `with`; re-parsing the original
+                    // source would either undo the repair or reject the import.
+                    let rehomed = Statement::ImportDeclaration(imp.clone_in(state.allocator));
+                    match import_sink.as_deref_mut() {
+                        Some(sink) => sink.push(rehomed),
+                        None => out.push(rehomed),
                     }
                 }
                 Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {
@@ -4878,7 +4895,6 @@ impl<'a> PipePrint for oxc_ast::ast::Program<'a> {
 /// needs the body as TEXT; cloning lets us print a throwaway copy while keeping
 /// the originals available for the non-async fall-through path.
 fn body_clone<'a>(state: &ServerTransformState<'a>, body: &[Statement<'a>]) -> Vec<Statement<'a>> {
-    use oxc_allocator::CloneIn;
     body.iter().map(|s| s.clone_in(state.allocator)).collect()
 }
 
