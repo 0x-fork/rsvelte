@@ -798,12 +798,125 @@ fn build_fallback_args(
             let default_expr =
                 convert_expression(&Expression::from_json(default_value.clone()), context);
             let default_expr = apply_transforms_to_expression(&default_expr, context);
+            let default_expr = preserve_default_parentheses(default_value, default_expr, context);
             vec![
                 b::thunk(&context.arena, default_expr),
                 JsExpr::Literal(JsLiteral::Boolean(true)),
             ]
         }
     }
+}
+
+/// Reproduce the parentheses that esrap adds when upstream rebuilds a snippet
+/// default as a generated thunk. The compact client IR loses the distinction at
+/// these two expression shapes, so carry this snippet-local formatting decision
+/// as a marker call; `to_oxc` restores the real wrapper.
+fn preserve_default_parentheses(
+    value: &serde_json::Value,
+    expr: JsExpr,
+    context: &ComponentContext,
+) -> JsExpr {
+    preserve_default_parentheses_tree(value, expr, context, true)
+}
+
+fn preserve_default_parentheses_tree(
+    value: &serde_json::Value,
+    expr: JsExpr,
+    context: &ComponentContext,
+    root: bool,
+) -> JsExpr {
+    let expr = match expr {
+        JsExpr::Spanned(inner, start, end) => {
+            let inner = context.arena.get_expr(inner).clone();
+            let inner = preserve_default_parentheses_tree(value, inner, context, root);
+            JsExpr::Spanned(context.arena.alloc_expr(inner), start, end)
+        }
+        other => preserve_default_parentheses_inner(value, other, context),
+    };
+
+    if root && value.get("type").and_then(serde_json::Value::as_str) == Some("SequenceExpression") {
+        parenthesize_snippet_default(expr, context)
+    } else {
+        expr
+    }
+}
+
+fn preserve_default_parentheses_inner(
+    value: &serde_json::Value,
+    expr: JsExpr,
+    context: &ComponentContext,
+) -> JsExpr {
+    match (value.get("type").and_then(serde_json::Value::as_str), expr) {
+        (Some("ConditionalExpression"), JsExpr::Conditional(mut conditional)) => {
+            for (key, slot) in [
+                ("test", &mut conditional.test),
+                ("consequent", &mut conditional.consequent),
+                ("alternate", &mut conditional.alternate),
+            ] {
+                if let Some(child) = value.get(key) {
+                    let current = context.arena.get_expr(*slot).clone();
+                    let mut child_expr =
+                        preserve_default_parentheses_tree(child, current, context, false);
+                    // esrap parenthesises a conditional used as another
+                    // conditional's consequent even though the grammar's
+                    // right-associativity makes the grouping optional.
+                    if key == "consequent"
+                        && child.get("type").and_then(serde_json::Value::as_str)
+                            == Some("ConditionalExpression")
+                        && source_parenthesizes(child, &context.state.analysis.source)
+                    {
+                        child_expr = parenthesize_snippet_default(child_expr, context);
+                    }
+                    *slot = context.arena.alloc_expr(child_expr);
+                }
+            }
+            JsExpr::Conditional(conditional)
+        }
+        (Some("SequenceExpression"), JsExpr::Sequence(mut sequence)) => {
+            if let Some(children) = value
+                .get("expressions")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (child, current) in children.iter().zip(sequence.expressions.iter_mut()) {
+                    *current =
+                        preserve_default_parentheses_tree(child, current.clone(), context, false);
+                }
+            }
+            JsExpr::Sequence(sequence)
+        }
+        (_, other) => other,
+    }
+}
+
+fn parenthesize_snippet_default(expr: JsExpr, context: &ComponentContext) -> JsExpr {
+    use crate::compiler::phases::phase3_transform::js_ast::to_oxc::SNIPPET_DEFAULT_PAREN_MARKER;
+
+    b::call(
+        &context.arena,
+        JsExpr::OpaqueIdentifier(SNIPPET_DEFAULT_PAREN_MARKER.into()),
+        vec![expr],
+    )
+}
+
+fn source_parenthesizes(value: &serde_json::Value, source: &str) -> bool {
+    let Some(start) = value.get("start").and_then(serde_json::Value::as_u64) else {
+        return false;
+    };
+    let Some(end) = value.get("end").and_then(serde_json::Value::as_u64) else {
+        return false;
+    };
+    let (mut before, mut after) = (start as usize, end as usize);
+    let bytes = source.as_bytes();
+    if before > bytes.len() || after > bytes.len() {
+        return false;
+    }
+    while before > 0 && bytes[before - 1].is_ascii_whitespace() {
+        before -= 1;
+    }
+    while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+        after += 1;
+    }
+    before > 0 && after < bytes.len() && bytes[before - 1] == b'(' && bytes[after] == b')'
 }
 
 /// Check if a JSON AST expression is "simple" (doesn't need thunking).

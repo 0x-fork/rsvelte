@@ -497,6 +497,13 @@ impl Synth {
 /// after reparse and rebuilds the real single-element `SequenceExpression`.
 pub(crate) const SINGLE_TARGET_DESTRUCTURE_SEQUENCE_MARKER: &str = "__rsvelte_seq1";
 
+/// Marker used by snippet-default lowering to carry an explicit source
+/// parenthesis through the compact client IR. The rsvelte printer deliberately
+/// drops oxc's `ParenthesizedExpression` nodes, so conversion rebuilds the
+/// equivalent one-element `SequenceExpression`; esrap always prints a sequence
+/// with parentheses, including when its only item is itself a sequence.
+pub(crate) const SNIPPET_DEFAULT_PAREN_MARKER: &str = "\0rsvelte_snippet_paren";
+
 /// Conversion context: holds the oxc [`AstBuilder`] and the IR arena used to
 /// resolve [`ExprId`] handles.
 struct Cx<'a, 'arena, 'source> {
@@ -1463,6 +1470,19 @@ impl<'a, 'arena, 'source> Cx<'a, 'arena, 'source> {
                 })
             }
             JsExpr::Member(m) => self.member(m),
+            JsExpr::Call(c)
+                if matches!(self.arena.get_expr(c.callee), JsExpr::OpaqueIdentifier(name)
+                    if name.as_str() == SNIPPET_DEFAULT_PAREN_MARKER)
+                    && c.arguments.len() == 1
+                    && !c.optional =>
+            {
+                let inner = self.expr(&c.arguments[0])?;
+                Some(Expression::SequenceExpression(SequenceExpression::boxed(
+                    SPAN,
+                    ArenaVec::from_value_in(inner, &self.ab),
+                    &self.ab,
+                )))
+            }
             JsExpr::Call(c) => {
                 let callee = self.expr_id(c.callee)?;
                 let args = self.arguments(&c.arguments)?;
