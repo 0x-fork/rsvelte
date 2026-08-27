@@ -3817,9 +3817,7 @@ fn convert_ts_function_like_params(
     out
 }
 
-/// Convert a member of a `TSTypeLiteral` / interface body. Currently models
-/// `TSPropertySignature` exactly (the common inline-props case); other
-/// signature kinds degrade to a span-bearing node.
+/// Convert a member of a `TSTypeLiteral` / interface body.
 fn convert_ts_signature(
     arena: &ParseArena,
     sig: &oxc_ast::ast::TSSignature,
@@ -3856,23 +3854,130 @@ fn convert_ts_signature(
             }
             Value::Object(obj)
         }
-        // Index / method / call / construct signatures: span-bearing node so
-        // the member is still addressable even though it isn't fully modelled.
-        _ => {
-            let span = sig.span();
-            let start = offset + span.start as usize;
-            let end = offset + span.end as usize;
-            let type_name = match sig {
-                TSSignature::TSIndexSignature(_) => "TSIndexSignature",
-                TSSignature::TSCallSignatureDeclaration(_) => "TSCallSignatureDeclaration",
-                TSSignature::TSConstructSignatureDeclaration(_) => {
-                    "TSConstructSignatureDeclaration"
-                }
-                TSSignature::TSMethodSignature(_) => "TSMethodSignature",
-                TSSignature::TSPropertySignature(_) => "TSPropertySignature",
-            };
+        TSSignature::TSMethodSignature(method) => {
+            use oxc_ast::ast::TSMethodSignatureKind;
+
+            let start = offset + method.span.start as usize;
+            let end = offset + method.span.end as usize;
             let mut obj = Map::new();
-            obj.set_field("type", Value::String(type_name.to_string()));
+            obj.set_field("type", Value::String("TSMethodSignature".to_string()));
+            push_span_fields(&mut obj, start, end, line_offsets);
+            obj.set_field("computed", Value::Bool(method.computed));
+            obj.set_field(
+                "key",
+                convert_ts_property_key(&method.key, offset, line_offsets),
+            );
+            obj.set_field(
+                "kind",
+                Value::String(
+                    match method.kind {
+                        TSMethodSignatureKind::Method => "method",
+                        TSMethodSignatureKind::Get => "get",
+                        TSMethodSignatureKind::Set => "set",
+                    }
+                    .to_string(),
+                ),
+            );
+            obj.set_field(
+                "parameters",
+                Value::Array(convert_ts_function_like_params(
+                    arena,
+                    method.this_param.as_deref(),
+                    &method.params,
+                    offset,
+                    line_offsets,
+                )),
+            );
+            if method.optional {
+                obj.set_field("optional", Value::Bool(true));
+            }
+            if let Some(parameters) = &method.type_parameters {
+                obj.set_field(
+                    "typeParameters",
+                    convert_ts_type_parameter_declaration(arena, parameters, offset, line_offsets),
+                );
+            }
+            if let Some(return_type) = &method.return_type {
+                obj.set_field(
+                    "typeAnnotation",
+                    convert_type_annotation_adjusted(arena, return_type, offset, line_offsets),
+                );
+            }
+            Value::Object(obj)
+        }
+        TSSignature::TSCallSignatureDeclaration(call) => {
+            let start = offset + call.span.start as usize;
+            let end = offset + call.span.end as usize;
+            let mut obj = Map::new();
+            obj.set_field(
+                "type",
+                Value::String("TSCallSignatureDeclaration".to_string()),
+            );
+            push_span_fields(&mut obj, start, end, line_offsets);
+            obj.set_field(
+                "parameters",
+                Value::Array(convert_ts_function_like_params(
+                    arena,
+                    call.this_param.as_deref(),
+                    &call.params,
+                    offset,
+                    line_offsets,
+                )),
+            );
+            if let Some(parameters) = &call.type_parameters {
+                obj.set_field(
+                    "typeParameters",
+                    convert_ts_type_parameter_declaration(arena, parameters, offset, line_offsets),
+                );
+            }
+            if let Some(return_type) = &call.return_type {
+                obj.set_field(
+                    "typeAnnotation",
+                    convert_type_annotation_adjusted(arena, return_type, offset, line_offsets),
+                );
+            }
+            Value::Object(obj)
+        }
+        TSSignature::TSConstructSignatureDeclaration(constructor) => {
+            let start = offset + constructor.span.start as usize;
+            let end = offset + constructor.span.end as usize;
+            let mut obj = Map::new();
+            obj.set_field(
+                "type",
+                Value::String("TSConstructSignatureDeclaration".to_string()),
+            );
+            push_span_fields(&mut obj, start, end, line_offsets);
+            obj.set_field(
+                "parameters",
+                Value::Array(convert_ts_function_like_params(
+                    arena,
+                    None,
+                    &constructor.params,
+                    offset,
+                    line_offsets,
+                )),
+            );
+            if let Some(parameters) = &constructor.type_parameters {
+                obj.set_field(
+                    "typeParameters",
+                    convert_ts_type_parameter_declaration(arena, parameters, offset, line_offsets),
+                );
+            }
+            if let Some(return_type) = &constructor.return_type {
+                obj.set_field(
+                    "typeAnnotation",
+                    convert_type_annotation_adjusted(arena, return_type, offset, line_offsets),
+                );
+            }
+            Value::Object(obj)
+        }
+        // Index signatures remain span-bearing until their parameter/modifier
+        // fields have an exact public-AST conversion.
+        TSSignature::TSIndexSignature(index) => {
+            let start = offset + index.span.start as usize;
+            let end = offset + index.span.end as usize;
+            let mut obj = Map::new();
+            obj.set_field("type", Value::String("TSIndexSignature".to_string()));
             push_span_fields(&mut obj, start, end, line_offsets);
             Value::Object(obj)
         }
@@ -8137,8 +8242,8 @@ fn convert_statement_for_program(
 
                     JsNode::from_value(Value::Object(class_obj))
                 }
-                oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
-                    JsNode::Null
+                oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) => {
+                    convert_ts_interface_declaration_as_node(arena, decl, offset, line_offsets)
                 }
                 _ => {
                     if let Some(expr) = export_decl.declaration.as_expression() {
@@ -8723,6 +8828,12 @@ fn convert_statement_for_program(
                 loc,
             })
         }
+        oxc_ast::ast::Statement::TSTypeAliasDeclaration(decl) => Some(
+            convert_ts_type_alias_declaration_as_node(arena, decl, offset, line_offsets),
+        ),
+        oxc_ast::ast::Statement::TSInterfaceDeclaration(decl) => Some(
+            convert_ts_interface_declaration_as_node(arena, decl, offset, line_offsets),
+        ),
 
         // TypeScript module/namespace declarations - emit so remove_typescript_nodes can detect them
         oxc_ast::ast::Statement::TSExternalModuleDeclaration(module_decl) => {
@@ -8794,6 +8905,136 @@ fn convert_ts_namespace_as_node(
                 body: Some(body),
             }
         }
+    }
+}
+
+fn convert_ts_type_alias_declaration_as_node(
+    arena: &ParseArena,
+    decl: &oxc_ast::ast::TSTypeAliasDeclaration<'_>,
+    offset: usize,
+    line_offsets: &[usize],
+) -> JsNode {
+    let start = offset + decl.span.start as usize;
+    let end = offset + decl.span.end as usize;
+    let mut obj = Map::new();
+    obj.set_field("type", Value::String("TSTypeAliasDeclaration".to_string()));
+    push_span_fields(&mut obj, start, end, line_offsets);
+    obj.set_field(
+        "id",
+        ts_identifier_value(
+            &decl.id.name,
+            offset + decl.id.span.start as usize,
+            offset + decl.id.span.end as usize,
+            line_offsets,
+        ),
+    );
+    if let Some(parameters) = &decl.type_parameters {
+        obj.set_field(
+            "typeParameters",
+            convert_ts_type_parameter_declaration(arena, parameters, offset, line_offsets),
+        );
+    }
+    obj.set_field(
+        "typeAnnotation",
+        convert_ts_type(arena, &decl.type_annotation, offset, line_offsets),
+    );
+    if decl.declare {
+        obj.set_field("declare", Value::Bool(true));
+    }
+    JsNode::TSTypeAliasDeclaration {
+        start: start as u32,
+        end: end as u32,
+        value: Box::new(Value::Object(obj)),
+    }
+}
+
+fn convert_ts_interface_declaration_as_node(
+    arena: &ParseArena,
+    decl: &oxc_ast::ast::TSInterfaceDeclaration<'_>,
+    offset: usize,
+    line_offsets: &[usize],
+) -> JsNode {
+    let start = offset + decl.span.start as usize;
+    let end = offset + decl.span.end as usize;
+    let mut obj = Map::new();
+    obj.set_field("type", Value::String("TSInterfaceDeclaration".to_string()));
+    push_span_fields(&mut obj, start, end, line_offsets);
+    obj.set_field(
+        "id",
+        ts_identifier_value(
+            &decl.id.name,
+            offset + decl.id.span.start as usize,
+            offset + decl.id.span.end as usize,
+            line_offsets,
+        ),
+    );
+    if let Some(parameters) = &decl.type_parameters {
+        obj.set_field(
+            "typeParameters",
+            convert_ts_type_parameter_declaration(arena, parameters, offset, line_offsets),
+        );
+    }
+    // Interface heritage is uncommon in the comment residue, but keeping the
+    // expressions here makes the declaration structurally walkable rather than
+    // dropping the whole `extends` branch.
+    let extends: Vec<Value> = decl
+        .extends
+        .iter()
+        .map(|heritage| {
+            let mut heritage_obj = Map::new();
+            let heritage_start = offset + heritage.span.start as usize;
+            let heritage_end = offset + heritage.span.end as usize;
+            heritage_obj.set_field(
+                "type",
+                Value::String("TSExpressionWithTypeArguments".to_string()),
+            );
+            push_span_fields(
+                &mut heritage_obj,
+                heritage_start,
+                heritage_end,
+                line_offsets,
+            );
+            heritage_obj.set_field(
+                "expression",
+                convert_ts_type_name_adjusted(&heritage.type_name, offset, line_offsets),
+            );
+            if let Some(arguments) = &heritage.type_arguments {
+                heritage_obj.set_field(
+                    "typeParameters",
+                    convert_ts_type_param_instantiation(arena, arguments, offset, line_offsets),
+                );
+            }
+            Value::Object(heritage_obj)
+        })
+        .collect();
+    if !extends.is_empty() {
+        obj.set_field("extends", Value::Array(extends));
+    }
+
+    let body_start = offset + decl.body.span.start as usize;
+    let body_end = offset + decl.body.span.end as usize;
+    let mut body = Map::new();
+    body.set_field("type", Value::String("TSInterfaceBody".to_string()));
+    push_span_fields(&mut body, body_start, body_end, line_offsets);
+    body.set_field(
+        "body",
+        Value::Array(
+            decl.body
+                .body
+                .iter()
+                .map(|member| convert_ts_signature(arena, member, offset, line_offsets))
+                .collect(),
+        ),
+    );
+    obj.set_field("body", Value::Object(body));
+    if decl.declare {
+        obj.set_field("declare", Value::Bool(true));
+    }
+
+    JsNode::TSInterfaceDeclaration {
+        start: start as u32,
+        end: end as u32,
+        value: Box::new(Value::Object(obj)),
     }
 }
 
@@ -9071,6 +9312,12 @@ fn convert_declaration_for_program_as_node(
             offset,
             line_offsets,
         ),
+        Declaration::TSTypeAliasDeclaration(decl) => {
+            convert_ts_type_alias_declaration_as_node(arena, decl, offset, line_offsets)
+        }
+        Declaration::TSInterfaceDeclaration(decl) => {
+            convert_ts_interface_declaration_as_node(arena, decl, offset, line_offsets)
+        }
         _ => JsNode::from_value(convert_declaration_for_program(
             arena,
             decl,
