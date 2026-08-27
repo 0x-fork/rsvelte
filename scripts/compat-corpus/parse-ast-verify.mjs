@@ -72,6 +72,7 @@
  *   node scripts/compat-corpus/parse-ast-verify.mjs
  *   node scripts/compat-corpus/parse-ast-verify.mjs --update-baseline
  *   node scripts/compat-corpus/parse-ast-verify.mjs --filter bits-ui --report-only
+ *   node scripts/compat-corpus/parse-ast-verify.mjs --comment-owners
  */
 
 import fs from 'node:fs';
@@ -95,6 +96,7 @@ const argValue = (name, fallback) => {
 const FILTER = argValue('--filter', null);
 const REPORT_ONLY = args.includes('--report-only');
 const UPDATE = args.includes('--update-baseline');
+const COMMENT_OWNERS = args.includes('--comment-owners');
 const BINDING = path.resolve(ROOT, argValue('--binding', BINDING_REL));
 
 /**
@@ -252,6 +254,88 @@ function diffKeys(a, b, out, ctx, rel, depth = 0) {
 }
 
 /**
+ * Index comment ownership independently of the JSON-path diff. A field-level
+ * ratchet key deliberately collapses every instance of (for example)
+ * `ArrowFunctionExpression.leadingComments`, so it cannot say whether 200
+ * comments or one comment still move between otherwise aligned nodes. The
+ * owner index joins comments by their own immutable source range, then names
+ * their owner by `(type, start, end)` — the same alignment #3702 uses.
+ */
+function commentOwnerIndex(root) {
+	const nodeKeys = new Set();
+	const comments = new Map();
+
+	function visit(value) {
+		if (!value || typeof value !== 'object') return;
+		if (Array.isArray(value)) {
+			for (const item of value) visit(item);
+			return;
+		}
+
+		if (typeof value.type === 'string') {
+			const nodeKey = `${value.type}\0${value.start}\0${value.end}`;
+			nodeKeys.add(nodeKey);
+			for (const field of ['leadingComments', 'trailingComments']) {
+				for (const comment of value[field] ?? []) {
+					const commentKey = `${comment.start}\0${comment.end}`;
+					comments.set(commentKey, {
+						nodeKey,
+						label: `${value.type}.${field}`,
+					});
+				}
+			}
+		}
+
+		for (const [field, child] of Object.entries(value)) {
+			if (field === 'leadingComments' || field === 'trailingComments' || field === 'comments') {
+				continue;
+			}
+			visit(child);
+		}
+	}
+
+	visit(root);
+	return { nodeKeys, comments };
+}
+
+function commentOwnerDiff(expected, actual) {
+	const a = commentOwnerIndex(expected);
+	const b = commentOwnerIndex(actual);
+	const out = [];
+	for (const [commentKey, expectedOwner] of a.comments) {
+		const actualOwner = b.comments.get(commentKey);
+		if (!actualOwner) {
+			out.push({
+				transition: `${expectedOwner.label} -> ABSENT`,
+				expectedOwnerMissing: !b.nodeKeys.has(expectedOwner.nodeKey),
+				kind: 'missing',
+			});
+			continue;
+		}
+		if (
+			actualOwner.nodeKey === expectedOwner.nodeKey &&
+			actualOwner.label === expectedOwner.label
+		) {
+			continue;
+		}
+		out.push({
+			transition: `${expectedOwner.label} -> ${actualOwner.label}`,
+			expectedOwnerMissing: !b.nodeKeys.has(expectedOwner.nodeKey),
+			kind: 'moved',
+		});
+	}
+	for (const [commentKey, actualOwner] of b.comments) {
+		if (a.comments.has(commentKey)) continue;
+		out.push({
+			transition: `ABSENT -> ${actualOwner.label}`,
+			expectedOwnerMissing: false,
+			kind: 'extra',
+		});
+	}
+	return out;
+}
+
+/**
  * One comparison. `both-reject` is a verdict, not a key: rsvelte's binding
  * surfaces a Rust `Debug` string rather than a Svelte error code, so the two
  * rejections are not comparable here (gate-coverage 39c).
@@ -282,9 +366,15 @@ function compareOne(id, source, options) {
 	// harness fault, and scoring it as a rejection is how a probe manufactures a
 	// finding. Nothing is expected to throw now that bigints are handled, so let
 	// it escape rather than be absorbed into a verdict.
+	const expectedJson = jsonSafe(expected);
+	const actualJson = JSON.parse(actual);
 	const keys = new Set();
-	diffKeys(jsonSafe(expected), JSON.parse(actual), keys, '(root)', '');
-	return { compared: true, keys: [...keys] };
+	diffKeys(expectedJson, actualJson, keys, '(root)', '');
+	return {
+		compared: true,
+		keys: [...keys],
+		commentOwners: COMMENT_OWNERS ? commentOwnerDiff(expectedJson, actualJson) : [],
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +389,17 @@ const AXIS_NAMES = ['modern', 'legacy', 'loose'];
 const compared = { modern: 0, legacy: 0, loose: 0 };
 const bothReject = { modern: 0, legacy: 0, loose: 0 };
 const agreed = { modern: 0, legacy: 0, loose: 0 };
+/** @type {Map<string, number>} aligned comment-owner transitions by axis */
+const commentOwnerTransitions = new Map();
+/** @type {Map<string, string>} */
+const firstCommentOwnerExample = new Map();
+let commentOwnerMovementTotal = 0;
+const missingCommentOwnerNodes = { modern: 0, legacy: 0, loose: 0 };
+const commentOwnerKinds = {
+	modern: { moved: 0, missing: 0, extra: 0 },
+	legacy: { moved: 0, missing: 0, extra: 0 },
+	loose: { moved: 0, missing: 0, extra: 0 },
+};
 
 function record(axis, prefix, id, result) {
 	if (!result.compared) {
@@ -306,6 +407,17 @@ function record(axis, prefix, id, result) {
 		return;
 	}
 	compared[axis]++;
+	for (const owner of result.commentOwners ?? []) {
+		if (owner.expectedOwnerMissing) {
+			missingCommentOwnerNodes[axis]++;
+			continue;
+		}
+		commentOwnerKinds[axis][owner.kind]++;
+		if (owner.kind !== 'moved') continue;
+		const key = `${axis}::${owner.transition}`;
+		commentOwnerTransitions.set(key, (commentOwnerTransitions.get(key) ?? 0) + 1);
+		if (!firstCommentOwnerExample.has(key)) firstCommentOwnerExample.set(key, id);
+	}
 	if (result.keys.length === 0) {
 		agreed[axis]++;
 		return;
@@ -365,7 +477,35 @@ for (const [key, count] of sorted) {
 	console.log(`[parse-ast]   ${String(count).padStart(6)}  ${key}   e.g. ${firstExample.get(key)}`);
 }
 
+if (COMMENT_OWNERS) {
+	const transitions = [...commentOwnerTransitions.entries()].sort(
+		(a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)
+	);
+	commentOwnerMovementTotal = transitions.reduce((sum, [, count]) => sum + count, 0);
+	const axisSummary = AXIS_NAMES.map(
+		(axis) =>
+			`${axis}: ${commentOwnerKinds[axis].moved} moved; excluded ${commentOwnerKinds[axis].missing} missing comments, ${commentOwnerKinds[axis].extra} actual-only comments, and ${missingCommentOwnerNodes[axis]} differences whose expected-owner node is absent`
+	).join('; ');
+	console.log(
+		`[parse-ast] ${commentOwnerMovementTotal} comment-owner movements between aligned nodes (${axisSummary}):`
+	);
+	for (const [key, count] of transitions.slice(0, 50)) {
+		console.log(
+			`[parse-ast]   ${String(count).padStart(6)}  ${key}   e.g. ${firstCommentOwnerExample.get(key)}`
+		);
+	}
+	if (transitions.length > 50) {
+		console.log(`[parse-ast]   ... ${transitions.length - 50} more owner transitions`);
+	}
+}
+
 if (REPORT_ONLY) process.exit(0);
+
+if (COMMENT_OWNERS && commentOwnerMovementTotal > 0) {
+	fail(
+		`${commentOwnerMovementTotal} comments moved between aligned owner nodes; the field-level ratchet cannot distinguish this regression from an already-listed comment-attachment key`
+	);
+}
 
 if (!FILTER && compared.modern < MIN_COMPONENTS) {
 	fail(
