@@ -848,6 +848,20 @@ impl<'a> PipelineRewriter<'a> {
         self.b.call("$.get", vec![self.b.id(name)])
     }
 
+    fn state_read_with_source_identifier(&self, identifier: Expression<'a>) -> Expression<'a> {
+        // `SPAN` is a real location to rsvelte_esrap, whereas upstream's
+        // builder-created wrapper has `loc: null`. Unlocate the synthesized
+        // call first, then put the original located identifier back as its
+        // argument so only that identifier advances the comment cursor.
+        let mut call = self.b.call("$.get", vec![self.b.void0()]);
+        ast_rewrite::mark_synthesized_expression(&mut call);
+        let Expression::CallExpression(call_expression) = &mut call else {
+            unreachable!("B::call always creates a call expression")
+        };
+        call_expression.arguments[0] = Argument::from(identifier);
+        call
+    }
+
     fn rewrite_read(&mut self, expr: &mut Expression<'a>) {
         let Expression::Identifier(id) = &*expr else {
             return;
@@ -855,8 +869,8 @@ impl<'a> PipelineRewriter<'a> {
         if !self.sites.reads.contains(&(id.span.start, id.span.end)) {
             return;
         }
-        let name = id.name;
-        *expr = self.state_read(name.as_str());
+        let identifier = std::mem::replace(expr, self.b.void0());
+        *expr = self.state_read_with_source_identifier(identifier);
         self.changed = true;
     }
 
