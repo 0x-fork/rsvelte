@@ -1332,6 +1332,17 @@ hardcoded `has_await: false`) clears 28; the remaining 282 are three named cause
 last-evaluated expression is not pickled through `$.save`, and `<svelte:element class:x={f()}>`
 emits an unbound `$0` **with no `await` anywhere in the input**. That last one is the host axis
 paying for itself, the way `write-host`'s did. **[D]**
+
+The `rune-statement-container` family makes the same boundary explicit for #3420. It crosses
+`$state` / `$derived` declarations with a brace-less `SwitchCase`, a labeled statement, bare
+`if` / `else`, `for` / `for-of` / `while` bodies, and braced controls, through both `compile`
+and `compileModule`. The lexical brace-less case is compared on `server` and `server-dev`, but
+not on the two client targets: official lowers its declaration to `$.state(1)` while leaving
+`value += 1` and `return value` untransformed, so its client output computes `NaN`. Treating
+those bytes as the oracle would make the gate reward a runtime regression. rsvelte's client
+answer is instead pinned by `case_clause_state_3420.rs`, and the measurement and decision live
+in `upstream_issues/3420-svelte-case-clause-state-references-untransformed.md`. **[D]**
+
 ### Blind spot 5s — CLOSED: no family varied the TAG NAME, so a generated identifier could be a keyword
 
 Every family before this one fixed the element (`<button>`, `<div>`, `<b>`) and varied what was
@@ -2643,21 +2654,22 @@ which build the map in Rust. Neither covers `compileBuffers`, `compileModuleBuff
 `*ZeroCopy` entries, or `compileModule`'s map — and no assertion generalizes: each is a named
 field on a named entry.
 
-### 22g — the legacy `result.ast` is compared as a top-level KEY SET, nothing below it [D]
+### 22g — this gate compares the legacy `result.ast` as a top-level KEY SET only [D]
 
 `modernAst: true` is compared to official as a whole canonicalized tree; the **default** `ast` —
-the Svelte-4 legacy tree, wired in #3295 — is compared only as `Object.keys(ast).sort()`, so
-`{css, html, instance, module, _comments}` agreeing is the entire verdict. Everything inside is
-unobserved here and nowhere else: no gate in this repo compares the legacy tree's contents on
-either shape. Measured over 400 `runtime-legacy` components, **22 are byte-identical to official
-and 378 diverge** in nine classes (`.raw`/`.data` on 199 files from upstream's in-place
+the Svelte-4 legacy tree, wired in #3295 — is compared here only as `Object.keys(ast).sort()`, so
+`{css, html, instance, module, _comments}` agreeing is the entire verdict. The later public
+`parse()` AST gate (§39) now compares the legacy tree recursively over the full corpus, but that
+does not broaden this gate: if §39 is removed or filtered, this check cannot notice any value
+below those root keys. Before §39 existed, a measurement over 400 `runtime-legacy` components
+found **22 byte-identical to official and 378 divergent** in nine classes (`.raw`/`.data` on 199
+files from upstream's in-place
 `clean_nodes` mutation, expression `loc` coverage on 311 files, computed-key positions on 15,
 `.modifiers`, `_comments`/`leadingComments`/`trailingComments`, `name_loc`, `importKind`, an
 extra `attributes`) — every one of which this gate scores as a pass. The byte-exact pin is one
 component in `crates/rsvelte_core/tests/compile_result_legacy_ast_3295.rs`; a differential over
-the corpus is #3295's follow-up, not this gate. Official is round-tripped through JSON before its
-keys are read, because upstream assigns `undefined` to absent blocks and `Object.keys` reports
-those.
+the corpus is §39, not this gate. Official is round-tripped through JSON before its keys are read,
+because upstream assigns `undefined` to absent blocks and `Object.keys` reports those.
 
 ---
 

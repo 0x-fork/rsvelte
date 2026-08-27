@@ -43,9 +43,9 @@ comment carrier in `opaque-keyword` diverged on comment placement (#2990), so re
 Those entries are gone now, which is what the split was for: the family clears rather than
 carrying a key that would absorb the next regression.
 
-## Matrix known failures (`matrix-known-failures.json`, 490 entries)
+## Matrix known failures (`matrix-known-failures.json`, 260 entries)
 
-Partition of `matrix-known-failures.json` by family: `0 + 84 + 0 + 24 + 0 + 0 + 0 + 140 + 0 + 234 + 8 + 0 + 0 + 0`
+Partition of `matrix-known-failures.json` by family: `0 + 84 + 0 + 24 + 0 + 0 + 0 + 140 + 0 + 4 + 8 + 0 + 0 + 0`
 
 ### `binding-position` — 0 entries
 
@@ -173,7 +173,7 @@ until their issues are fixed.
 
 Partition of `matrix-known-failures.json` entries under `async-derived/` by cause: `0`
 
-### `async-attribute-slot` — 234 entries
+### `async-attribute-slot` — 4 entries
 
 10 value shapes × 6 attribute slots × 4 hosts = 200 cases / 792 comparisons. The subject is
 which lowering an async attribute value reaches: `Memoizer` hoists a call or an `await` out
@@ -190,25 +190,18 @@ attribute value, whose memoizer call hardcoded `has_await: false` in all three a
 `build_style_attribute_value_with_memoization` — clears 28 of them (16 `output-unparseable`
 + 12 `js-mismatch`, both hosts × all four literal-`await` values × `client`/`client-dev`)
 with zero regressions elsewhere in the matrix's 25,836 comparisons. #3649 then cleared the
-38 client rows where a non-tail `await` was not pickled through `$.save`. The remaining
-**234** are two causes, neither of which is a formatting difference:
+38 client rows where a non-tail `await` was not pickled through `$.save`. #3764 routed server
+attribute and directive values through the per-host promise optimiser; its object-expression
+await scan also covers spread values and distinguishes a nested async-IIFE await. That clears
+the remaining 230 server rows. The remaining **4** entries have one cause:
 
 | cause | issue | entries | verdicts |
 |---|---|---:|---|
-| the server never hoists an awaited attribute / directive / spread value | [#3648](https://github.com/baseballyama/rsvelte/issues/3648) | 230 | 80 `output-unparseable`, 150 `js-mismatch` |
 | `<svelte:element class:x={…}>` emits an unbound `$0` | [#3650](https://github.com/baseballyama/rsvelte/issues/3650) | 4 | `js-mismatch` (client) |
 
-Partition of `matrix-known-failures.json` entries under `async-attribute-slot/` by cause: `230 + 4`
+Partition of `matrix-known-failures.json` entries under `async-attribute-slot/` by cause: `4`
 
-**Cause 1 — the server does not hoist.** Upstream wraps an element whose attribute value is
-async in `$$renderer.child(async ($$renderer) => { const $$0 = (await $.save(p))(); … })`
-and interpolates `$$0`; rsvelte pushes `await p` straight into the template string of a
-**non-async** renderer callback. Where the surrounding function is not async that is a
-`SyntaxError` (80 rows); where an enclosing `child(async …)` happens to exist the text
-parses and only the `$.save` wrapper is missing (150 rows). Every one of the 80 is output no
-JS parser accepts — the loud half of the class the parse oracle exists for.
-
-**Cause 2 — an unbound `$0`.** `<svelte:element class:x={f()}>` memoizes the directive
+**Cause 1 — an unbound `$0`.** `<svelte:element class:x={f()}>` memoizes the directive
 object into the `template_effect` `sync` array but builds the arrow with **no parameter
 list**, so the body references a `$0` that is never bound. It parses and throws at run time,
 The remaining four rows are `derived-await-read` and `script-await-read` on `client` /
@@ -352,6 +345,19 @@ divergence is the code and the position only, and matching would mean either rep
 wrong rule at a wrong offset (row 1) or hand-porting acorn-typescript's whole modifier table
 in place of OXC's — which would have to carry its bugs to be worth anything. The rows are
 generated rather than skipped so that the day upstream fixes its table, this gate says so.
+
+### `rune-statement-container` — 0 entries
+
+The family added for #3146 varies rune declarations across labels, switch cases, branches,
+and loop bodies for component and `compileModule` entry points. Its first run exposed two
+places that had reduced a scoped binding to a name: the client module state pipeline lost
+`var` and emitted `$.get` instead of `$.safe_get`, while the nested SSR rune lowerer lost
+`var` and emitted a required derived call instead of `value?.()`. The SSR path could also
+wrap a call already produced by the script-level read visitor, yielding `value()?.()`.
+
+Those decisions now retain the resolved declaration kind, and the nested SSR pass recognizes
+an existing derived call before descending into its callee. All generated rows are expected
+to pass, so this family adds no ratchet entries.
 
 ## Burn-down
 

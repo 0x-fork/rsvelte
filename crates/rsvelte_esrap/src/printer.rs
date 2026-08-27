@@ -2113,6 +2113,10 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         if node.specifiers.as_ref().is_none_or(|v| v.is_empty()) {
             self.write_keyword(ctx, node.span.start, "import", " ");
             self.write_node(ctx, node.source.span, Self::string_literal(&node.source));
+            // Upstream esrap returns before printing this clause. Import
+            // attributes affect module loading, so dropping them is not a
+            // byte-only formatting difference (#3635).
+            Self::import_attributes(node.with_clause.as_deref(), ctx);
             ctx.write_ascii(b';');
             return;
         }
@@ -3211,6 +3215,15 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
     /// esrap's `ArrowFunctionExpression`: `[async ](params) => body`, wrapping an
     /// object concise body in parens so it isn't read as a block.
     fn arrow_function(&mut self, node: &ArrowFunctionExpression, ctx: &mut Context<DIRECT>) {
+        self.arrow_function_with_comment_body(node, false, ctx);
+    }
+
+    fn arrow_function_with_comment_body(
+        &mut self,
+        node: &ArrowFunctionExpression,
+        comment_body: bool,
+        ctx: &mut Context<DIRECT>,
+    ) {
         if node.r#async {
             ctx.write("async ");
         }
@@ -3221,11 +3234,12 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         // esrap runs the params sequence until `(returnType ?? body).loc.start`,
         // so a comment ahead of a located body flushes inside a synthesized
         // arrow's empty parens.
-        let until = node
-            .return_type
-            .as_ref()
-            .map_or_else(|| node.body.span().start, |rt| rt.span().start);
-        self.formal_parameters_with_this(&node.params, None, Some(until), ctx);
+        let until = (!comment_body).then(|| {
+            node.return_type
+                .as_ref()
+                .map_or_else(|| node.body.span().start, |rt| rt.span().start)
+        });
+        self.formal_parameters_with_this(&node.params, None, until, ctx);
         ctx.write_ascii(b')');
         if let Some(rt) = &node.return_type {
             self.type_annotation(rt, ctx);
@@ -3466,6 +3480,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
     }
 
     fn binding_pattern(&mut self, pattern: &BindingPattern, ctx: &mut Context<DIRECT>) {
+        self.flush_leading(ctx, pattern.span().start);
         match pattern {
             BindingPattern::BindingIdentifier(id) => {
                 self.write_node(ctx, id.span, id.name.as_str());
@@ -3623,7 +3638,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                 } else {
                     self.child_with_parens(&n.callee, 19, ctx);
                 }
-                self.call_arguments(&n.arguments, n.span().end, ctx);
+                self.call_arguments(&n.arguments, n.span().end, None, ctx);
             }
             Expression::UpdateExpression(u) => {
                 let op = u.operator.as_str();
@@ -3919,6 +3934,15 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
     }
 
     fn call_expression(&mut self, node: &CallExpression, ctx: &mut Context<DIRECT>) {
+        let comment_argument = node
+            .callee
+            .span()
+            .start
+            .checked_sub(crate::COMMENT_ARGUMENT_CALLEE_BASE)
+            // Index 255 is `COMPONENT_BODY_MARKER` (`u32::MAX - 1`),
+            // which is visited on ordinary component output as well.
+            .filter(|index| *index < 255)
+            .map(|index| index as usize);
         // Builder-created calls carry `SPAN` (zero); a nonzero span is an
         // explicit source-backed call such as a lowered directive runtime call.
         if node.span.start != 0
@@ -3932,7 +3956,9 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         // optional-chain call `a?.b(c)`, which short-circuits differently. The
         // precedence path (`< 19`) does not catch this because a ChainExpression
         // has the same precedence (19) as a call.
-        if matches!(unparen(&node.callee), Expression::ChainExpression(_)) {
+        if comment_argument.is_some() {
+            self.comment_free().child_with_parens(&node.callee, 19, ctx);
+        } else if matches!(unparen(&node.callee), Expression::ChainExpression(_)) {
             ctx.write_ascii(b'(');
             self.print_expression(unparen(&node.callee), ctx);
             ctx.write_ascii(b')');
@@ -3942,7 +3968,7 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         if node.optional {
             ctx.write_ascii_bytes(b"?.");
         }
-        self.call_arguments(&node.arguments, node.span().end, ctx);
+        self.call_arguments(&node.arguments, node.span().end, comment_argument, ctx);
         if node.span.start != 0
             && let Some((line, column)) = self.map_end_position(node.span.end)
         {
@@ -4383,14 +4409,37 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         arg: &Argument,
         next: Option<u32>,
         comma: bool,
+        owns_comments: bool,
         ctx: &mut Context<DIRECT>,
     ) -> bool {
         let scope = ctx.begin_scope();
-        self.print_argument(arg, ctx);
+        if owns_comments
+            && let Some(Expression::ArrowFunctionExpression(arrow)) = arg.as_expression()
+        {
+            self.arrow_function_with_comment_body(arrow, true, ctx);
+        } else {
+            self.print_argument(arg, ctx);
+        }
+        let trailing_end = if owns_comments {
+            arg.as_expression()
+                .map(|expression| match expression {
+                    Expression::ArrowFunctionExpression(arrow) => arrow.body.span().end,
+                    other => other.span().end,
+                })
+                .unwrap_or_else(|| arg.span().end)
+        } else {
+            arg.span().end
+        };
+        let mut emitted_line = false;
+        if owns_comments {
+            emitted_line = self.flush_trailing_comments(ctx, trailing_end, next);
+        }
         if comma {
             ctx.write_ascii(b',');
         }
-        let emitted_line = self.flush_trailing_comments(ctx, arg.span().end, next);
+        if !owns_comments {
+            emitted_line = self.flush_trailing_comments(ctx, trailing_end, next);
+        }
         ctx.end_scope(scope) || (comma && emitted_line)
     }
 
@@ -4519,7 +4568,13 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
         }
     }
 
-    fn call_arguments(&mut self, args: &[Argument], call_end: u32, ctx: &mut Context<DIRECT>) {
+    fn call_arguments(
+        &mut self,
+        args: &[Argument],
+        call_end: u32,
+        comment_argument: Option<usize>,
+        ctx: &mut Context<DIRECT>,
+    ) {
         if !HAS_COMMENTS {
             self.call_arguments_plain(args, ctx);
             return;
@@ -4540,13 +4595,31 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
                 ctx.indent();
                 ctx.newline();
             }
-            self.print_argument(arg, ctx);
+            let owns_comments = comment_argument == Some(0);
+            if owns_comments
+                && let Some(Expression::ArrowFunctionExpression(arrow)) = arg.as_expression()
+            {
+                self.arrow_function_with_comment_body(arrow, true, ctx);
+            } else {
+                self.print_argument(arg, ctx);
+            }
             // esrap flushes the trailing comment into a child context nothing
             // is written to afterwards, so its `newline()` never reaches the
             // `)` write — the statement is NOT multiline and gets no blank-line
             // margins. Isolate the flush the same way.
             let scope = ctx.begin_scope();
-            self.flush_trailing_comments(ctx, arg.span().end, Some(call_end));
+            let trailing_end = if owns_comments {
+                arg.as_expression().map_or_else(
+                    || arg.span().end,
+                    |expression| match expression {
+                        Expression::ArrowFunctionExpression(arrow) => arrow.body.span().end,
+                        other => other.span().end,
+                    },
+                )
+            } else {
+                arg.span().end
+            };
+            self.flush_trailing_comments(ctx, trailing_end, Some(call_end));
             ctx.end_scope(scope);
             if wrap {
                 ctx.dedent();
@@ -4567,11 +4640,22 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
 
             ctx.write_ascii(b'(');
             let start = ctx.event_mark();
-            let first_multiline =
-                self.call_argument_direct(first, Some(second.span().start), true, ctx);
+            let first_multiline = self.call_argument_direct(
+                first,
+                Some(second.span().start),
+                true,
+                comment_argument == Some(0),
+                ctx,
+            );
             let separator = ctx.event_mark();
             ctx.space();
-            self.call_argument_direct(second, Some(call_end), false, ctx);
+            self.call_argument_direct(
+                second,
+                Some(call_end),
+                false,
+                comment_argument == Some(1),
+                ctx,
+            );
 
             if force_multiline || first_multiline {
                 ctx.insert_event(separator, EventKind::Newline);
@@ -4593,15 +4677,31 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             });
             ctx.write_ascii(b'(');
             let start = ctx.event_mark();
-            let first_multiline =
-                self.call_argument_direct(first, Some(second.span().start), true, ctx);
+            let first_multiline = self.call_argument_direct(
+                first,
+                Some(second.span().start),
+                true,
+                comment_argument == Some(0),
+                ctx,
+            );
             let first_separator = ctx.event_mark();
             ctx.space();
-            let second_multiline =
-                self.call_argument_direct(second, Some(last.span().start), true, ctx);
+            let second_multiline = self.call_argument_direct(
+                second,
+                Some(last.span().start),
+                true,
+                comment_argument == Some(1),
+                ctx,
+            );
             let second_separator = ctx.event_mark();
             ctx.space();
-            self.call_argument_direct(last, Some(call_end), false, ctx);
+            self.call_argument_direct(
+                last,
+                Some(call_end),
+                false,
+                comment_argument == Some(2),
+                ctx,
+            );
 
             if force_multiline || first_multiline || second_multiline {
                 ctx.insert_event(second_separator, EventKind::Newline);
@@ -4649,7 +4749,9 @@ impl<'opt, const HAS_COMMENTS: bool, const DIRECT: bool> Printer<'opt, HAS_COMME
             } else {
                 Some(args[i + 1].span().start)
             };
-            any_multiline |= self.call_argument_direct(arg, next, !is_last, ctx) && !is_last;
+            any_multiline |=
+                self.call_argument_direct(arg, next, !is_last, comment_argument == Some(i), ctx)
+                    && !is_last;
         }
 
         if force_multiline || any_multiline {
@@ -5611,6 +5713,14 @@ mod tests {
             "unsupported node: {missing:?} for {src:?}"
         );
         out
+    }
+
+    #[test]
+    fn side_effect_import_keeps_attributes() {
+        assert_eq!(
+            print_ok("import './data.json' with { type: 'json' }"),
+            "import './data.json' with { type: 'json' };"
+        );
     }
 
     fn print_with_comments_ok(src: &str) -> String {

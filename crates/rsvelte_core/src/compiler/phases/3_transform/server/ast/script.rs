@@ -1322,12 +1322,13 @@ pub(super) fn lower_nested_runes_in_expr<'a>(
 ) {
     let mut v = NestedRuneLower {
         b,
-        derived: vec![rustc_hash::FxHashSet::default()],
+        derived: vec![rustc_hash::FxHashMap::default()],
         in_nested_body: false,
         // Template-expression nested bodies (effect-drop pass) never carry a
         // top-level instance `$derived(await …)`; async-derived lowering is N/A.
         use_async: false,
         rune_store_subs,
+        skip_existing_derived_callee: false,
     };
     v.visit_expression(expr);
 }
@@ -1498,10 +1499,11 @@ fn is_effect_pending_call(expr: &OxcExpression) -> bool {
 fn lower_nested_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransformState<'a>) {
     let mut v = NestedRuneLower {
         b: state.b,
-        derived: vec![rustc_hash::FxHashSet::default()],
+        derived: vec![rustc_hash::FxHashMap::default()],
         in_nested_body: false,
         use_async: state.eval_inputs.use_async,
         rune_store_subs: rune_names_are_store_subs(state.analysis),
+        skip_existing_derived_callee: false,
     };
     v.visit_statement(stmt);
 }
@@ -1523,10 +1525,11 @@ fn lower_module_export_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransfo
     };
     let mut v = NestedRuneLower {
         b: state.b,
-        derived: vec![rustc_hash::FxHashSet::default()],
+        derived: vec![rustc_hash::FxHashMap::default()],
         in_nested_body: true,
         use_async: state.eval_inputs.use_async,
         rune_store_subs: rune_names_are_store_subs(state.analysis),
+        skip_existing_derived_callee: false,
     };
     v.lower_var_decl(vd);
 }
@@ -1539,9 +1542,10 @@ fn lower_module_export_runes<'a>(stmt: &mut Statement<'a>, state: &ServerTransfo
 /// `let` removes it from the derived set for that frame).
 struct NestedRuneLower<'a> {
     b: B<'a>,
-    /// Stack of frames; each frame is the set of derived binding names declared
-    /// in that lexical scope.
-    derived: Vec<rustc_hash::FxHashSet<String>>,
+    /// Stack of lexical frames. Each map records a derived binding name and
+    /// whether it was declared with `var`, which needs an optional call before
+    /// its initializer has run.
+    derived: Vec<rustc_hash::FxHashMap<String, bool>>,
     /// Whether we are inside a nested function / block body (i.e. below the
     /// script top level). Lowering only fires when this is `true`, so the
     /// script-level statements already handled by `transform_script` are not
@@ -1554,12 +1558,15 @@ struct NestedRuneLower<'a> {
     use_async: bool,
     /// See [`rune_names_are_store_subs`].
     rune_store_subs: bool,
+    /// The script-level read wrapper may already have turned a resolved
+    /// derived read into a call. Do not wrap that call's callee a second time.
+    skip_existing_derived_callee: bool,
 }
 
 impl<'a> NestedRuneLower<'a> {
     /// Whether `name` resolves to a derived binding in any enclosing frame.
-    fn is_derived(&self, name: &str) -> bool {
-        self.derived.iter().any(|f| f.contains(name))
+    fn derived_is_var(&self, name: &str) -> Option<bool> {
+        self.derived.iter().rev().find_map(|f| f.get(name).copied())
     }
 
     /// Lower the declarators of a `let/const/var` in place when nested. Records
@@ -1577,6 +1584,7 @@ impl<'a> NestedRuneLower<'a> {
         register_derived: bool,
     ) {
         let b = self.b;
+        let declaration_is_var = vd.kind == oxc_ast::ast::VariableDeclarationKind::Var;
         for d in vd.declarations.iter_mut() {
             let Some(rune) = d.init.as_ref().and_then(detect_decl_rune) else {
                 // A plain re-declaration of a name shadows any outer derived
@@ -1634,7 +1642,7 @@ impl<'a> NestedRuneLower<'a> {
                         && let Some(n) = bind_name
                         && let Some(frame) = self.derived.last_mut()
                     {
-                        frame.insert(n);
+                        frame.insert(n, declaration_is_var);
                     }
                 }
                 DeclRune::DerivedBy => {
@@ -1643,7 +1651,7 @@ impl<'a> NestedRuneLower<'a> {
                         && let Some(n) = bind_name
                         && let Some(frame) = self.derived.last_mut()
                     {
-                        frame.insert(n);
+                        frame.insert(n, declaration_is_var);
                     }
                 }
                 // `$props` / `$props.id` are not valid in a nested factory body in
@@ -1674,7 +1682,7 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
         // own — only its own frame, so a derived name does not outlive it.
         let prev = self.in_nested_body;
         self.in_nested_body = true;
-        self.derived.push(rustc_hash::FxHashSet::default());
+        self.derived.push(rustc_hash::FxHashMap::default());
         oxc_ast_visit::walk_mut::walk_statement(self, stmt);
         self.derived.pop();
         self.in_nested_body = prev;
@@ -1695,13 +1703,37 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
         if self.in_nested_body
             && let OxcExpression::Identifier(id) = expr
         {
+            if self.skip_existing_derived_callee {
+                self.skip_existing_derived_callee = false;
+                return;
+            }
             let name = id.name.to_string();
-            if self.is_derived(&name) {
-                *expr = self.b.call(self.b.id(&name), vec![]);
+            if let Some(is_var) = self.derived_is_var(&name) {
+                *expr = if is_var {
+                    self.b.optional_call(self.b.id(&name), vec![])
+                } else {
+                    self.b.call(self.b.id(&name), vec![])
+                };
                 return;
             }
         }
         oxc_ast_visit::walk_mut::walk_expression(self, expr);
+    }
+
+    fn visit_call_expression(&mut self, call: &mut oxc_ast::ast::CallExpression<'a>) {
+        if self.in_nested_body
+            && let OxcExpression::Identifier(id) = &call.callee
+            // A location-less callee was synthesized by the script-level
+            // read wrapper. A source-located `value()` is the user's own call
+            // and must still become `(value?.())()`.
+            && id.span == oxc_span::SPAN
+            && self.derived_is_var(id.name.as_str()).is_some()
+        {
+            self.skip_existing_derived_callee = true;
+        }
+        oxc_ast_visit::walk_mut::walk_call_expression(self, call);
+        // Defensive reset for a callee shape the walker did not visit.
+        self.skip_existing_derived_callee = false;
     }
 
     fn visit_function(
@@ -1711,7 +1743,7 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
     ) {
         let prev = self.in_nested_body;
         self.in_nested_body = true;
-        self.derived.push(rustc_hash::FxHashSet::default());
+        self.derived.push(rustc_hash::FxHashMap::default());
         oxc_ast_visit::walk_mut::walk_function(self, it, flags);
         self.derived.pop();
         self.in_nested_body = prev;
@@ -1723,7 +1755,7 @@ impl<'a> VisitMut<'a> for NestedRuneLower<'a> {
     ) {
         let prev = self.in_nested_body;
         self.in_nested_body = true;
-        self.derived.push(rustc_hash::FxHashSet::default());
+        self.derived.push(rustc_hash::FxHashMap::default());
         oxc_ast_visit::walk_mut::walk_arrow_function_expression(self, it);
         self.derived.pop();
         self.in_nested_body = prev;
@@ -2466,8 +2498,16 @@ fn lower_variable_declaration<'a>(
         // Per-source-declarator pair accumulator.
         let mut decls: Vec<(oxc_ast::ast::BindingPattern<'a>, Option<OxcExpression<'a>>)> =
             Vec::new();
+        // Upstream rebuilds rune declarators with `b.declarator`, so the
+        // wrapper has no `loc` even though the binding pattern it contains
+        // still does. This distinction is observable for `$props()`: a line or
+        // multiline block comment between `=` and the rune must remain pending
+        // past the location-less `$$props` initializer. Keep the original
+        // wrapper location only on a declarator that upstream visits verbatim.
+        let mut declarator_keeps_source_span = false;
         match declarator_rune(d, is_instance, state) {
             None => {
+                declarator_keeps_source_span = true;
                 // Non-rune declarator: re-parse the whole declarator span as a
                 // `let <decl>;` so the pattern + init survive verbatim, then
                 // read-wrap the INIT so derived / store reads & updates inside it
@@ -2586,10 +2626,12 @@ fn lower_variable_declaration<'a>(
                     } else {
                         d.span
                     };
-                    // One declarator in, one out: locating it is what puts a
-                    // comment between the keyword and the name in that slot
-                    // instead of ahead of the whole statement.
-                    if v.declarations.len() == 1
+                    // A verbatim declarator retains its own source location.
+                    // Rune declarators are builder-made upstream and stay
+                    // location-less; their retained pattern loc is sufficient
+                    // to place a comment between the keyword and binding name.
+                    if declarator_keeps_source_span
+                        && v.declarations.len() == 1
                         && let Some(only) = v.declarations.first_mut()
                     {
                         only.span = d.span;

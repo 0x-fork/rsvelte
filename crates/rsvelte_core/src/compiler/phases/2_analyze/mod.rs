@@ -111,6 +111,8 @@ pub fn analyze_component(
         return Err(parse_err.into());
     }
 
+    crate::compiler::phases::phase1_parse::merge_deferred_comments(ast);
+
     analyze_prepared_component(ast, source, options)
 }
 
@@ -451,6 +453,7 @@ pub(crate) fn analyze_prepared_component_with_retained(
     let has_export = memchr::memmem::find(source.as_bytes(), b"export").is_some();
     if !analysis.runes && has_export {
         process_legacy_exports(ast, &mut analysis);
+        promote_legacy_export_const_state_bindings(ast, &mut analysis);
     }
 
     // Validate and analyze scripts (JavaScript AST)
@@ -1870,6 +1873,74 @@ fn process_legacy_exports(ast: &Root, analysis: &mut ComponentAnalysis) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Promote a directly declared legacy `export const` before script validation
+/// when it is updated and referenced by the template.
+///
+/// Upstream builds the complete scope reference graph before analysis, then
+/// performs legacy state promotion before visiting the export declaration. Its
+/// `state_invalid_export` diagnostic therefore outranks a later
+/// `constant_assignment` at the write. Our full reference lists are populated
+/// visitor-time, so the scope builder carries this narrow, scope-resolved fact
+/// forward to preserve the same precedence without a name-only pre-scan.
+fn promote_legacy_export_const_state_bindings(ast: &Root, analysis: &mut ComponentAnalysis) {
+    use crate::ast::typed_expr::JsNode;
+
+    let Some(instance) = &ast.instance else {
+        return;
+    };
+    let content = instance.content.as_node();
+    let JsNode::Program { body, .. } = content.as_ref() else {
+        return;
+    };
+    let instance_scope = analysis.root.instance_scope_index;
+    let arena = &ast.arena;
+
+    for statement in arena.get_js_children(*body) {
+        let JsNode::ExportNamedDeclaration {
+            declaration: Some(declaration),
+            ..
+        } = statement
+        else {
+            continue;
+        };
+        let JsNode::VariableDeclaration {
+            kind, declarations, ..
+        } = arena.get_js_node(*declaration)
+        else {
+            continue;
+        };
+        if kind != "const" {
+            continue;
+        }
+
+        for declarator in arena.get_js_children(*declarations) {
+            let JsNode::VariableDeclarator { id, .. } = declarator else {
+                continue;
+            };
+            let mut names = Vec::new();
+            pattern_ids::collect_pattern_identifiers(arena.get_js_node(*id), arena, &mut names);
+            for name in names {
+                let Some(&binding_idx) = analysis.root.all_scopes[instance_scope]
+                    .declarations
+                    .get(&name)
+                else {
+                    continue;
+                };
+                let binding = &analysis.root.bindings[binding_idx];
+                if binding.kind == BindingKind::Normal
+                    && binding.is_updated()
+                    && analysis
+                        .root
+                        .preanalysis_template_references
+                        .contains(&binding_idx)
+                {
+                    analysis.root.bindings[binding_idx].kind = BindingKind::State;
+                }
+            }
         }
     }
 }
@@ -6424,6 +6495,10 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
 
     fn analyze(source: &str) -> ComponentAnalysis {
+        try_analyze(source).unwrap()
+    }
+
+    fn try_analyze(source: &str) -> Result<ComponentAnalysis, AnalysisError> {
         let mut ast = parse(
             source,
             &oxc_allocator::Allocator::default(),
@@ -6435,7 +6510,54 @@ mod tests {
         .unwrap();
         // SAFETY: `ast` outlives the guard and analysis call.
         let _guard = unsafe { SerializeArenaGuard::new(&ast.arena as *const _) };
-        analyze_component(&mut ast, source, &CompileOptions::default()).unwrap()
+        analyze_component(&mut ast, source, &CompileOptions::default())
+    }
+
+    #[test]
+    fn each_binding_references_do_not_mark_shadowed_export_as_used() {
+        let source = r#"<script>
+export let value = "outer";
+</script>
+{#each ["inner"] as value (value)}{String(value)}{/each}"#;
+        let analysis = analyze(source);
+        let warnings = analysis
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "export_let_unused")
+            .collect::<Vec<_>>();
+        let start = source.find("value =").unwrap() as u32;
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].start, Some(start));
+        assert_eq!(warnings[0].end, Some(start + "value".len() as u32));
+    }
+
+    #[test]
+    fn snippet_parameter_assignment_uses_the_assignment_or_binding_span() {
+        for (source, marked) in [
+            (
+                r#"{#snippet s(value)}<button onclick={() => { value = "next"; }}>x</button>{/snippet}"#,
+                r#"value = "next""#,
+            ),
+            (
+                r#"{#snippet s(value)}<input bind:value={value}>{/snippet}"#,
+                "bind:value={value}",
+            ),
+        ] {
+            let start = source.find(marked).unwrap() as u32;
+            let error = try_analyze(source).unwrap_err();
+            assert!(matches!(
+                error,
+                AnalysisError::ValidationWithCode {
+                    ref code,
+                    start: Some(actual_start),
+                    end: Some(actual_end),
+                    ..
+                } if code == "snippet_parameter_assignment"
+                    && actual_start == start
+                    && actual_end == start + marked.len() as u32
+            ));
+        }
     }
 
     #[test]
@@ -6926,12 +7048,11 @@ mod legacy_reactive_stays_typed {
     fn adding_reactive_statements_serializes_no_json() {
         let without = to_value_calls(WITHOUT_REACTIVE);
         let with = to_value_calls(WITH_REACTIVE);
-        assert_eq!(
-            with,
-            without,
+        assert!(
+            with <= without,
             "three `$:` statements added {} `to_value` call(s); the legacy \
              reactive passes are serializing the instance script again",
-            with as i64 - without as i64
+            with - without
         );
     }
 

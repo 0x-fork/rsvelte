@@ -446,9 +446,9 @@ pub fn visit<'a, 'b: 'a>(
             super::shared::element::collect_css_attribute_facts(&element.attributes, context);
     }
 
-    for attr in &element.attributes {
+    for attr in &mut element.attributes {
         if let Attribute::SpreadAttribute(spread) = attr {
-            spread_attribute::visit(spread, context)?;
+            spread_attribute::visit(spread, context, true)?;
         }
     }
 
@@ -541,6 +541,11 @@ pub fn visit<'a, 'b: 'a>(
         let binding = &context.analysis.root.bindings[binding_idx];
         if binding.declaration_kind == super::super::DeclarationKind::Import
             && binding.references.is_empty()
+            && !context
+                .analysis
+                .root
+                .preanalysis_template_references
+                .contains(&binding_idx)
         {
             context.emit_warning(
                 warnings::component_name_lowercase(&element.name).at(element.start, element.end),
@@ -802,8 +807,8 @@ pub fn visit<'a, 'b: 'a>(
                 // `class_directive::visit` can populate `directive.metadata`.
             }
             Attribute::StyleDirective(_) => {
-                // Re-borrow the style directive for the visit call
-                if let Attribute::StyleDirective(style_dir) = &element.attributes[i] {
+                // Re-borrow the style directive mutably so analysis can populate metadata.
+                if let Attribute::StyleDirective(style_dir) = &mut element.attributes[i] {
                     super::style_directive::visit(style_dir, context)?;
                 }
             }

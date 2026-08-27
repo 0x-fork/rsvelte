@@ -246,22 +246,18 @@ impl<'a> Parser<'a> {
         // a previous (possibly errored) parse on this thread.
         let _ = crate::compiler::phases::phase1_parse::read::expression::take_expr_comments();
 
-        // Calculate line offsets for location calculation using SIMD-accelerated memchr.
-        // Skip entirely in compilation mode where line/column info is never used.
+        // Calculate line offsets for directive `name_loc` values. Compilation
+        // omits expression locations, but name locations remain part of the
+        // typed AST and are cheap enough to retain unconditionally.
         let bytes = source.as_bytes();
-        let line_offsets = if options.skip_expression_loc {
-            Vec::new()
-        } else {
-            let mut offsets = Vec::with_capacity(bytes.len() / 40 + 1); // rough estimate
-            offsets.push(0);
-            let mut pos = 0;
-            while let Some(offset) = memchr::memchr(b'\n', &bytes[pos..]) {
-                let abs = pos + offset;
-                offsets.push(abs + 1);
-                pos = abs + 1;
-            }
-            offsets
-        };
+        let mut line_offsets = Vec::with_capacity(bytes.len() / 40 + 1); // rough estimate
+        line_offsets.push(0);
+        let mut pos = 0;
+        while let Some(offset) = memchr::memchr(b'\n', &bytes[pos..]) {
+            let abs = pos + offset;
+            line_offsets.push(abs + 1);
+            pos = abs + 1;
+        }
 
         // Detect TypeScript mode by looking for lang="ts" in script tags
         // Corresponds to the TypeScript detection logic in JavaScript Parser constructor.
@@ -311,17 +307,16 @@ impl<'a> Parser<'a> {
         self.stack.clear();
         self.stack.push(StackEntry::Root);
 
-        // Recompute line offsets only if needed
+        // Recompute line offsets for directive name locations. Expression
+        // parsers still receive an empty slice in compilation mode.
         self.line_offsets.clear();
-        if !options.skip_expression_loc {
-            self.line_offsets.push(0);
-            let bytes = source.as_bytes();
-            let mut pos = 0;
-            while let Some(offset) = memchr::memchr(b'\n', &bytes[pos..]) {
-                let abs = pos + offset;
-                self.line_offsets.push(abs + 1);
-                pos = abs + 1;
-            }
+        self.line_offsets.push(0);
+        let bytes = source.as_bytes();
+        let mut pos = 0;
+        while let Some(offset) = memchr::memchr(b'\n', &bytes[pos..]) {
+            let abs = pos + offset;
+            self.line_offsets.push(abs + 1);
+            pos = abs + 1;
         }
 
         self.ts = options.force_typescript || Self::detect_typescript_mode(source);
@@ -519,15 +514,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Create name_loc, returning None when skip_expression_loc is enabled (compilation mode).
-    /// This avoids expensive binary searches for line/column when the data is never used.
+    /// Create the directive `name_loc`. Unlike expression locations, this is
+    /// retained in compilation mode because typed consumers read it directly.
     #[inline]
     pub fn create_name_loc_optional(&self, start: usize, end: usize) -> Option<SourceLocation> {
-        if self.options.skip_expression_loc {
-            None
-        } else {
-            Some(self.create_name_loc(start, end))
-        }
+        Some(self.create_name_loc(start, end))
     }
 
     // =========================================================================
@@ -1114,7 +1105,20 @@ impl<'a> Parser<'a> {
             expr_start,
             '{',
         ) {
-            return Ok(end);
+            let candidate = &self.source[expr_start..end];
+            let swallowed_block_close = candidate.rfind('{').is_some_and(|block_open| {
+                let block_name = candidate[block_open + 1..].trim();
+                matches!(block_name, "/if" | "/each" | "/await" | "/key" | "/snippet")
+                    && memchr::memmem::find(&candidate.as_bytes()[..block_open], b"</").is_some()
+            });
+            // In malformed markup such as `{@const c = 1<b>x</b>{/if}`, the
+            // lexical bracket scan reads `</b>` as the start of a regexp and
+            // the slash in `{/if}` as its end. The final `}` then looks like
+            // this mustache's close. Let the recovery below report the HTML
+            // close-tag position Acorn uses instead.
+            if self.options.loose || !swallowed_block_close {
+                return Ok(end);
+            }
         }
         // Loose mode keeps recovering so a half-typed document still yields a tree.
         if self.options.loose {
@@ -1142,13 +1146,6 @@ impl<'a> Parser<'a> {
                 "Unexpected token".to_string(),
                 (at, at),
             ));
-        }
-        // A complete leading expression leaves the brace demanded at the first
-        // token acorn did not consume.
-        if let Some(offset) = trailing_token_offset(rest, self.ts)
-            && check_js_parse_error_with_pos(&rest[..offset], self.ts).is_none()
-        {
-            return Err(ParseError::expected_token("}", from + offset));
         }
         if let Some(self_close) = memchr::memmem::find(rest.as_bytes(), b"/>") {
             let before_self_close = rest[..self_close].trim_matches(is_js_whitespace);
@@ -1180,6 +1177,17 @@ impl<'a> Parser<'a> {
                 "Unexpected token".to_string(),
                 (at, at),
             ));
+        }
+        // A complete leading expression leaves the brace demanded at the first
+        // token acorn did not consume. Check this after the close-tag form:
+        // when a broken mustache is followed by an enclosing `{/block}`, OXC's
+        // recovery can treat the block close as trailing input even though
+        // acorn is still lexing the preceding `</tag>` as an unterminated
+        // regexp and throws there.
+        if let Some(offset) = trailing_token_offset(rest, self.ts)
+            && check_js_parse_error_with_pos(&rest[..offset], self.ts).is_none()
+        {
+            return Err(ParseError::expected_token("}", from + offset));
         }
         // Otherwise acorn never got an expression out of the rest of the file,
         // so upstream reports the JS parser's own error rather than the brace.

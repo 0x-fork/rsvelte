@@ -1,9 +1,9 @@
 # Deliberate divergences from the official compiler
 
 Output must match the official compiler exactly, because upstream is the specification.
-That rule does not extend to reproducing bytes that are **not valid JavaScript**: a module
-that no parser accepts is a defect a byte match cannot pay for. Where the two conflict,
-correctness wins.
+That rule does not extend to reproducing bytes that are **not valid JavaScript** or that change
+the source program's runtime meaning: an unparseable module or a dropped semantic clause is a
+defect a byte match cannot pay for. Where the two conflict, correctness wins.
 
 This file is the whole list. It is prose, not a ratchet — the divergences here are ones no
 gate observes, which is exactly why they need writing down: an unobserved surface plus a
@@ -14,6 +14,27 @@ entry below is pinned by a test, so the choice is enforced and not merely descri
 Before adding an entry, run both compilers. "Deliberate" is a claim about which side is
 wrong, and a record that asserts it without the outputs converts an open question into a
 settled one.
+
+---
+
+## Attributes on a side-effect import
+
+**Pinned by** `crates/rsvelte_esrap/src/printer.rs::side_effect_import_keeps_attributes` and
+`crates/rsvelte_core/tests/import_attributes_clause_3352.rs`.
+**Reported upstream** in `upstream_issues/3635-esrap-side-effect-import-drops-attributes.md`.
+
+Official Svelte (through esrap 2.2.12) prints
+`import './data.json' with { type: 'json' };` as `import './data.json';`. esrap's
+specifier-less import branch returns after the source and semicolon, before the shared code that
+prints import attributes. A declaration with a specifier keeps the clause.
+
+rsvelte deliberately prints the clause on both forms. An import attribute controls module
+loading; dropping it can make a valid JSON or CSS module import fail at runtime. This is therefore
+not a byte-only layout difference that exact-output compatibility can safely reproduce.
+
+The corpus output gate has no accepted component containing this shape. If one is added while
+upstream still drops the clause, it must be recorded as this deliberate divergence rather than
+"fixed" by deleting the attribute again. Remove this entry when upstream esrap prints the clause.
 
 ---
 
@@ -312,3 +333,41 @@ No collected corpus source binds an inspect rune's result, and the #3611 generat
 compares official output rather than evaluating the later reference. Remove this entry and change
 the eight pinned expectations to byte parity when upstream includes `'$inspect().with'` in both
 declarator allow-lists.
+
+---
+
+## CSS custom-property block values
+
+**Pinned by** `crates/rsvelte_core/tests/css_custom_property_block_3052.rs`.
+**Reported upstream** in `upstream_issues/3052-svelte-css-custom-property-brace-block.md`.
+
+CSS custom properties accept the `<declaration-value>` grammar, including balanced `{}` and `[]`
+blocks. The official compiler instead parses their values with the ordinary declaration-value
+scanner and raises `css_expected_identifier` at the first `{`. Browsers and general CSS parsers
+accept the value.
+
+rsvelte preserves balanced custom-property blocks and the declarations following them. It does
+not extend that grammar to ordinary properties, which keep the existing rejection. This is an
+intentional error-presence divergence: rejecting valid CSS changes the component's available
+styles, so it is not a byte-only parity choice.
+
+---
+
+## Awaited `autofocus` and event attributes (client)
+
+**Pinned by** `crates/rsvelte_core/tests/async_autofocus_event_3651.rs`.
+**Reported upstream** in
+`upstream_issues/3651-svelte-async-autofocus-and-event-output-is-unparseable.md`.
+
+With `experimental.async: true`, official Svelte 5.56.10 emits
+`$.autofocus(input, await p)` and puts `(await p)?.apply(...)` inside a plain
+event-handler function. Both are syntax errors because neither containing function
+is async. rsvelte routes only the awaited cases through a local `Memoizer`, so the
+await remains inside an async value thunk and the runtime call receives `$0`, the
+resolved result. Synchronous output is unchanged.
+
+The ordinary parity gates cannot observe the correction: both compilers previously
+agreed, while the matrix treats unparseable official output as an oracle rejection and
+aborts rather than producing a keyed divergence. Gate-coverage 5r records that blind
+spot. Remove this entry and converge on upstream when its two visitors adopt an async
+memoization path.
