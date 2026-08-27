@@ -1944,11 +1944,6 @@ impl ComponentAnalysis {
                     content.uses_runes = false;
                 }
             }
-            // Only auto-detect runes from script content if runes wasn't explicitly set.
-            // When options.runes is Some(false), we must respect that and not override.
-            if content.uses_runes && self.runes_explicitly_set.is_none() {
-                self.runes = true;
-            }
             self.instance_script_content = Some(content);
         }
 
@@ -2004,17 +1999,6 @@ impl ComponentAnalysis {
         // (e.g., invalid $ prefix on variable names)
         if let Some(err) = validation_errors.into_iter().next() {
             return Err(err);
-        }
-
-        // Update runes flag based on bindings, but only if runes wasn't explicitly set.
-        // When options.runes is Some(false), we must respect that.
-        if self.runes_explicitly_set.is_none() {
-            for binding in &self.root.bindings {
-                if binding.kind.is_rune() {
-                    self.runes = true;
-                    break;
-                }
-            }
         }
 
         // In runes mode, immutable is always true
