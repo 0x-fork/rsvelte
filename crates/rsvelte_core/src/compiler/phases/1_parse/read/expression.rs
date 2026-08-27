@@ -7252,6 +7252,10 @@ fn acorn_only_violation(
         check_ts_modifier: bool,
         content: &'c str,
         ts_modifier_at: Option<u32>,
+        super_at: Option<u32>,
+        await_at: Option<u32>,
+        super_allowed: bool,
+        next_function_is_method: bool,
     }
     impl Scan<'_> {
         fn record_ts_modifier(&mut self, carries_modifier: bool, span: oxc_span::Span) {
@@ -7266,6 +7270,47 @@ fn acorn_only_violation(
         }
     }
     impl<'a> Visit<'a> for Scan<'_> {
+        fn visit_expression(&mut self, expr: &oxc_ast::ast::Expression<'a>) {
+            if let oxc_ast::ast::Expression::Super(super_expr) = expr
+                && !self.super_allowed
+                && self.super_at.is_none()
+            {
+                self.super_at = Some(super_expr.span.start);
+            }
+            oxc_ast_visit::walk::walk_expression(self, expr);
+        }
+        fn visit_identifier_reference(&mut self, ident: &oxc_ast::ast::IdentifierReference<'a>) {
+            let next = self.content[ident.span.end as usize..]
+                .bytes()
+                .find(|byte| !byte.is_ascii_whitespace());
+            if ident.name == "await"
+                && self.await_at.is_none()
+                && matches!(next, Some(b')' | b'.' | b'?'))
+            {
+                // Acorn reads `await` as the start of an AwaitExpression in a
+                // module and stops on the token immediately following it. OXC
+                // also represents the leading word of Svelte's valid
+                // `await expression` form as an identifier here, so only the
+                // bare/member continuations distinguish the acorn rejection.
+                self.await_at = Some(ident.span.end);
+            }
+        }
+        fn visit_function(
+            &mut self,
+            func: &oxc_ast::ast::Function<'a>,
+            flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+            let saved = self.super_allowed;
+            self.super_allowed = std::mem::take(&mut self.next_function_is_method);
+            oxc_ast_visit::walk::walk_function(self, func, flags);
+            self.super_allowed = saved;
+        }
+        fn visit_object_property(&mut self, prop: &oxc_ast::ast::ObjectProperty<'a>) {
+            let saved = self.next_function_is_method;
+            self.next_function_is_method = prop.method;
+            oxc_ast_visit::walk::walk_object_property(self, prop);
+            self.next_function_is_method = saved;
+        }
         fn visit_decorator(&mut self, dec: &oxc_ast::ast::Decorator<'a>) {
             if self.check_decorator && self.decorator_at.is_none() {
                 self.decorator_at = Some(dec.span.start);
@@ -7294,7 +7339,10 @@ fn acorn_only_violation(
                     || def.r#type == oxc_ast::ast::MethodDefinitionType::TSAbstractMethodDefinition,
                 def.span,
             );
+            let saved = self.next_function_is_method;
+            self.next_function_is_method = true;
             oxc_ast_visit::walk::walk_method_definition(self, def);
+            self.next_function_is_method = saved;
         }
         fn visit_property_definition(&mut self, def: &oxc_ast::ast::PropertyDefinition<'a>) {
             self.record_ts_modifier(
@@ -7318,6 +7366,8 @@ fn acorn_only_violation(
     let check_decorator = !is_typescript && content.contains('@');
     let check_with = content.contains("with");
     let check_ts_modifier = !is_typescript && content.contains("class");
+    let check_super = content.contains("super");
+    let check_await = content.contains("await");
     let mut finder = Scan {
         check_decorator,
         decorator_at: None,
@@ -7326,11 +7376,21 @@ fn acorn_only_violation(
         check_ts_modifier,
         content,
         ts_modifier_at: None,
+        super_at: None,
+        await_at: None,
+        super_allowed: false,
+        next_function_is_method: false,
     };
     // The TypeScript-only rule below needs a token that is cheap to rule out, so
     // a plain-JS script keeps the walk it had.
     let check_ts_acorn = is_typescript && content.contains("global");
-    if check_decorator || check_with || check_ts_modifier || check_ts_acorn {
+    if check_decorator
+        || check_with
+        || check_ts_modifier
+        || check_ts_acorn
+        || check_super
+        || check_await
+    {
         finder.visit_program(program);
     }
 
@@ -7354,6 +7414,12 @@ fn acorn_only_violation(
         super::strict_mode::find_violation(program, content, is_typescript),
         finder
             .ts_modifier_at
+            .map(|at| (at, "Unexpected token".to_string())),
+        finder
+            .super_at
+            .map(|at| (at, "'super' keyword outside a method".to_string())),
+        finder
+            .await_at
             .map(|at| (at, "Unexpected token".to_string())),
     ]
     .into_iter()
