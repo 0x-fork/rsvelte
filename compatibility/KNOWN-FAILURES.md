@@ -2847,11 +2847,11 @@ checked-in pattern corpus (#2019) surfaced are gone too: the two SSR
 destructuring ones (#2033, #2034) were fixed by #2036, and the block-local
 snippet render tag (#2031) by #2057.
 
-### Client (`known-failures.client.json`, 42 entries)
+### Client (`known-failures.client.json`, 34 entries)
 
-Partition of `known-failures.client.json` by verdict: `41 + 1`
+Partition of `known-failures.client.json` by verdict: `33 + 1`
 
-- **41 — the generated JS differs** (`js` / `code-differs`).
+- **33 — the generated JS differs** (`js` / `code-differs`).
 - **1 — the generated CSS differs.**
 
 The error classes this section used to carry are gone: the run behind this
@@ -2887,7 +2887,56 @@ A prop with a default was unaffected, because a default makes it a source prop, 
 why the shape looked narrower than it was. Hashing all 104,439 (entry, target) outputs
 before and after attributes exactly these four to the change.
 
-Every one of the remaining 43 arrived with the wave-2 enrolment (#3130) and is described
+Four entries (`carbon-components-svelte/…/NotificationQueue.svelte`,
+`gitlight/…/NotificationLabels.svelte`, `huly/…/Timeline.svelte`,
+`huly/…/InboxCard.svelte`) plus `svelte-tweakpane-ui/…/ClsPad.svelte` left this target and
+`client-dev` when a `style:` directive's chunk metadata started reaching phase 3. Upstream's
+`StyleDirective` visitor calls `context.next()` and `ExpressionTag` swaps `state.expression`
+for the **tag's own** metadata before walking, merging each chunk up afterwards; rsvelte wrote
+into the directive's metadata, so the chunk stayed empty — and `build_attribute_value` reads
+the chunk, so `has_call` was always false and `build_expression` returned early, dropping the
+legacy `($.deep_read_state(dep), $.untrack(() => value))` wrapper. Only a **call** diverged,
+because `has_member_expression` and `has_assignment` are re-derived in phase 3. Hashing all
+69,626 client (entry, target) outputs before and after reports 14 changed units over 7 ids,
+`match -> MISMATCH = 0`, and 10 of the 14 newly matching.
+
+The other two of those seven ids — `open-webui/…/Models.svelte` and
+`huly/…/OptimizeSkills.svelte` — retire as well, and **only CI could say so**. A local
+reconstruction of the gate reported both as still mismatching on both targets, because it
+stopped at the byte comparison of the oxfmt-normalized text; the gate runs an **AST
+comparison on every byte-different output** after that, and each of those two residues is a
+comment placement, which the AST comparator does not represent. So the reconstruction was
+strictly *stricter* than the gate it stood in for — the opposite direction from the usual
+reconstruction hazard.
+
+Which direction a reconstruction misses in follows from **what kind of stage it dropped**: a
+gate's verdict is a pipeline, and dropping a *rescue* stage (this AST comparison, oxfmt) makes
+the reconstruction stricter, while dropping a *judging* stage makes it looser. That asymmetry
+is worth stating because it makes one side of the fidelity question free. A reconstruction
+that is stricter than the gate can report **zero** with no fidelity argument at all — a zero
+under a stricter comparison is a zero under the gate's. It is only a **non-zero** from a
+stricter reconstruction that is not a finding: it is a list of candidates to ask the gate
+about, and every entry on it can be a false positive. Both halves were exercised on the same
+day: these two entries are the false positives, and a 135,592-pair `compile()` sweep on raw
+hashes over four targets reported zero, which needed no gate confirmation for exactly this
+reason.
+
+One `huly/…/CreateIssueTemplate.svelte` entry left this target and `client-dev` when a legacy
+store or `$:` read **nested inside** a prop default stopped being judged simple. Upstream runs
+`is_simple_expression` on the *transformed* initializer, where `$s` is already the call `$s()`
+and a `$:` variable is already `$.get(r)` — hence non-simple, hence thunked with
+`PROPS_IS_LAZY_INITIAL`; rsvelte tested the untransformed source, where each is a plain
+identifier. A **bare** identifier already had its own three branches, so the divergence lived
+only where the read sat inside a logical / conditional / binary operand, and a 6 binding-kind ×
+5 position grid isolates it exactly: 8 diverging cells, all of them `store` or `$:` in one of
+the four non-bare positions, with a plain `let` in the same four positions as the control that
+stays simple. For a store the value itself was wrong, not only the flags — the post-pass that
+rewrites `$s` to `$s()` inside a default fires only when the default is already `() => …`, so
+the emitted default was the getter function rather than the store's value. Hashing all 69,626
+client (entry, target) outputs before and after reports **2** changed units over 1 id,
+`match -> MISMATCH = 0`; the other two ids of that cluster do not move and stay listed.
+
+Every one of the remaining 34 arrived with the wave-2 enrolment (#3130) and is described
 in § *Wave-2 enrolment*. The list was **0** before it, and the one entry it ever
 held — #2031, a `{#snippet}` declared inside
 an `{#if}` branch and `{@render}`ed as a sibling in that same branch, lowered
@@ -2994,15 +3043,15 @@ that became unparseable only with `dev: true`; #3877 corrected the component
 callback tail-comment insertion point, so both its parse and output entries have
 been retired.
 
-### Client dev (`known-failures.client-dev.json`, 56 entries)
+### Client dev (`known-failures.client-dev.json`, 48 entries)
 
-Partition of `known-failures.client-dev.json` by verdict: `56`
+Partition of `known-failures.client-dev.json` by verdict: `48`
 
-- **56 — the generated JS differs.**
+- **48 — the generated JS differs.**
 
 Unlike `client`, no CSS entry survives on this target.
 
-All remaining 56 arrived with the wave-2 enrolment (#3130); this target was at 0 before
+All remaining 48 arrived with the wave-2 enrolment (#3130); this target was at 0 before
 it, and it is the largest of the four — 15 JS entries that `client` does not
 carry, which is the reason it is ratcheted separately.
 
