@@ -415,9 +415,32 @@ pub fn rewrite_once(
     innermost_only: bool,
     collect: impl FnOnce(&Program<'_>) -> Vec<Edit>,
 ) -> Option<String> {
+    rewrite_once_attempt(
+        arena,
+        source,
+        source_type,
+        parse_options,
+        innermost_only,
+        collect,
+    )
+    .into_option()
+}
+
+/// [`rewrite_once`], reporting whether the parse itself succeeded — a caller
+/// that can re-host an unparseable fragment needs to tell that apart from a
+/// parse that found nothing to rewrite.
+#[track_caller]
+pub fn rewrite_once_attempt(
+    arena: &'static LocalKey<RefCell<Allocator>>,
+    source: &str,
+    source_type: SourceType,
+    parse_options: ParseOptions,
+    innermost_only: bool,
+    collect: impl FnOnce(&Program<'_>) -> Vec<Edit>,
+) -> ParseAttempt<String> {
     let _pass =
         dual_run::PassGuard::enter(dual_run::pass_of(std::panic::Location::caller().file()));
-    with_program(arena, source, source_type, parse_options, |program| {
+    with_program_attempt(arena, source, source_type, parse_options, |program| {
         splice(source, collect(program), innermost_only)
     })
 }
@@ -485,6 +508,45 @@ pub fn fixed_point_while_deferred(
         }
     }
     Some(current)
+}
+
+/// A class body to host a bare member in, declaring every `#name` it mentions
+/// because a private field must be declared in an enclosing class to parse.
+pub fn class_host(source: &str) -> Option<(String, String)> {
+    let bytes = source.as_bytes();
+    let mut names: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end] == b'_' || bytes[end] == b'$' || bytes[end].is_ascii_alphanumeric())
+            {
+                end += 1;
+            }
+            if end > start && !bytes[start].is_ascii_digit() {
+                let name = &source[start..end];
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let mut open = String::from("class __RSVELTE_HOST__ {");
+    for name in names {
+        open.push('#');
+        open.push_str(name);
+        open.push(';');
+    }
+    open.push('\n');
+    Some((open, String::from("\n}")))
 }
 
 #[cfg(test)]
