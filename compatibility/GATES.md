@@ -207,7 +207,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 3 | Compiler warning positions | multiset of `code@line:col` | warning **end** span | [S] |
 | 4 | Compiler **error** parity | `error.json` `code`, `message`, `start`, `end`, `frame` | `filename`; the NAPI entries the corpus does not call; a missing artifact scored `match` until the per-tree precondition | [D] |
 | 5 | Generated shape matrix | per-case × target JS text + warning `code` multiset, or error `code` where official rejects | neither output is parsed — identical **non-JavaScript** scores `match`; CSS; warning **position**; error **message** and **position**; multi-directive and ancestry rules; whether a folded constant is the *right* value | [D] |
-| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout; whitespace inside a statement; anything about an error both sides raise | [S] [D] |
+| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout; whitespace inside a statement; anything about an error both sides raise; how the port decided a token was code | [S] [D] |
 | 7 | svelte2tsx source map | structural invariants and corpus-wide mapped-line coverage on rsvelte's own map | relation between generated text and mapped original text; source index | [D] |
 | 8 | css-prune sweep | `css.code` + `code@line:col` warnings of 1969 generated components | `js.code`; **every element in the grid is a plain `<div>`/`<p>` in one component** | [D] |
 | 9 | Formatter parity (JS corpus) | whole-file bytes vs oxfmt oracle | ids whose oracle file is absent are skipped, uncounted | [D] |
@@ -901,6 +901,28 @@ the reason above, and to gate 20 (formatter parity) because the oxfmt oracle re-
 ` * ` lines on both sides. Unlike the fenced-backtick defect (gate 26), the indentation it
 produces is *uniform*, so the round-trip gate cannot see it either — no gate here observes it
 today.
+
+**Third discriminating case [D], and the corollary that reads a ratchet.** A JSDoc cast around
+a private field read — `return /** @type {number} */ (this.#x);` in an instance script — is
+byte-different from official before #4096 (`return (/** @type {number} */ $.get(this.#x));`
+against `return $.get(/** @type {number} */ this.#x);`) and comes back **`equivalent`** from
+the comparator, so the gate scored it `match` on both arms. The class #4096 exists to fix was
+never gate-visible, on any corpus size.
+
+The corollary is what makes this worth re-reading: **an output ratchet cannot hold a
+"comment placement" cluster**, because an entry that reaches it is by construction not
+comment-only. Measured against a cluster of nine `known-failures.client{,-dev}.json` entries
+grouped as `comment-attachment` (the key was "a comment appears within six lines of the first
+differing line"): all 16 non-matching `(id, target)` cells come back **`code-differs`** with
+comments ignored, and the nine mechanisms are an each-block item read through a signal instead
+of a callback parameter, a lost `deep_read_state`/`untrack` wrapper, `$$props` where official
+reads `$$sanitized_props`, a `$.prop` default emitted as a `19`-flagged thunk instead of a
+`3`-flagged literal, an ownership-validator wrapping its argument instead of the call, a
+double-applied store call and a missing `$.get` — **none of them a comment**. CSS was compared
+too, on the same pairs and by the gate's own rule (raw bytes, no oxfmt): **0 of 18 cells
+differ**, with six of the nine carrying non-empty CSS, so the attribution is not resting on an
+empty comparison. `firstDiffLine` reports where a *line* first differs, so a comment that
+shifts lines becomes the face of a divergence it did not cause.
 
 **Tracked:** #2424, PR #2436. **Closing it** requires rsvelte preserving comments *plus*
 `--comments` here — a compiler change, not a harness one. Note that even
@@ -2107,6 +2129,56 @@ The consequence for reading this gate: an entry leaving `svelte2tsx-known-failur
 evidence about the normalized text, never about the bytes the language server actually
 consumes. Gate 7 does not close it either — it validates rsvelte's map against *rsvelte's own*
 line lengths (6a).
+
+### Blind spot 6i — where the port decided a token was code, and the carrier that measured clean
+
+**[D]** The unit is text, so nothing here asks *how* the port reached its answer. Upstream
+answers "is this token code?" with a parser — `findNextVerbatimElement`'s regex opens with a
+`(<!--[^]*?-->)` alternation arm and skips any match that starts with it, `ComponentEvents`
+walks the TypeScript AST, and `Stores` is fed by the Svelte AST walk — while rsvelte answered
+it from bytes at **51 call sites carrying 36 distinct literal needles**, plus two scans whose
+pattern is constructed rather than literal (the dispatcher identifier, the `$` prefix).
+Crossing the needle with the carrier that hides it — 39 tokens x {instance, instance-ts,
+module, template-expression} x {`//`, `/* */`, JSDoc, `'…'`, `"…"`, `` `…` ``, `/…/`} plus two
+HTML-comment hosts, 1166 cells after the 32 a wrapper cannot carry verbatim — reported **29
+divergences** from official, and the fix took it to 8 with 0 regressed (#4114). The corpus
+holds this class (10 of the 35 ratchet entries are it), but its key is a file, so the mechanism
+is not in the ratchet — it took running both implementations on the listed sources to read it,
+and two rows of the mechanism table were still symptoms until then. 29 of the 36 needles appear
+verbatim inside a grid token; the 7 that do not are the four comment delimiters themselves
+(`//`, `/*`, `*/`, `/**` — a carrier cannot host its own delimiter), an error-message match, an
+attribute value (`infinity`), and `}),`, which is matched against the port's own generated text
+rather than against source.
+
+**The regex-literal carrier measured clean, and that is a measurement rather than a gap.** 132
+of its cells run (the rest cannot be spelled inside `/…/`), and **both** arms — before and
+after the fix — report **0 divergences** on all 132. It had read as unmeasured for a mechanical
+reason worth keeping: the grid's first usability table was hand-written and rejected 56 of
+those cells for a reason about regex *semantics* rather than about whether the cell compiles.
+Replacing it with `new Function` admitted them, and they were clean on both arms.
+
+**That clean measurement is true and it did not cover the carrier's other role, which is how
+the fix for this blind spot shipped a regression.** Every cell of the grid binds carrier to
+needle: one token is placed *inside* one carrier, and the question asked is whether the port
+reads the hidden token as code. A carrier has a second role the grid holds fixed — it delimits
+a **region**, and the region computation runs identically in all 1166 cells because no cell
+varies the markup *around* the needle. `svelte2tsx/utils/lexical.rs`'s
+`template_expression_ranges` paired `"` and `'` with no regex rule, so
+`{@const m = t.match(/<file type="html" id="([^"]+)"/)}` desynchronized it: the expression's
+range ran past its own `}` and swallowed the following attribute, whose **live** `$settings`
+read was then dropped from the projection as if it were inside a string. **[D]** — named input
+above, reproduced on `open-webui/…/Markdown/HTMLToken.svelte`, and the pair
+`store-after-regex-with-quotes-in-const-tag` / `store-after-plain-call-in-const-tag`
+(`comment_blind_scans.rs`) discriminates it: ablating the fix reddens only the former.
+
+Two things generalize. The needle axis asks *is this token code*; the carrier axis, crossed
+with **position relative to the region boundary** rather than with the needle, asks *where does
+this region end* — and only the second reaches a range defect. And the local measurement that
+missed it used the **ratchet** as its population: `svelte2tsx-known-failures.json` is the list
+of entries that are already wrong, so it structurally excludes every entry a regression could
+break. Re-measured over all 33,898 manifest components the fix moves 10 files, 9 toward
+official and 0 away, and the broken intermediate scores 1 away — which is the positive control
+for the wider population, not for the fix.
 
 ---
 
@@ -5284,7 +5356,7 @@ whose oracle is the other implementation is only as good as its independent expe
 | [3](#3-is-this-assignments-rhs-a-known-primitive--d) | Is this assignment's RHS a known primitive? | 3 | **[D]** | no |
 | [4](#4-which-trailing-global-are-truncated-before-matching--d) | Which trailing `:global(...)` are truncated before matching? | 2 | **[D]** | no |
 | [5](#5-is-this-fragment-standalone--d) | Is this fragment standalone? | 2 | **[D]** | no |
-| [6](#6-is-this-byte-code-or-comment--string--template--regex--d) | Is this byte code, or comment / string / template / regex? | 2 predicates + ≥8 inline copies | **[D]** | no |
+| [6](#6-is-this-byte-code-or-comment--string--template--regex--d) | Is this byte code, or comment / string / template / regex? | 3 predicates + ≥7 inline copies | **[D]** | one copy folded onto `find_matching_bracket` |
 | [7](#7-does-this-element-match-this-selector--d-one-pair-closed) | Does this element match this selector? | 4 in phase 2 | **[D]** | #3403 fixed one pair |
 | [8](#8-where-does-the-scoping-class-go-inside-a-compound--d-open-as-3402) | Where does the scoping class go inside a compound? | 2 | **[D]** | #3402 open |
 | [9](#9-is-this-expressions-value-known--defined--d) | Is this expression's value known / defined? | ≥6 | **[D]** | no |
@@ -5499,6 +5571,28 @@ rediscovered here: once a chunk containing a multi-line template literal reaches
 rewrite, the reprint **re-indents the template's interior lines**, which is another silent value
 change. It reproduces on a binary built before any of today's fixes, so it is pre-existing and
 belongs to the printer rather than to the member scan.
+
+**A fifth instance, closed — and it names a THIRD shared predicate rather than a further copy.**
+`svelte2tsx/utils/lexical.rs`'s `template_expression_ranges` was one of the inline machines this
+row counts: it paired `"` and `'` as string delimiters, handled `//` and `/* */`, and had no
+regex branch. Named input, reproduced on `open-webui/…/Markdown/HTMLToken.svelte`:
+
+```svelte
+{@const m = t.match(/<file type="html" id="([^"]+)"/)}
+```
+
+The odd `"` count desynchronizes the pairing, the expression's range runs past its own `}`, and
+the markup after it is absorbed — so a **live** `$settings` read in the following attribute was
+dropped from the projection as if it sat inside a string. It is the same shape as #2988, one
+port over.
+
+It is closed by routing through `phases/1_parse/utils/bracket.rs`'s `find_matching_bracket`,
+which has stepped over comments, strings **and** regex literals since #2253. That is not
+`skip_opaque`: it is a third shared predicate answering the same question with a different
+return, and the fold went to it because this caller needs the matching bracket's *position*,
+not the set of opaque runs. **The row does not close on this** — that two shared predicates
+both answer "is this byte code" and nothing compares them to each other is exactly what this
+file is indexed on, and it is now the residue here rather than the eight inline copies.
 
 #### 7. Does this element match this selector? — [D], one pair closed
 
