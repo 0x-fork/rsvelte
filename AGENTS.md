@@ -971,13 +971,16 @@ control on a string you know is there.
 eyes that can drop the part carrying the verdict**. It never reports that it
 dropped it, so the output is not "wrong", it is *indistinguishable from success*
 — which is why re-reading it more carefully cannot help. Three of these were hit
-on one day, by three different people, each already knowing the rule:
+on one day, by three different people, each already knowing the rule, and two more
+followed on the next:
 
 | What was read | What it actually showed | Why it read as a pass |
 |---|---|---|
 | `cargo test 2>&1 \| tail -25` | `[exited with code 0]` for a run that **failed to compile** (`no field 'errors'`; it is `diagnostics`) | the compile error scrolled past the window, and `$?` came from `tail` |
 | `cargo clippy 2>&1 \| tail -40` | dependency crates and `Finished` — the target crate's own line was outside the window | a clippy run that is clean and one that never reached your file print the *same nothing* |
 | `pgrep -c … \|\| echo 0` | `0` | the `\|\|` arm fabricated a datum that reads exactly like a measurement |
+| `cargo test … \| grep -E '^test \|test result' \| head -20` | `TEST_EXIT=101` from `$pipestatus[1]`, and twenty *passing* lines | the **verdict** was read correctly and the lines explaining it were outside the window |
+| `join before.tsv after.tsv` over paths sorted by Rust's byte order | two non-ASCII paths reported as **changed** that were byte-identical | `join` requires its inputs in the locale's collating order and silently **mispairs** rows when they are not |
 
 Rules, in the order they are cheap:
 
@@ -986,6 +989,19 @@ Rules, in the order they are cheap:
    file and grep the file). `2>/dev/null` and `|| echo <literal>` are the same
    hazard wearing different clothes: the first throws away the half that carries
    the failure, the second manufactures the answer.
+   **Capturing the status is not enough.** Row 4 above kept the exit code and
+   still lost the failure: a window that admits only passing lines answers "did
+   it fail" and never "what failed", and the run that produced it did not
+   reproduce. The failure has to be *inside* the window, not merely outside the
+   pipe — write to a file first, then read the file. The trap is the *stage*, not
+   the command: `head`, `tail`, `sed -n`, `head -c` and `2>/dev/null` are one
+   hazard, and reading the table as "beware `tail`" is how row 4 was hit by
+   someone who had read it half an hour earlier. `cmd | head -20; echo $?` prints
+   `head`'s status, never `cmd`'s. And row 5 is the same class
+   without any truncation at all: a stage that **pairs** two measurements can pair
+   the wrong rows, so use an associative array keyed by id (`awk`) and never
+   `join`, whose ordering precondition your data will violate the first time an
+   id contains a non-ASCII byte.
 2. **When "pass" is spelled as silence, the run needs a positive control.**
    Introduce the defect the check exists to catch, confirm the check goes red,
    remove it, and confirm the tree is byte-identical again (`git diff` empty).
@@ -1015,7 +1031,12 @@ binary you are about to measure with. A probe only separates the hypothesis you
 handed it: an arm was probed with one fix's fingerprint, came back clean, and was
 then trusted as "named correctly" — the mislabelling surfaced only from a *second*
 probe carrying a *different* fix's fingerprint. Probe for what the arm should
-contain **and** for what it should lack. And **read the build's own
+contain **and** for what it should lack. **And a probe on the wrong half of a
+compound fix is powerless even when the hypothesis is right**: #4139 restores a
+leaked read *and* re-scopes the matching write, so an input exercising only the
+write returns identical output from both arms — not because the arms are the same
+but because that half of the change nets to zero. A fix built from two changes
+that cancel needs its probe on the half that does not. And **read the build's own
 `Compiling <crate> (<path>)` line** to learn which tree it read: that is the only
 signal `cd`, `CARGO_TARGET_DIR`, the file name and the artifact path cannot
 between them fake. Build as `cd <worktree> && CARGO_TARGET_DIR=<worktree>/target
@@ -1051,6 +1072,109 @@ diagnosed as a defect and nearly deleted from three ports, because the npm build
 
 No gate compares generated code against the npm build (`test-wasm-compile-options.mjs` imports
 it only to ask whether an option *throws*), so the hazard is probes, not gates.
+
+### A changed hash is not a fixed file, and five samples can be one sample
+
+Two independent measurements of a fix's blast radius converged on the same two
+stages on the same day, which is what makes it a procedure rather than a habit.
+**Stage one** hashes every corpus unit under both arms and reports the set that
+moved; it answers *what did this touch* and nothing else. **Stage two** takes only
+that set and compares it to the oracle through the gate's own normalization; it
+answers *which way*. Collapsing them reports the first number as the second: one
+sweep moved five ids and retired three, because the other two changed their output
+without changing their verdict — the first differing line was identical before and
+after. Print `match -> MISMATCH` on its own line at stage two; a fix that repairs
+n cells and breaks n is the same total as one that does nothing.
+
+The same asymmetry applies to a *sample*. Five samples drawn from five different
+files are not five independent cases if the sampler varied the file and held the
+position: an LSP label's five representatives turned out to sit at `0:2`, `0:9`,
+`0:15` and `1:11` — the `<script` tag name, the `lang` attribute name, its value,
+and the first import line — so "not-MANY at n=5" was really n=1 with the file
+varied. Report the sample's real denominator (`n=5, sites=1`), not its nominal one.
+
+### The ORDER of an upstream guard can be the semantics, and only the oracle can say so
+
+A port is checked against "does it have all the same conditions". It is not checked against
+"does it have them **in the same order**", and for a guard that writes shared state the order is
+the rule. `build_bind_this` (`shared/utils.js:265-268`) pushes onto `seen` *before* it asks
+`is_reference`, so an identifier in a non-reference position **burns the name** and the real
+reference after it is dropped: upstream collects nothing from `els[{ k: k }.k]` and collects `k`
+from `els[{ kk: k }.kk]`. Write the readable thing — visit references, then record them — and you
+get a port that is easier to read and disagrees with official. **The symptom is
+indistinguishable from a missing condition**, which is what makes this expensive: reading the
+rsvelte side produced a confident, plausible, wrong cause (a missing `JsExpr::Object` arm in a
+hand-written walk), and adding that arm made the port *over*-collect while the count of failing
+cells stayed the same.
+
+What discriminated was probing the oracle with the shapes side by side — `{ k }`, `{ k: k }`,
+`{ kk: k }`, `[k][0]`, `` `${k}` ``, `k || 0` — which is where "the axis is whether the key repeats
+the name" becomes visible and "is it an object" stops being. **Reading your own side explains a
+divergence; only the oracle names it.** And print `match -> MISMATCH` on its own line when you
+re-measure: an over-collection and an under-collection of the same size are the same total.
+
+### Split the verdict before you split the cause
+
+A cell that reports one pass/fail per input tells you the input diverges; a cell that
+reports CSS text, warnings and JS separately tells you *which stage* diverges, and twice
+on one day that was the whole diagnosis: once the pruner agreed and only element scoping
+disagreed, once element scoping agreed byte-for-byte and only the prune verdict did not.
+The two are opposite defects with the same single-verdict signature. **What made the
+split diagnostic was that its axis was the compiler's own stages** — prune, diagnostics,
+element scoping — not an arbitrary partition of the output text: each field named a pass,
+so a divergence in one field named the pass to read.
+
+### A missing key can spell two things, and the conservative default reads the wrong one
+
+`expand_effective_parents` returned `None` — "stay conservative" — whenever
+`snippet_render_sites` had no entry for a name, and its own doc comment states that rule
+("`None` when a snippet's render sites are unknown, in which case callers must stay
+conservative rather than treat the ancestor set as empty"). The rule is right; its domain
+was not. An absent key meant *either* "nothing renders this snippet", where upstream's
+answer is an **empty** ancestor set and the selector is pruned, *or* "a `{@render}` whose
+callee could not be read", where any snippet may be the target. **An empty set is
+knowledge, not ignorance**, and conservatism applied to the first case is a silent
+over-match that reads exactly like caution.
+
+The two spellings needed separate *code paths* as well: fixing the pruner's domain moved
+2 cells and **0 of the 16** the same upstream rule explains, because rsvelte ports
+`get_ancestor_elements` twice (phase-3 `expand_effective_parents`, phase-2
+`subtree_has_matching_subject_inner`). **One upstream rule, two ports, two defects** —
+reading the upstream `break` settles what the rule is, never how many places got it wrong.
+A third then appeared under the same rule, so read "two" as the count at one moment.
+
+### A cell written to judge a design decision reports on the code that already exists
+
+Four shadowing cells were added to settle whether a phase-2 port could reuse phase 3's
+name-keyed `snippet_render_sites`. They came back naming a defect already in the tree: two
+same-named snippets in different scopes collapse onto one `FxHashMap<String, _>` key, so a
+snippet nothing renders has its elements counted as descendants of an unrelated ancestor.
+Pre-existing was measured, not assumed — both arms of the fix under audit show the same
+four cells diverging (22/44 matching before, 24/44 after, the +2 being exactly the cells
+that fix targets). Had the cells come after the decision, the name-keyed map would have
+been reused, the grid would have passed, and the defect would have gone from two ports to
+three. **Write the cell before the decision it is meant to inform, not after.**
+
+### A sieve reduces a sample to a key, and a key can agree by construction
+
+Where the key's range is smaller than the sample's, agreement is a property of the key
+rather than of the population. Measured on one gate: the same 10-sample uniformity sieve
+yielded 4 distinct pointer shapes for `textDocument/hover`, 4 for `definition` and 11 for
+`completion` — hover's divergences can only be `/contents:value-mismatch` or
+`/:value-mismatch`, so a hover label's samples agree *by construction* and the verdict
+there is not a measurement at all. Report the key's own cardinality beside any uniformity
+verdict. The same sieve, given a second axis that reduces the payload to a closed class set
+*with the direction of the difference in it*, took the "many mechanisms" count from 3 to 7
+on the identical samples — including one label whose samples ran in opposite directions
+(official answers with HTML data where rsvelte answers with TypeScript, and the reverse)
+and which a direction-free key had reported as uniform.
+
+### A shared crate reaches gates it was not written for
+
+`@rsvelte/svelte-check` is a separately-compiled artifact of `rsvelte_core` with no cascade
+edge, so a change under `crates/rsvelte_projection/src/svelte2tsx/` reaches it and a
+changeset naming only `@rsvelte/svelte2tsx` fails `check-core-consumer-changesets.mjs`.
+Name every consumer the checker lists, not the one whose directory you edited.
 
 ### Working with Subagents
 
