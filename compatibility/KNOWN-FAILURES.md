@@ -902,7 +902,7 @@ Svelte structure, oxc for embedded JS, and PostCSS for embedded CSS) and require
 embedded CSS by default, so the ratchet intentionally includes CSS-engine parity
 as well as Svelte-structure parity. The ratchet may only shrink.
 
-**Current baseline: `fmt-known-failures.json`, 550 entries.** The 789-entry
+**Current baseline: `fmt-known-failures.json`, 549 entries.** The 789-entry
 split this paragraph used to give (22 pre-enrolment + 766 expanded population + 1
 pattern-corpus repro) no longer holds: 239 entries left the ratchet in the
 2026-09-01 re-baseline, and the CI report the baseline is derived from carries a
@@ -927,17 +927,24 @@ An id that carries two clusters' divergences at once is filed under its dominant
 one (see *Multiple clusters per id*), so the per-cluster counts below remain a
 partition of the ratchet rather than an over-count:
 
-Partition of `fmt-known-failures.json` by cluster: `258 + 214 + 15 + 47 + 14 + 1 + 1`
+Partition of `fmt-known-failures.json` by cluster: `258 + 214 + 15 + 47 + 13 + 1 + 1`
 
-**The partition is now the mechanical rule applied to all 550 entries**, where it
+**The partition is now the mechanical rule applied to all 549 entries**, where it
 used to be the hand-diagnosed Clusters 1-12 (23 entries) plus the mechanical
 Clusters 20-27 over the rest. The hand-diagnosed sections below are kept — their
 diagnoses did not stop being true — but their ids are now counted inside the
 mechanical buckets, because the CI report names an entry's first differing line
 and not the cluster a human filed it under. The addends are, in order:
 20 breaks-later 258, 21 breaks-earlier 214, 22 intra-line-ws 15,
-23 indent-only 47, 24 other 14, 25 extra-line 1, 26 missing-line 1;
+23 indent-only 47, 24 other 13, 25 extra-line 1, 26 missing-line 1;
 27 quote-style is now empty.
+
+`svelte-inspect-value/packages/svelte/src/lib/CustomLine.svelte` left
+**24 — other** in #4062: its only differing line was
+`type={(type) as unknown as ValueType}` against the oracle's `type={type as …}`,
+which no rule above matches (not a prefix, not whitespace- or quote-equal). It is
+the one entry that fix moves, out of 34,686 real components whose output was
+diffed across the change.
 
 ### Wave-2 enrolment (#3130) — Clusters 20-27
 
@@ -984,6 +991,15 @@ after `trim()` but differing leading whitespace → **indent-only**; one side bl
 equal after swapping quote characters → **quote-style**; equal after removing all
 whitespace → **intra-line-ws**; anything else → **other**.
 
+**The table below is the wave-2 enrolment measurement, over a population of 765 —
+it is NOT a partition of the current 549.** Its `n` column sums to **766**, one
+more than the 765 the paragraph above claims, so it was already inconsistent with
+its own stated population before this ratchet shrank. What each of its rows would
+be against the current 549 is **unmeasured**: re-deriving it needs every entry's
+first differing line, which lives only in the CI report. The live partition is the
+`Partition of …` line above, which `known-failures-md-check.mjs` verifies; this
+table is kept for the per-cluster descriptions, not for its counts.
+
 | n | cluster | what the first differing line looks like |
 |---|---|---|
 | 386 | **20 — breaks-later** | rsvelte keeps on one line what the oracle has already broken (`{#each …sort( (a,b) => {` vs a wrapped form) |
@@ -1011,8 +1027,12 @@ separate product bug and was fixed by #3629. These two entries remain because
 gate 9 intentionally compares the shipped native CSS path rather than replacing
 it with `--no-native-css`; #3628 records that decision and the engine boundary.
 
-**624 of 765 (82%) are cluster 20 or 21 — one question, where a line breaks** —
-and that is the burndown target, not the tail. Nothing here is an oracle bug: the
+**472 of 549 (86%) are cluster 20 or 21 — one question, where a line breaks** —
+and that is the burndown target, not the tail. That is the live `Partition of …`
+line above (258 + 214), the one the doc check verifies. The figure this sentence
+carried until #4062, *624 of 765 (82%)*, was the wave-2 table's population, and it
+did not agree with that table either — its own rows give 386 + 239 = 625.
+Nothing here is an oracle bug: the
 `oracle-invalid` classification already carries those and is a pass, not a ratchet
 entry.
 
