@@ -1,8 +1,4 @@
 [
-	"appwrite-console/src/routes/(console)/project-[region]-[project]/overview/platforms/+page.svelte",
 	"cnblocks/src/routes/(app)/veil/+layout.svelte",
-	"cnblocks/src/routes/(app)/veil/+page.svelte",
-	"huly/plugins/view-resources/src/components/list/ListCategory.svelte",
-	"mathesar/mathesar_ui/src/component-library/button/Button.svelte",
-	"sparrow-app/packages/@sparrow-workspaces/src/features/tab-bar/components/tab/Tab.svelte"
+	"cnblocks/src/routes/(app)/veil/+page.svelte"
 ]

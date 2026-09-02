@@ -4,6 +4,7 @@ use crate::ast::template::{RegularElement, SlotElement, TitleElement};
 use crate::svelte2tsx::magic_string::MagicString;
 use crate::svelte2tsx::svelte2tsx::{Svelte2TsxOptions, slice_src};
 
+use crate::svelte2tsx::template::attributes::attribute::{AttrHost, element_is_custom};
 use crate::svelte2tsx::template::attributes::binding::{
     any_bind_needs_element_var, sanitize_tag_for_var,
 };
@@ -191,10 +192,13 @@ fn regular_opener_attributes(
         &el.attributes,
         source,
         &counter.element_opener_comments,
-        &el.name,
         in_component_slot,
         Some(content_start),
-        options.namespace.preserves_attribute_case(),
+        AttrHost::Element {
+            tag: &el.name,
+            preserve_case: options.namespace.preserves_attribute_case(),
+            is_custom_element: element_is_custom(&el.name, &el.attributes),
+        },
         options.preserves_bind_prefix(),
     );
     let spacing = opener_spacing(
@@ -336,7 +340,11 @@ pub fn handle_title_element(
         source,
         &counter.element_opener_comments,
         saved_slot.is_some(),
-        options.namespace.preserves_attribute_case(),
+        AttrHost::Element {
+            tag: &el.name,
+            preserve_case: options.namespace.preserves_attribute_case(),
+            is_custom_element: element_is_custom(&el.name, &el.attributes),
+        },
         options.preserves_bind_prefix(),
     );
 

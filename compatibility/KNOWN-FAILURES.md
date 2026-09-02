@@ -6264,11 +6264,10 @@ The svelte2tsx output-parity corpus (`scripts/compat-corpus/svelte2tsx-*`) compa
 rsvelte's svelte2tsx port against **official `svelte2tsx`** byte-for-byte (after
 oxfmt normalization). The ratchet may only shrink.
 
-**Current baseline: `svelte2tsx-known-failures.json`, 6 entries.**
+**Current baseline: `svelte2tsx-known-failures.json`, 2 entries.**
 
-Partition of `svelte2tsx-known-failures.json` by verdict: `4 + 2`
+Partition of `svelte2tsx-known-failures.json` by verdict: `2`
 
-- **4 — the emitted TSX differs** (`ts-mismatch`).
 - **2 — one side rejects and the other compiles** (`error-mismatch`). Both are
   `cnblocks`'s `(app)/veil/` components, and the rejecting side is **official**:
   a UTF-8 BOM together with a `<script>` block and markup makes `svelte2tsx`
@@ -6279,16 +6278,24 @@ A third class left this file entirely: rsvelte emitting text no TypeScript parse
 accepts is now its own verdict with its own ratchet — see
 [`svelte2tsx-unparseable-known-failures.json`](#svelte2tsx-unparseable-known-failures).
 
+A third upstream defect has **no entry here at all**, and that absence is a measurement
+rather than a gap: official svelte2tsx throws a raw `TypeError` when a lowercase element's
+`is` attribute has a mustache as its **first** value chunk, and of the 33,904 corpus
+components the 165 carrying `is=` yield **0** such carriers (158 have a mustache-first
+value, every one of them on a component, which upstream's own gate excludes; all 158
+convert cleanly). Not appearing in a ratchet is not the same as not existing — see
+[`upstream_issues/4177-svelte2tsx-is-attribute-mustache-first-chunk-crash.md`](../upstream_issues/4177-svelte2tsx-is-attribute-mustache-first-chunk-crash.md).
+
 Attribution of `svelte2tsx-known-failures.json`:
 
 | n | target | cluster |
 |---|---|---|
 | 2 | `upstream_issues/svelte2tsx-bom-crashes-on-any-component-with-a-script.md` | official throws on a BOM-prefixed component that has both a `<script>` and markup; rsvelte converts it |
 
-The remaining 4 carry **no target, and cannot have one**: every one was measured
-against official on 2026-09-02 and every one is an rsvelte defect, so the only end
-state open to them is elimination. The classification below is the input to that
-work; it is not an attribution, and this gate stays red until the entries are gone.
+Every entry now carries a target, and every one of them is upstream. The
+`ts-mismatch` half of this ratchet is empty: the four entries it held on
+2026-09-02 were each measured against official, each was an rsvelte defect, and
+each is fixed — see the `### Previously:` sections below.
 
 ### Entries by mechanism (2026-09-02)
 
@@ -6313,12 +6320,115 @@ double count**, so the assignment has to be per entry.
 | n | mechanism | pinned |
 |---|---|---|
 | 2 | official svelte2tsx throws from magic-string on a BOM-prefixed component that has both a `<script>` and markup; rsvelte converts it | upstream |
-| 1 | `bind:this` is emitted as a `"bind:this": element` attribute; official binds the created element to a temporary (`const $$_button1 = svelteHTML.createElement(…); … element = $$_button1;`) | source |
-| 1 | an extra `dragItem: dragItem` slot prop is emitted | output only |
-| 1 | two adjacent store-get `/*Ωignore_startΩ*/…/*Ωignore_endΩ*/` regions are emitted as ONE region spanning both, where official closes and reopens | source |
-| 1 | a `//` comment inside a `${…}` hole of a template-literal attribute value is dropped | source |
 
-Partition of `svelte2tsx-known-failures.json` by mechanism: `2 + 1x4`
+Partition of `svelte2tsx-known-failures.json` by mechanism: `2`
+
+### Previously: `extra-slot-prop` (2026-09-02, at 3 entries)
+
+Kept as `output only` because the divergence was one prop, `dragItem`, and the
+axis is the attribute's **value form**. `<slot … dragItem … />` writes the name
+with no value at all; `handleSlot` (`nodes/slot.ts`) opens its loop with
+`if (!attr.value?.length) continue;` and a valueless attribute's `value` is
+`true`, so official declares no such slot prop and rsvelte declared `dragItem:
+dragItem`.
+
+Named after the prop, the entry reads as a question about `dragItem`. Enumerated
+over the shapes a `<slot>` attribute can take — valueless, shorthand, `=""`,
+a text literal, a mustache, a quoted mustache, text + mustache, a spread, a
+`let:` — **the valueless rows are the only ones that move**, and there are ten
+of them once position (first / last / between two kept entries) and host (a
+named slot, an `{#each}`, a component slot) are crossed in.
+`crates/rsvelte_projection/tests/svelte2tsx_valueless_slot_attribute.rs` is the
+grid; ablating the fix fails exactly those 10 of 19.
+
+The whole-corpus sweep moved 1 unit of 33,901: `MISMATCH -> match` 1,
+`match -> MISMATCH` 0.
+
+### Previously: `template-hole-comment-dropped` (2026-09-02, at 4 entries)
+
+Kept because the description named a **comment**, and the axis is the mustache's
+interior against the expression node's span. Official copies the text between the
+braces into its template literal; rsvelte copied the expression's own span, so
+everything the braces hold that the node does not was dropped — a comment, yes,
+but also a newline and plain padding. `class="x { a } z"` lost its two spaces and
+has no comment in it anywhere.
+
+A repro written from the justification would have been all comments, and half of
+the 25 cells the fix moves carry none. **A justification is a hypothesis about
+why an entry diverges; it is not the identification of the axis**, and a repro
+built from it inherits the hypothesis.
+
+The interior reaches a template literal through **two ports** — the string
+builder and the segment builder in `template/attributes/attribute.rs` — and no
+gate compares them to each other. Measured one arm at a time on the same 46-cell
+grid: reverting only the string builder leaves 10 cells failing (`<slot>` and
+named-slot-element attributes), reverting only the segment builder leaves 15
+(element, `style`, component attributes), reverting both leaves 25. This is the
+third of the three svelte2tsx entries retired on 2026-09-02 to be a two-ports
+defect.
+
+`crates/rsvelte_projection/tests/svelte2tsx_mustache_interior.rs` is the grid.
+The whole-corpus sweep moved 4 units of 33,901 and changed one verdict:
+`MISMATCH -> match` 1, `match -> MISMATCH` 0.
+
+### Previously: `bind-this-shape` (2026-09-02, at 5 entries)
+
+Kept because the description named ONE directive, and the cause is that an
+element carrying a `slot` **attribute** is lowered by a second port of the element
+transform which never ran the binding pass at all.
+
+`<C><svelte:fragment slot="x"><button bind:this={e}/></svelte:fragment></C>`
+reaches `handle_regular_element`, which declares `const $$_button1 = …` and
+appends `e = $$_button1;`. Move the `slot` onto the element —
+`<C><button slot="x" bind:this={e}/></C>` — and it reaches
+`handle_named_slot_element`, which built its own attribute object and its own
+class/style + transition suffix. `bind:this` was one of three things that port
+lost:
+
+- `bind:this` and the one-way binding attributes stayed props instead of
+  becoming an element variable plus an assignment;
+- a two-way `bind:value` kept its prop but lost the
+  `() => v = __sveltets_2_any(null)` setter the suffix pass appends;
+- a **void or self-closing** element closed with a leading space, which only an
+  overwritten `</tag>` leaves behind — a divergence with no binding in it at all,
+  and one **oxfmt normalizes away**, so the output gate could never report it.
+
+The last one is why the sweep moved **6 units and retired 1**: five of the six
+changed their bytes without changing their verdict. A changed hash is not a fixed
+file, and the two have to be printed separately.
+
+Two hosts share that attribute builder and DO emit the binding suffix
+(`<svelte:element>`, the special elements), so they had the same prop and now
+lower it; `<svelte:fragment>` shares the builder and emits no suffix, and takes
+only `slot` and `let:`, so it keeps the old behaviour behind an explicit flag
+rather than silently dropping a binding.
+
+The positive control fails 10 of the 19 cells; the 9 that pass carry no `slot`
+attribute and went through the other port, where all of this was already right.
+
+### Previously: `ignore-region-merge` (2026-09-02, at 6 entries)
+
+Kept because its description named the symptom — *"two adjacent regions are
+emitted as ONE"* — and the symptom points at a merge that does not exist. There is
+no merging step: upstream builds a **second `ImplicitStoreValues`** for the module
+script (`index.ts:202`), seeded with the instance script's accessed stores but with
+its own `importStatements`, and each instance wraps ITS names in one region and
+appends it at the render-function start. Two regions are two instances. rsvelte
+collected both scripts' import names into one list.
+
+**Six of the 17 grid cells diverged and only two of them discriminate.** The other
+four are satisfied by an implementation that merely splits adjacent regions,
+because with distinct names the union and the two instances print the same
+characters in the same order. What separates the rules:
+
+- a name imported by **both** scripts is declared in **both** regions
+  (`[<a>][<a>]`), because the second instance is seeded with the accessed stores
+  and not with the first one's import list — a union drops the duplicate;
+- the instance region comes first **even when the module script is written
+  second**, so an implementation that emits in file order passes the other five.
+
+Reaching the mechanism is not being able to tell two rules for it apart; count the
+discriminating cells, not the diverging ones.
 
 ### Previously: `unterminated-export-let` (2026-09-02, at 7 entries)
 
@@ -6710,23 +6820,32 @@ target to match); the opposite direction had no name, so it had no ratchet. The
 `oracle-invalid` test already computed both sides' parseability and discarded one of
 the two answers, so the new verdict costs no extra work.
 
-**Current baseline: `svelte2tsx-unparseable-known-failures.json`, 1 entry.**
+**Current baseline: `svelte2tsx-unparseable-known-failures.json`, 0 entries.**
 
-Partition of `svelte2tsx-unparseable-known-failures.json` by mechanism: `1`
+The ratchet is empty, so any output rsvelte emits that no TS parser accepts — while
+official's parses — fails CI.
 
-The mechanism assignment is the same one-to-one map the other ratchet's table is
-derived from (`compatibility/svelte2tsx-mechanisms.json`), which covers both files.
+Partition of `svelte2tsx-unparseable-known-failures.json` by mechanism: `0`
 
-- **1 — a `//` comment swallows a hoisted type declaration.**
-  `svelte-virtuallists/src/lib/VirtualListNew.svelte` emits
-  `// ====== PROPERTIES ================;type $$ComponentProps =  {` on one line, so
-  the `//` runs to the end of the line and takes the declaration with it
-  (`Unexpected token`). Official emits no `$$ComponentProps` for this source at all,
-  so there are two defects here and only the second one is loud. **Not reduced**: a
-  three-line `<script lang="ts">` with a leading `//` and a typed `$props()`
-  destructure is byte-identical between the two tools, so the hand-written probe says
-  something about the probe rather than about the defect — the reduction has to come
-  from bisecting the real file.
+### Previously: a `//` comment swallowed the props typedef
+
+`svelte-virtuallists/src/lib/VirtualListNew.svelte` emitted
+`// ====== PROPERTIES ================;type $$ComponentProps =  {` on one line, so the
+line comment ran to the end of the line and took the declaration with it. Upstream
+inserts that typedef at `node.parent.pos`, and TypeScript's `pos` spans the
+declaration's LEADING TRIVIA, so official's insertion lands before the comment
+(`};type $$ComponentProps =  {`). rsvelte walked back from the `const` keyword instead,
+and only one of the three branches that compute this offset walked back through
+comments — the other two stopped at whitespace.
+
+Two things about the entry as it was written. It said official emits no
+`$$ComponentProps` for this source at all, and that is wrong: both tools emit it and
+only the offset differed, so there was one defect here rather than two. And its
+"not reduced" note was right about the reduction while wrong about why — a
+hand-written probe reproduces nothing because the axis it was missing is
+`generics=`, which is what makes this offset reachable at all (without it the typedef
+is hoisted out of `$$render` and none of the three branches runs). Delta-debugging
+the real file from 690 lines to 34 is what surfaced it.
 
 The two entries this file did NOT need are the reason it exists. Both were one
 mechanism: an element carrying `slot=` inside a component went through a second
