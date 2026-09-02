@@ -1036,6 +1036,24 @@ Nothing here is an oracle bug: the
 `oracle-invalid` classification already carries those and is a pass, not a ratchet
 entry.
 
+**And 398 of those 472 are inside the TEMPLATE, not inside embedded JS or CSS
+(2026-09-01).** The cluster table names the *shape* of the first differing line and
+never says which printer produced it, which reads as a line-breaking backlog in the
+embedded-JS formatter. Locating each entry’s first differing line back in its **source**
+— by a token needle, reporting `unlocated` rather than guessing — partitions the 549 as
+`template 438 | unlocated 48 | script 41 | style 22`, and crossed with the shape rule:
+`breaks-later|template 215`, `breaks-earlier|template 183`, `indent-only|template 31`,
+`breaks-later|script 19`, `indent-only|script 14`, `intra-line-ws|style 9`, the rest in
+single digits. So **72.5% of this ratchet is one question about Svelte markup**, and the
+embedded-JS and embedded-CSS engines together carry 63 entries.
+
+The positive control is that the same local harness reproduces the CI gate’s own
+partition on **five of its seven buckets exactly** (`breaks-later 258`,
+`breaks-earlier 214`, `intra-line-ws 15`, `extra-line 1`, `missing-line 1`), differing by
+two entries that move between `indent-only` and `other`. A region split measured by a
+harness that did not reproduce the shape split would be describing a different
+population.
+
 ### Three axes the cluster table does not carry (2026-08-31)
 
 The table above keys on the **first differing line**, which answers *what the
@@ -2847,17 +2865,56 @@ checked-in pattern corpus (#2019) surfaced are gone too: the two SSR
 destructuring ones (#2033, #2034) were fixed by #2036, and the block-local
 snippet render tag (#2031) by #2057.
 
-### Client (`known-failures.client.json`, 34 entries)
+### Client (`known-failures.client.json`, 28 entries)
 
-Partition of `known-failures.client.json` by verdict: `33 + 1`
+Partition of `known-failures.client.json` by verdict: `27 + 1`
 
-- **33 — the generated JS differs** (`js` / `code-differs`).
+- **27 — the generated JS differs** (`js` / `code-differs`).
 - **1 — the generated CSS differs.**
 
 The error classes this section used to carry are gone: the run behind this
 baseline reports `error-mismatch: 0` and `js-unparseable: 0` on every target, so
 no entry here is "both compilers reject with a different code", "one compiler
 rejects and the other compiles", or "rsvelte's output is not JavaScript".
+
+`pattern/issues/3072-extends-shapes-legal.svelte.js` left this target and `client-dev` when
+the class-body scan stopped taking the first `{` after the header. A heritage clause can open
+a brace of its own, and `find_class_header` counted exactly one thing that does — a nested
+`class` expression — so `class A extends function () {} { e = $state(5) }` read the
+function’s body as the class body and never privatised the field. A heritage is a
+`LeftHandSideExpression`, which closes the set: a class expression, a function expression in
+its four spellings, and an object literal in primary position. Measured one cell per member,
+**eight of eighteen diverged** and the shape this entry carries was one of them. The scan is
+shared by the client and the server (`client/class_transforms.rs:996`,
+`server/transform_script.rs:4864`), so the change was swept on all four targets rather than
+on the two this entry sits in.
+
+Two entries left this target and `client-dev` because a read transform was handed the wrong
+identifier. `$.invalidate_inner_signals(() => (…))` names the bindings an each-item mutation
+must invalidate, and each name goes through that binding's read transform. A legacy **reactive
+import**'s read expects the identifier already swapped for its `$$_import_` alias —
+`client/visitors/program.rs` registers that swap as `replacement_id`, and both
+`shared/utils.rs:907` and `shared/utils.rs:1572` consult it — while `each_block.rs` passed the
+raw name, so `photon/…/settings/{app,moderation}` emitted `settings()` where official emits
+`$$_import_settings()`. That output is **exactly what a prop read looks like**, so a check
+asking only "is it not the bare name" passes on the bug; the repro therefore varies the
+binding KIND behind one fixed each block (`plain-import` → `settings`, `local-state` →
+`$.get(settings)`, `exported-prop` → `settings()`, nested each → `$.get(filter),
+$$_import_settings()`). A 139,252-unit four-target sweep moved exactly these 4 units.
+
+Two entries left this target and `client-dev` on two `$.mutate` decisions that answer
+differently depending on the HOST the write is written in. `musicat/…/Scrollbar.svelte`
+was over-wrapped: upstream walks an assignment target’s `.object` chain only while it is
+a `MemberExpression` and then requires an `Identifier`, so
+`stage.container().style.cursor = 'grab'` has no root binding and is not a mutation, while
+rsvelte’s `get_base_object` crossed the `Call` via its callee. Only the
+template-expression port did — an arrow declared in `<script>` reaches a different
+implementation and was already right, which is why the axis that separates the two is the
+host and not the binding. `ha-fusion/…/TransformAttributes.svelte` was under-wrapped: a
+`$:` body is lowered by branching on the shape of its left-hand side, and the pass that
+wraps a state member write was wired into two of eight branches — the note recording that
+fix called them “both sibling branches”, and five more were missing it. Both are
+byte-identical to official on `js.code` and `css.code`, on `prod` and on `dev`.
 
 Two syntaxfm-website entries left this target and `client-dev` when an attribute-free
 custom element stopped making its ancestors dynamic: upstream gates that
@@ -2936,7 +2993,7 @@ the emitted default was the getter function rather than the store's value. Hashi
 client (entry, target) outputs before and after reports **2** changed units over 1 id,
 `match -> MISMATCH = 0`; the other two ids of that cluster do not move and stay listed.
 
-Every one of the remaining 34 arrived with the wave-2 enrolment (#3130) and is described
+Every one of the remaining 28 arrived with the wave-2 enrolment (#3130) and is described
 in § *Wave-2 enrolment*. The list was **0** before it, and the one entry it ever
 held — #2031, a `{#snippet}` declared inside
 an `{#if}` branch and `{@render}`ed as a sibling in that same branch, lowered
@@ -3043,15 +3100,15 @@ that became unparseable only with `dev: true`; #3877 corrected the component
 callback tail-comment insertion point, so both its parse and output entries have
 been retired.
 
-### Client dev (`known-failures.client-dev.json`, 48 entries)
+### Client dev (`known-failures.client-dev.json`, 42 entries)
 
-Partition of `known-failures.client-dev.json` by verdict: `48`
+Partition of `known-failures.client-dev.json` by verdict: `42`
 
-- **48 — the generated JS differs.**
+- **42 — the generated JS differs.**
 
 Unlike `client`, no CSS entry survives on this target.
 
-All remaining 48 arrived with the wave-2 enrolment (#3130); this target was at 0 before
+All remaining 42 arrived with the wave-2 enrolment (#3130); this target was at 0 before
 it, and it is the largest of the four — 15 JS entries that `client` does not
 carry, which is the reason it is ratcheted separately.
 

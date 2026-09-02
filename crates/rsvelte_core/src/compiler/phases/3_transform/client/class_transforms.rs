@@ -1310,13 +1310,20 @@ fn transform_class_fields_client_with_options_at(
         let mut ci = 0;
         while ci < constructor_lines.len() {
             let mut candidate = constructor_lines[ci].trim().to_string();
-            if (candidate.starts_with("this.") || candidate.starts_with("this["))
-                && initializer_starts_later(&candidate)
-            {
-                while ci + 1 < constructor_lines.len() && initializer_starts_later(&candidate) {
+            if candidate.starts_with("this.") || candidate.starts_with("this[") {
+                // `this.a = $state(` has an initializer on the line but no closing
+                // paren, and a rune whose argument list runs past the line end is
+                // dropped whole rather than mis-parsed — so join until the brackets
+                // balance as well, not only until the initializer starts.
+                let mut depth = net_bracket_depth(&candidate);
+                while ci + 1 < constructor_lines.len()
+                    && (initializer_starts_later(&candidate) || depth > 0)
+                {
                     ci += 1;
+                    let next = constructor_lines[ci].trim();
                     candidate.push('\n');
-                    candidate.push_str(constructor_lines[ci].trim());
+                    candidate.push_str(next);
+                    depth += net_bracket_depth(next);
                 }
             }
             let trimmed = candidate.as_str();

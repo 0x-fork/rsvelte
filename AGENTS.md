@@ -237,6 +237,49 @@ citation. Exactly one place in the tree defends against it
 pins the expected answer *independently* — a port-vs-port test whose oracle is the other port
 passes when both are broken the same way.
 
+**A comment that COUNTS its siblings is the same hazard with a number in it, and the number is
+the part nobody re-derives.** `reactive_transforms.rs` lowers a `$:` body by branching on the
+shape of its left-hand side, and the pass that wraps a state member write in `$.mutate` was
+missing from one of them. The fix landed with a note saying the keyword branch "was missing this
+pass that **both sibling branches** have" — accurate about the two it names, and there are
+**eight**. Measured one cell per branch against upstream, **five** were missing it, so a mutation
+nested in a `$:` right-hand side (an arrow body, say) was emitted as a plain write on a prop, a
+state, a member, a computed-member and a non-reactive left-hand side alike, and the read pass then
+rewrote its root to `$.get(o)` — a write that parses, runs and never invalidates. The comment did
+not merely fail to prevent the next instance; **it argued the enumeration was closed**, in a file
+where the branches are 150 lines apart and nothing lists them. Two rules: when a note names a
+count, the count is a claim to check, not context; and when a defect is "a pass is missing from a
+branch", the repro is one cell per branch, because a fix that reaches the reported branch and one
+neighbour looks exactly like a fix that reaches all of them.
+
+**And an enumeration whose members came from bug reports is not an enumeration of the
+grammar.** `find_class_header` locates a class body by taking the first `{` at bracket depth
+zero after the header, and it counted one thing that can put a brace there first — a nested
+`class` expression. `class A extends function () {} { e = $state(5) }` therefore treated the
+*function's* body as the class body and never privatised the field. A heritage is a
+`LeftHandSideExpression`, which closes the domain: a class expression, a function expression in
+its four spellings, and an object literal in primary position, with everything parenthesised
+already at depth > 0 and a template's braces not code bytes. Measured one cell per member,
+**eight of eighteen diverged and the reported shape was one of them**. Adding `function` to the
+list would have been the same mistake one level down; the fix is `class` OR `function` opening a
+pending body, plus a `{` reached with no code byte since `extends`. Ask where a scanner's list of
+cases came from: if the answer is "the shapes someone hit", the list is a work log, not a
+partition. **The grid's other half earned itself in the same hour**: the first fix spelled "no
+brace-producing primary yet" as "no *code byte* since `extends`", and `js_scan::code_bytes`
+skips a template literal whole — so `` extends `${1}` `` produced no code bytes at all and the
+class body was skipped as if it were an object literal. That row had been **passing before the
+fix**, which is the only kind of row that can report this: a grid assembled from the cells a
+defect breaks has no cell left to regress.
+
+The other half of the same day's work is the ordinary two-ports shape wearing a host: upstream
+stops an assignment target's root walk at anything that is not a `MemberExpression`
+(`AssignmentExpression.js:104-112`), so `stage.container().style.cursor = 'grab'` has no root
+binding and is not a mutation. rsvelte's `get_base_object` walked *through* a `Call` via its
+callee and wrapped it. Only the **template-expression** port did — an arrow declared in
+`<script>` reaches a different implementation and was already right — so the axis that separates
+them is the host the arrow is written in, not the binding or the expression. That is the
+`write-host` lesson (binding × host) arriving at a second site.
+
 **The `JsNode` → `serde_json::Value` cost is one site, and it is not the lazy cache.**
 `to_value` has 54 call sites; every materialization figure this project has quoted (27,488 →
 12,089 → 3,649) counts only the cached one. Of the bypassing population, 98% is
@@ -1043,6 +1086,17 @@ between them fake. Build as `cd <worktree> && CARGO_TARGET_DIR=<worktree>/target
 cargo …`: the `cd` protects your sources, the env var protects everyone else's
 `target/`, and neither protects the other.
 
+Prefix **every** Bash invocation with `cd <worktree> &&`, including the ones that only read.
+The tool result's `Shell cwd was reset to …` line is the observation; "I ran `cd` earlier in
+this session" is an assumption, and the two disagree silently. The prefix does not prevent the
+reset — it only makes each call independent of the previous call's cwd. What it cannot fake is
+the build's own `Compiling <crate> (<path>)` line, so read that before trusting any arm.
+
+A second, independent signal is the **diff between the two arms' trees** (`git diff <base> HEAD
+-- crates/`): a one-line answer to "do these arms differ by the change I think they do". Neither
+signal is sufficient alone — the `Compiling` line says which tree was read but not what is in it,
+and the diff says what is in a tree but not that the arm was built from that one. Read both.
+
 The last row is the expensive one, because its symptom is a plausible result.
 A `before -> after` sweep reported 4 output changes "toward official", two of
 them to byte-equality — in the right direction, at the right size, and
@@ -1112,6 +1166,21 @@ What discriminated was probing the oracle with the shapes side by side — `{ k 
 the name" becomes visible and "is it an object" stops being. **Reading your own side explains a
 divergence; only the oracle names it.** And print `match -> MISMATCH` on its own line when you
 re-measure: an over-collection and an under-collection of the same size are the same total.
+
+### And whether it unwinds is the complexity bound
+
+`get_ancestor_elements` (`css-prune.js:845`) adds a `SnippetBlock` to `seen` and never deletes
+it, so each snippet is expanded at most once per resolution. That single missing `delete` is two
+rules at once: the answer becomes a function of where the walk started rather than of the node —
+which is why it cannot be memoised — and the walk stays linear. Port it as the readable
+depth-first walk that unwinds `seen` on the way out and you get a function that enumerates every
+acyclic path: same answers, and it does not terminate on
+`svelte.dev/apps/svelte.dev/src/routes/tutorial/[...slug]/+page.svelte`, which `main` compiles in
+19 ms. **No output gate can see this class** — it is not a wrong answer, it is an answer that
+never arrives, so there is nothing to compare. A 70-cell grid, three committed repros and 121
+release test targets were all green. What attributed it was a completed *previous* run of the
+same corpus sweep: without a baseline rate, a sweep that stops printing is indistinguishable from
+a sweep competing with a build for CPU.
 
 ### Split the verdict before you split the cause
 

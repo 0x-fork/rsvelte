@@ -2017,7 +2017,13 @@ fn get_base_object(
     match expr {
         JsExpr::Spanned(inner, _, _) => get_base_object(arena.get_expr(*inner), arena),
         JsExpr::Member(member) => get_base_object(arena.get_expr(member.object), arena),
-        JsExpr::Call(call) => get_base_object(arena.get_expr(call.callee), arena),
+        // Upstream stops the walk at anything that is not a MemberExpression, so a
+        // method call in the chain has no root identifier and the write is not a
+        // mutation. Only a read-transform call (`count()`, always an Identifier
+        // callee) may be crossed; `has_call_in_base_chain` owns that case.
+        JsExpr::Call(call) if matches!(arena.get_expr(call.callee), JsExpr::Identifier(_)) => {
+            get_base_object(arena.get_expr(call.callee), arena)
+        }
         _ => expr.clone(),
     }
 }
