@@ -167,7 +167,9 @@ produced every one of these defects — huly, open-webui, carbon-components-svel
 not corpus sources at the time**, so the gate baselined at 0 while the instances lived outside the
 population it inspected; that is why each fix lands a `compatibility/pattern-corpus` repro. All
 four are corpus sources now (**#3176** took the corpus to 103 repositories; this file and
-`KNOWN-FAILURES.md` cited #3130 — an unrelated CSS issue — 16 times), which closes the
+`KNOWN-FAILURES.md` cited #3130 — an unrelated CSS issue — 16 times, and the sweep that
+corrected them named its own scope as "15 sections", leaving the sixteenth alive in `GATES.md`
+for a month), which closes the
 population hole for these particular four and for nothing else — the lesson is that the gate's
 population is a choice, not a given.
 
@@ -378,6 +380,13 @@ upstream commits were *in* the tree it measured. Reading that first shrinks or d
 question "does `main` moving invalidate this measurement" — in one instance four commits' worth of
 reachability was traced by hand and the artifact then showed three of them had been in the
 measured tree all along.
+
+**A superseded run shows up RED too, and `gh pr checks` counts it.** A PR whose title was edited
+re-runs the title-dependent job; the old run's `FAILURE` conclusion stays attached to the PR, so
+`gh pr checks --json bucket` reports `fail=1` for a check whose two later runs are both `SUCCESS`.
+Measured on one PR: `Changeset` at 09:24 FAILURE, 09:29 SUCCESS, 09:30 SUCCESS. Group
+`statusCheckRollup` by `name` and take the maximum `startedAt` before calling a branch red — the
+bucket count answers "has this check ever failed here", which is a different question.
 
 **And a cancelled run also shows up RED, where it is indistinguishable from a real regression.**
 `Tests` is a rollup job that reads its shards' `result`s and exits 1 unless every one is
@@ -1045,9 +1054,10 @@ control on a string you know is there.
 | `Binary file … matches`, no lines printed | one NUL byte anywhere in the file (not non-ASCII — UTF-8 is fine) | `command grep -a`, or `git grep` |
 | `git show rev:file \| grep X` finds nothing | the wrapper's `-I` discards binary-looking **stdin** | `git grep X rev -- file` |
 | later matches missing | `\| head -N` (or `\| tail -N`) truncates with no error | state the denominator, or drop the cap — see the section below, this is the narrow case of a general hazard |
+| a path opens locally and opens nothing in CI | macOS's filesystem is case-insensitive, so `known-failures.md` finds `KNOWN-FAILURES.md` here and finds nothing on Linux | scan the directory and match. And note what the shape of the bug was: the scan existed, written as a *fallback* to the direct open, so it looked optional — it is the only half that works, and every caller needs it, not just the one whose author happened to add it |
 | every count comes back `0` | zsh expanded an **unquoted** `--include=*.svelte` as a glob, found no match in cwd, and never ran the command | quote every glob-shaped argument: `--include='*.svelte'` |
 
-The fifth row is the one that is not a `grep` bug at all: the other four reach
+The unquoted-glob row is the one that is not a `grep` bug at all: the others reach
 `grep` and then lie, while this one means `grep` never ran. Two people hit it in
 one session, an hour apart, and both times the fabricated answer — `0` for every
 repository — **agreed with the hypothesis being tested** ("this population carries
@@ -1072,6 +1082,8 @@ followed on the next:
 | `cargo test … \| grep -E '^test \|test result' \| head -20` | `TEST_EXIT=101` from `$pipestatus[1]`, and twenty *passing* lines | the **verdict** was read correctly and the lines explaining it were outside the window |
 | `join before.tsv after.tsv` over paths sorted by Rust's byte order | two non-ASCII paths reported as **changed** that were byte-identical | `join` requires its inputs in the locale's collating order and silently **mispairs** rows when they are not |
 | `timeout 120 node probe.mjs 2>&1 \| head -20` | nothing at all, twice | `head` closed the pipe and `timeout` killed the process, so node's block-buffered stdout was **never flushed** — the verdict was not outside the window, it was never produced |
+| `cmd \| cat -A` on macOS | the **oracle leg produced no output at all**, so its side of an A/B read as empty | macOS has no `cat -A`; the filter dies, the pipe's exit is the filter's, and a stage that dies on ONE leg does not manufacture a zero — it manufactures a **difference** |
+| a CI job's log read for the scariest-looking line | a `[fmt] rsvelte-fmt reported errors:` line that **`main` prints on every run**, quoted as the cause of an `exit 1` whose real line was 30 lines later | nothing was truncated: the window held the real failure *and* a permanent one, and "looks like a failure" is not a property the reader can check without the other arm |
 
 Rules, in the order they are cheap:
 
@@ -1172,6 +1184,104 @@ Rules, in the order they are cheap:
    real, which is what made the diagnosis stick for two rounds. Write to a file,
    then read the file; nothing else recovers an unflushed buffer.
 
+### A grid's cells carry a direction; the mechanism does not have to
+
+A generated family is written from shapes its author could think of, and each cell has a sign as
+well as a shape. Two mechanisms were summarised from their cells on the same day and both
+summaries were wrong about the sign:
+
+- one was written up as "rsvelte breaks the chain deeper than the oracle" from two cells that both
+  ran that way. Fingerprinted across the corpus: **46 that way and 37 the other**. A fix built
+  from the two cells would have made the 37 worse.
+- the other genuinely had both signs in its cells (`+2`, `+2`, `−2`), which is what prompted
+  putting the sign in the key — and the corpus then held **only the negative**, 2 entries, zero
+  positive. The cells' balance was not the corpus's.
+
+So the rule is not "watch for a mechanism with two directions", it is: **a direction read off a
+family's cells is a property of the cells**. Fingerprint it against the collected corpus before a
+summary sentence gives it a sign, and count the signs separately — `±2, two entries` and
+`−2 twice, +2 never` are different findings and the first one hides the second.
+
+### `n passed` is not the only fingerprint that is population-specific
+
+This file records reading a suite's *names* rather than its count, and gives a four-digit
+`running N tests` line as the fingerprint that `--lib` ran. That number is a property of
+`rsvelte_core`, which has ~1,959 lib tests; a crate with a dozen prints a one- or two-digit count
+that is indistinguishable from noise. The general form is the line `Running unittests src/lib.rs
+(…)`, whose presence answers the question and whose absence is the failure. **When you hand
+someone a fingerprint, hand them the one that does not depend on which crate they are in.**
+
+### Port a guarded recursion with its guard, because a grid built for the recursion cannot see it
+
+Upstream's `scope.evaluate` resolves an identifier with
+
+```js
+if (!binding.updated && binding.initial !== null && !is_prop) {
+  binding.scope.evaluate(binding.initial, this.values);
+  break;
+}
+```
+
+— one `if`, three conditions, then a recursion. A fix that ports the recursion (evaluate the
+rune's argument rather than treating the lowered call as opaque) passed a 68-cell grid over four
+hosts with **0 divergences**, and dropped `!binding.updated` on the way: in generated text a write
+has become a CALL (`$.set(c, 1)`, `$.update(c)`, `$.update_pre(c)`), so oxc scores the only
+occurrence of the name a **read** and "is it ever written" answers yes.
+
+The grid could not see it because a grid is written from the shape the recursion takes, and the
+guard is about a *different property of the same declaration*. What found it was a second cell
+list, generated separately for a Rust test, that happened to contain `let c = $state(0); c = 1;` —
+luck, not method. The method is to read the guard as part of the thing being ported: **each
+condition in the `if` above the recursion is a row**, and the row set for `!binding.updated` is
+every spelling the lowering produces, enumerated from the oracle rather than remembered (`=`,
+`+=`, `++`, `++c`, `&&=`, `??=` → three helper names).
+
+### A row in this file carries a scope, and citing it is not checking it
+
+Every paragraph here was written about a particular population, and the sentence
+that survives into someone's memory is the claim without its domain. Measured
+twice in one day, in opposite directions:
+
+- "`lang="ts"` selects a different parser" is true of `<script lang="ts">` and of
+  `parse()`, and it was cited to justify adding a `.svelte.ts` axis to a
+  `compileModule` grid. `compileModule` **rejects TS syntax on both sides** —
+  `0 as number` and `import type` are `js_parse_error` for official and for
+  rsvelte alike — so `.svelte.js` and `.svelte.ts` are one input class there and
+  the axis measures nothing. The toolchain strips types before the compiler sees
+  the file.
+- The same row read the other way is still useful: it says a `.svelte.ts` column
+  that agrees with its `.svelte.js` column agrees **structurally**, not by luck,
+  which is a different record to keep than "both were 0".
+
+So when a cited row would license a new axis, a new skip, or a new expectation,
+spend the one probe that asks whether its population contains yours. The cost of
+not doing it is not a wrong answer — it is a column of cells that cannot move.
+
+**And when the cited row supplies a DIRECTION rather than an axis, check that the
+direction's derivation covers your case**, because a direction that does not
+apply is not a weaker claim, it is a wrong one. The row above about
+reconstructing a gate derives its direction from the KIND of stage that went
+missing — dropping a *rescue* stage makes a reconstruction stricter, dropping a
+*judging* stage makes it looser. It was then cited to argue that a formatter
+reconstruction whose comparison is byte-identical to the gate's must be stricter,
+so a match under it is a match under the gate. The reconstruction had replaced a
+**production** stage (`--stdin` where the gate calls the directory once), and no
+strict/loose order is defined over that at all: the argument silently assumed the
+two productions emit the same bytes. The teammate holding it did not argue the
+direction — they removed the assumption, by making their oracle leg call what the
+gate calls. **Removing a premise beats reasoning about which way it errs.**
+
+**The same day produced the mirror-image error, and naming both is what makes the
+pair useful: each read a property of the POPULATION as a property of the
+MECHANISM.** A `$.assign` fix moved 0 of 135,560 corpus pairs and was written up
+as having closed its class — it had not; the grid held the *host* fixed at
+`<script>`, and the real carrier was a legacy `on:` directive, a second port the
+grid could not reach. In the other direction, a formatter fix moved 10 of 24
+generated cells and the movement was about to be quoted as its corpus reach — the
+ratchet moved 2, because the generated family manufactures the >320-column header
+that almost no real file has. A sweep's zero and a family's ten are both counts of
+inputs, and neither is a count of mechanisms.
+
 ### Nothing about a measurement arm is evidence of what it measured
 
 An A/B here is two `.node` binaries, and every cheap way of saying which is which
@@ -1219,6 +1329,20 @@ cheapest possible measurement and was of the wrong tree. A census is a measureme
 exactly the way a baseline is, so name the tree in the output (`git rev-parse HEAD` beside the
 counts) rather than in your intention; a number with no revision beside it cannot be checked by
 anyone, including the person who produced it.
+
+**And a two-arm sweep has two ways to report zero, so the key check and the arm
+check are both necessary and neither is sufficient.** A 135,560-pair sweep
+reported `MOVED=0` twice for opposite reasons. The first time the reader had the
+field order wrong — `sweeparm.mjs` writes `target \t hash \t id`, the reader took
+the id as the hash — so it compared each unit's *id* against itself and zero was
+arithmetically forced; the collapse signature caught it (`135560 rows, 128656
+distinct keys`), which is the control this file already prescribes. The second
+time the key was right, rows equalled keys, and zero still had two explanations:
+the change moves nothing, or the two arms are the same binary. Only a
+discriminating probe separates those, and it has to be run **before** the zero is
+believed rather than after — an arm probe that follows a result gets read as
+confirming it. Print `rows / distinct keys` and the probe's own table beside every
+`MOVED=n`; a bare zero answers neither question.
 
 A second, independent signal is the **diff between the two arms' trees** (`git diff <base> HEAD
 -- crates/`): a one-line answer to "do these arms differ by the change I think they do". Neither
@@ -1353,6 +1477,16 @@ the name" becomes visible and "is it an object" stops being. **Reading your own 
 divergence; only the oracle names it.** And print `match -> MISMATCH` on its own line when you
 re-measure: an over-collection and an under-collection of the same size are the same total.
 
+**A third thing has to match, and it is the one a reader checks last: the ARGUMENTS.** A CSS
+divergence was diagnosed from upstream — `is_empty` is tested before `is_used`, and an unused
+child empties its parent — as "rsvelte must have the order wrong, or not have the rule". It had
+both: the order was right and carried a comment saying so (`empty wins over unused`, citing the
+upstream visitor), and the rule was implemented. What was wrong was the flag passed in:
+upstream's `is_in_global_block` is `metadata.is_global_block`, true only for a **bare** `:global`
+block (`css-analyze.js:24-30`), and rsvelte passed one that is also true inside `:global(.foo)`.
+So conditions, order, arguments — and the comment asserting fidelity was correct, which is worse
+than a wrong one, because its correctness is what made the neighbouring line look checked.
+
 ### And whether it unwinds is the complexity bound
 
 `get_ancestor_elements` (`css-prune.js:845`) adds a `SnippetBlock` to `seen` and never deletes
@@ -1449,6 +1583,22 @@ The two are opposite defects with the same single-verdict signature. **What made
 split diagnostic was that its axis was the compiler's own stages** — prune, diagnostics,
 element scoping — not an arbitrary partition of the output text: each field named a pass,
 so a divergence in one field named the pass to read.
+
+### Re-key a grid before adding rows to it
+
+A grid's cell is a comparison, and the comparison has a key. Two defects were found on one
+afternoon by changing nothing but the key. A module `$.assign` grid keyed on the **count** of
+`$.assign(` calls read 1 vs 1 and scored EQ; re-keyed on the call's **full text** the same cells
+reported that rsvelte emits `() => {}` — an empty block body, so the getter stores `undefined` —
+where upstream emits `() => ({})`, and that a `<script module>` position argument was being consumed
+by the instance pass, so two sites collapsed to one. Both had shipped, both parse, and both are
+invisible to a count.
+
+This is the ratchet lesson (**an entry suppresses everything its key cannot tell apart**) arriving
+one level down, inside a grid, where it is easier to miss because a grid feels like it is comparing
+outputs. It is comparing a *projection* of outputs. Before widening a family, ask what its cells
+throw away — and prefer the widest key the assertion can carry, because rows are expensive and a
+key change is free.
 
 ### Widening a set to close an enumeration hazard moves you along a new axis
 
@@ -1654,11 +1804,23 @@ failure and a different spelling. Collected on one day:
 | a mechanism nobody measured | a row that is simply not printed, beside rows that read `0` |
 | a gate stage the reconstruction lacks | the verdict that stage would have overturned (`MISMATCH`) |
 | a workflow run that never started | no check line at all, which reads as "not required here" |
+| a job still waiting on `needs:` | **nothing** — it is not a check-run yet, so it is absent from `pending` as well as from `total_count`, and a poller reading `pending == 0` calls the run finished |
 | a cancelled shard under a rollup | `FAILURE`, indistinguishable from a real regression |
 
 Two of these fake a **value** and two fake a **verdict**, and that is the useful split: a faked
 value is caught by printing the carrier beside the number (`mechanism | carrier | result`, with
 `UNMEASURED` where there is no carrier), a faked verdict only by asking what produced it.
+
+**And a measured zero has two kinds that print identically.** "I looked and found none" is a
+statement about the population; "my instrument cannot represent that shape" is a statement about
+the instrument. Measured on one sweep: a fingerprint for a whitespace-only difference returned 0
+against a sub-population built from *line-break* entries — not because the shape is absent there
+but because the classifier routes it to a different label before that sub-population is formed,
+so the count could not have been anything else. Reported as "the width key and this mechanism are
+different spaces", it would read as a result about the compiler. Before writing a zero down, ask
+whether the instrument could have produced a non-zero on that input at all; if the answer comes
+from reading the classifier's branches rather than from the data, the zero belongs in a sentence
+about the instrument.
 
 ### Report a measurement as `mechanism | carrier | population | result`, and the mistakes cannot hide
 
