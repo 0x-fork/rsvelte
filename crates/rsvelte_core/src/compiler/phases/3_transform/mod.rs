@@ -253,6 +253,8 @@ pub(crate) fn transform_component_with_scripts<'source>(
                 mappings.extend(runtime_mappings);
                 mappings.extend(template_name_mappings);
                 mappings.extend(remaining_result_mappings);
+                // Measured: the packed-key sort the server path uses costs the
+                // client 0.35% rather than saving it. Why is not established.
                 mappings
                     .sort_by(|a, b| a.gen_line.cmp(&b.gen_line).then(a.gen_col.cmp(&b.gen_col)));
                 // Do not deduplicate source-map segments. Esrap deliberately
@@ -314,8 +316,7 @@ pub(crate) fn transform_component_with_scripts<'source>(
                     &mapping_starts,
                     source_token_positions,
                 ));
-                mappings
-                    .sort_by(|a, b| a.gen_line.cmp(&b.gen_line).then(a.gen_col.cmp(&b.gen_col)));
+                js_ast::codegen::sort_mappings_by_generated_position(&mut mappings);
                 // Preserve repeated entries for the same reason as the client
                 // path above: a duplicate can represent a distinct AST level.
                 (code, mappings)
@@ -1188,24 +1189,32 @@ fn generate_server_declaration_mappings_with_starts(
 ) -> Vec<js_ast::codegen::SourceMapping> {
     use js_ast::codegen::offset_to_line_col_utf16;
 
+    // The three keywords begin with distinct letters and none is a border of
+    // itself, so one `memchr3` pass sees exactly what three `find` loops saw,
+    // and in ascending order rather than needing a sort.
     fn declarations(code: &str) -> Vec<(usize, &str)> {
+        let bytes = code.as_bytes();
         let mut result = Vec::new();
-        for keyword in ["const", "let", "var"] {
-            let mut cursor = 0;
-            while let Some(relative) = code[cursor..].find(keyword) {
-                let start = cursor + relative;
-                let before = code.as_bytes().get(start.wrapping_sub(1));
-                let end = start + keyword.len();
-                let after = code.as_bytes().get(end);
+        let mut cursor = 0;
+        while let Some(relative) = memchr::memchr3(b'c', b'l', b'v', &bytes[cursor..]) {
+            let start = cursor + relative;
+            let keyword: &str = match bytes[start] {
+                b'c' => "const",
+                b'l' => "let",
+                _ => "var",
+            };
+            let end = start + keyword.len();
+            if bytes.get(start..end) == Some(keyword.as_bytes()) {
+                let before = bytes.get(start.wrapping_sub(1));
+                let after = bytes.get(end);
                 if !before.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
                     && after.is_some_and(|byte| byte.is_ascii_whitespace())
                 {
                     result.push((start, &code[start..]));
                 }
-                cursor = end;
             }
+            cursor = start + 1;
         }
-        result.sort_unstable_by_key(|(start, _)| *start);
         result
     }
 

@@ -640,12 +640,16 @@ pub(crate) fn transform_client(
                     && retained.diagnostics().is_empty()
                     && retained.program().source_text == instance_script.raw
             }) {
-            Some(retained) => dead_comments::strip_dead_comments_from_program(
-                &instance_script.raw,
-                retained.program(),
-                dead_comment_rules,
-            ),
-            None => dead_comments::strip_dead_comments(&instance_script.raw, dead_comment_rules),
+            Some(retained) => super::profile::timed_prefrag(0, || {
+                dead_comments::strip_dead_comments_from_program(
+                    &instance_script.raw,
+                    retained.program(),
+                    dead_comment_rules,
+                )
+            }),
+            None => super::profile::timed_prefrag(0, || {
+                dead_comments::strip_dead_comments(&instance_script.raw, dead_comment_rules)
+            }),
         };
         // Every lowering below decides what a rune call is from this text, so the
         // grouping parens around one have to be gone before the first of them runs.
@@ -730,15 +734,18 @@ pub(crate) fn transform_client(
         } else {
             composed_body_projection.as_ref()
         };
-        instance_script_imports = attach_import_origins(
-            imports,
-            retained_scripts.and_then(|scripts| scripts.instance.as_ref()),
-            instance_script.start,
-            analysis.is_typescript,
-            options.enable_sourcemap,
-        );
-        let split_top_level_declarations =
-            instance_has_top_level_multi_declarator(ast, instance_raw);
+        instance_script_imports = super::profile::timed_prefrag(2, || {
+            attach_import_origins(
+                imports,
+                retained_scripts.and_then(|scripts| scripts.instance.as_ref()),
+                instance_script.start,
+                analysis.is_typescript,
+                options.enable_sourcemap,
+            )
+        });
+        let split_top_level_declarations = super::profile::timed_prefrag(3, || {
+            instance_has_top_level_multi_declarator(ast, instance_raw)
+        });
         let _script_start = super::profile::timer_start();
         let _parent_scope = super::profile::ParentScope::new();
         let mut transformed = transform_instance_script_for_visitors(
@@ -827,8 +834,9 @@ pub(crate) fn transform_client(
             // Track per-slot primary binding NAMES so the Fragment visitor can
             // mirror upstream's dedup-by-Expression behavior for
             // template_effect blockers arrays.
-            let primary_names =
-                super::shared::async_body::compute_blocker_primary_names(transformed);
+            let primary_names = super::profile::timed_prefrag(4, || {
+                super::shared::async_body::compute_blocker_primary_names(transformed)
+            });
             if !primary_names.is_empty() {
                 *context.state.blocker_map_primary_names.borrow_mut() = primary_names;
             }
@@ -837,8 +845,9 @@ pub(crate) fn transform_client(
             if !pre_blocker_map.is_empty() {
                 *context.state.blocker_map.borrow_mut() = pre_blocker_map;
             }
-            let primary_names =
-                super::shared::async_body::compute_blocker_primary_names(transformed);
+            let primary_names = super::profile::timed_prefrag(4, || {
+                super::shared::async_body::compute_blocker_primary_names(transformed)
+            });
             if !primary_names.is_empty() {
                 *context.state.blocker_map_primary_names.borrow_mut() = primary_names;
             }
@@ -2744,12 +2753,14 @@ pub(crate) fn transform_client(
         let converted = CLIENT_TO_OXC_ALLOCATOR.with(|cell| {
             let mut alloc = cell.borrow_mut();
             alloc.reset();
-            super::js_ast::to_oxc::program_to_oxc_with_islands(
-                &program,
-                &context.arena,
-                &alloc,
-                &ast_islands,
-            )
+            super::profile::timed_prefrag(1, || {
+                super::js_ast::to_oxc::program_to_oxc_with_islands(
+                    &program,
+                    &context.arena,
+                    &alloc,
+                    &ast_islands,
+                )
+            })
             .map(|converted| {
                 let print_opts =
                     rsvelte_esrap::PrintOptions::default().with_unlocated_program(true);
@@ -3232,12 +3243,29 @@ const MIN_RESYNC_RUN: usize = 4;
 /// window stays linear in the window rather than in the rest of the script.
 const MAX_RESYNC_RUN: usize = 64;
 
+/// Length of the shared prefix of two byte slices. Scoring one resync candidate
+/// compares up to 64 bytes and up to 64 candidates are scored per mismatch, so
+/// this runs eight bytes at a time rather than one.
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    let n = left.len().min(right.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let a = u64::from_le_bytes(left[i..i + 8].try_into().unwrap());
+        let b = u64::from_le_bytes(right[i..i + 8].try_into().unwrap());
+        if a != b {
+            return i + ((a ^ b).trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n && left[i] == right[i] {
+        i += 1;
+    }
+    i
+}
+
 fn common_run(left: &[u8], right: &[u8]) -> usize {
-    left.iter()
-        .zip(right)
-        .take(MAX_RESYNC_RUN)
-        .take_while(|(a, b)| a == b)
-        .count()
+    let cap = MAX_RESYNC_RUN.min(left.len()).min(right.len());
+    common_prefix_len(&left[..cap], &right[..cap])
 }
 
 /// Locate `$.prop` callees that came specifically from `$bindable` defaults.
@@ -3458,13 +3486,9 @@ fn copied_spans_for_normalized_code(
         if output_byte == input_byte {
             let start_output = output;
             let start_input = input;
-            while output < code.len()
-                && input < stripped.len()
-                && code.as_bytes()[output] == stripped.as_bytes()[input]
-            {
-                output += 1;
-                input += 1;
-            }
+            let run = common_prefix_len(&code.as_bytes()[output..], &stripped.as_bytes()[input..]);
+            output += run;
+            input += run;
             let Some(source_at_output) = source_at_output.as_deref() else {
                 spans.push(RawMappedSpan {
                     code: start_output as u32..output as u32,

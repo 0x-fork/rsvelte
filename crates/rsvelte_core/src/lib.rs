@@ -120,14 +120,15 @@ pub fn ast_rewrite_termination_counts() -> (u32, u32) {
 pub use compiler::remove_bom;
 #[cfg(feature = "parallel")]
 pub use compiler::{
-    CompileError, CompileOptions, CompileResult, CssMode, ExperimentalOptions, GenerateMode,
-    ModuleCompileOptions, Warning, WarningFilterFn, compile, compile_batch, compile_both,
-    compile_module,
+    CompileError, CompileOptions, CompileResult, CompiledAst, CssMode, ExperimentalOptions,
+    GenerateMode, ModuleCompileOptions, Warning, WarningFilterFn, compile, compile_batch,
+    compile_both, compile_module,
 };
 #[cfg(not(feature = "parallel"))]
 pub use compiler::{
-    CompileError, CompileOptions, CompileResult, CssMode, ExperimentalOptions, GenerateMode,
-    ModuleCompileOptions, Warning, WarningFilterFn, compile, compile_both, compile_module,
+    CompileError, CompileOptions, CompileResult, CompiledAst, CssMode, ExperimentalOptions,
+    GenerateMode, ModuleCompileOptions, Warning, WarningFilterFn, compile, compile_both,
+    compile_module,
 };
 #[doc(hidden)]
 pub use oxc_allocator::Allocator;

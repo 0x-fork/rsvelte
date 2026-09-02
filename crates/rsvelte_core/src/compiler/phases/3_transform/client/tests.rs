@@ -3703,3 +3703,76 @@ fn only_the_listed_global_constants_are_known_members() {
         );
     }
 }
+
+#[test]
+fn common_prefix_len_agrees_with_a_byte_at_a_time_walk() {
+    let byte_at_a_time = |l: &[u8], r: &[u8]| l.iter().zip(r).take_while(|(a, b)| a == b).count();
+    // The chunked loop reads eight bytes at a time, so the interesting inputs
+    // are the ones whose first difference sits at each offset within a chunk,
+    // and the ones that run out mid-chunk.
+    let base = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    for split in 0..base.len() {
+        let mut other = base.to_vec();
+        other[split] = b'!';
+        assert_eq!(
+            common_prefix_len(base, &other),
+            byte_at_a_time(base, &other),
+            "first difference at {split}"
+        );
+        for len in 0..=base.len() {
+            assert_eq!(
+                common_prefix_len(&base[..len], &other),
+                byte_at_a_time(&base[..len], &other),
+                "difference at {split}, left truncated to {len}"
+            );
+            assert_eq!(
+                common_prefix_len(base, &other[..len]),
+                byte_at_a_time(base, &other[..len]),
+                "difference at {split}, right truncated to {len}"
+            );
+        }
+    }
+    assert_eq!(common_prefix_len(b"", b"abc"), 0);
+    assert_eq!(common_prefix_len(base, base), base.len());
+}
+
+/// `common_run` is called with tails of the whole script, so `MAX_RESYNC_RUN`
+/// is live in production — and the test above never reaches it, its alphabet
+/// being 36 bytes.
+#[test]
+fn common_run_stops_at_the_resync_window() {
+    let long = vec![b'a'; 200];
+    assert_eq!(common_run(&long, &long), MAX_RESYNC_RUN);
+    let mut near = long.clone();
+    near[10] = b'b';
+    assert_eq!(common_run(&long, &near), 10);
+    let mut far = long.clone();
+    far[100] = b'b';
+    assert_eq!(common_run(&long, &far), MAX_RESYNC_RUN);
+    assert_eq!(common_run(&long[..7], &long), 7);
+    assert_eq!(common_run(&long, &long[..7]), 7);
+}
+
+/// The sweep above changes exactly one byte per case, so the chunked loop's
+/// `(a ^ b).trailing_zeros() / 8` never has to pick the LOWEST of several
+/// differing bytes in one word — a variant returning the highest would pass it.
+#[test]
+fn common_prefix_len_finds_the_lowest_of_several_differences_in_one_word() {
+    let byte_at_a_time = |l: &[u8], r: &[u8]| l.iter().zip(r).take_while(|(a, b)| a == b).count();
+    let base = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    for lo in 0..base.len() {
+        for hi in lo + 1..base.len() {
+            let mut other = base.to_vec();
+            other[lo] = b'!';
+            other[hi] = b'?';
+            assert_eq!(
+                common_prefix_len(base, &other),
+                byte_at_a_time(base, &other),
+                "differences at {lo} and {hi}"
+            );
+            assert_eq!(common_prefix_len(base, &other), lo, "must report the lower");
+        }
+    }
+    let all: Vec<u8> = base.iter().map(|b| b ^ 0xff).collect();
+    assert_eq!(common_prefix_len(base, &all), 0);
+}

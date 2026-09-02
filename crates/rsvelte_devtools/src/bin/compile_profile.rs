@@ -31,6 +31,17 @@ use rsvelte_core::compiler::phases::phase2_analyze::analyze_component;
 use rsvelte_core::compiler::phases::phase3_transform::{profile, transform_component};
 use rsvelte_core::{CompileOptions, GenerateMode};
 
+/// The value after `--target`, if any.
+fn target_arg() -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(a) = args.next() {
+        if a == "--target" {
+            return args.next();
+        }
+    }
+    None
+}
+
 fn main() {
     let files = collect_files();
     let total_bytes: usize = files.iter().map(|(_, c)| c.len()).sum();
@@ -43,12 +54,23 @@ fn main() {
         ..Default::default()
     };
 
+    // `--target` used to be accepted and ignored while `GenerateMode::Client` was
+    // hardcoded here and below, so `--target server` profiled the client and the
+    // two reads differed only by run-to-run noise. An unknown value is rejected
+    // rather than defaulted, because a silently-defaulted arm is exactly what made
+    // that unreadable.
+    let generate = match target_arg().as_deref() {
+        None | Some("client") => GenerateMode::Client,
+        Some("server") => GenerateMode::Server,
+        Some(other) => panic!("unknown --target {other}; expected client or server"),
+    };
+
     // Warmup
     for (_, content) in files.iter().take(100) {
         let _ = rsvelte_core::compile(
             content,
             CompileOptions {
-                generate: GenerateMode::Client,
+                generate,
                 ..Default::default()
             },
         );
@@ -63,7 +85,7 @@ fn main() {
     let parse_time = start.elapsed();
 
     let compile_opts = CompileOptions {
-        generate: GenerateMode::Client,
+        generate,
         dev: std::env::args().any(|a| a == "--dev"),
         ..Default::default()
     };
@@ -178,12 +200,7 @@ fn main() {
         // Drained per file for the scaling rows, so the corpus totals have to be
         // accumulated here rather than read back after the loop.
         let b = profile::take_breakdown();
-        totals.visit_program += b.visit_program;
-        totals.script_text_transform += b.script_text_transform;
-        totals.template_fragment += b.template_fragment;
-        totals.assembly_after_fragment += b.assembly_after_fragment;
-        totals.css_render += b.css_render;
-        totals.codegen += b.codegen;
+        totals += b;
         let (script_bytes, runes) = script_shape(asts[i].as_ref(), content);
         scaling.push(ScalingRow {
             script_bytes,
@@ -664,10 +681,43 @@ fn main() {
         pct(codegen)
     );
     println!(
-        "  Pre-frag setup:      {:7.2}ms ({:5.1}%)",
+        "  Pre-frag setup:      {:7.2}ms ({:5.1}%)  <- RESIDUAL, not a measurement",
         ms(other),
         pct(other)
     );
+    // Named pieces carved out of that residual. Printed with a self-check rather
+    // than bare: if a timer had been placed inside a region another timer already
+    // covers, its time would be counted twice and `other` would not fall by the
+    // amount attributed. `attributed` must be <= `other`, and `other - attributed`
+    // is what is still unnamed.
+    // Only slots declared inside the residual may be subtracted from it; see
+    // `PREFRAG_IN_RESIDUAL`.
+    let attributed: std::time::Duration = transform_breakdown
+        .prefrag
+        .iter()
+        .zip(profile::PREFRAG_IN_RESIDUAL)
+        .filter_map(|(d, inside)| inside.then_some(*d))
+        .sum();
+    for (label, d) in profile::PREFRAG_LABELS
+        .iter()
+        .zip(transform_breakdown.prefrag.iter())
+    {
+        println!("    {:<40}{:7.2}ms ({:5.1}%)", label, ms(*d), pct(*d));
+    }
+    println!(
+        "    {:<40}{:7.2}ms ({:5.1}%)  [= residual - attributed]",
+        "still unnamed",
+        ms(other.saturating_sub(attributed)),
+        pct(other.saturating_sub(attributed))
+    );
+    if attributed > other {
+        println!(
+            "    !! attributed {:.2}ms EXCEEDS the residual {:.2}ms: a prefrag timer sits \
+             inside a region another timer already covers, so it is double counted",
+            ms(attributed),
+            ms(other)
+        );
+    }
     println!("TOTAL:                 {:7.2}ms", ms(total));
     println!();
     println!(

@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { arch, cpus, loadavg, platform, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { flattenTemplateHoles, oxfmtTree, stripBlankLines } from "../compat-corpus/normalize.mjs";
 import { OXVELTE_REV, OXVELTE_VERSION, oxvelteInstalled } from "../bench/oxvelte-oracle.mjs";
@@ -14,7 +14,9 @@ const corpusDir = join(root, "compatibility/sources");
 const manifestPath = join(root, "compatibility/manifest.json");
 const compatibilityPath = join(root, "compatibility/report.json");
 const oracleDir = join(root, "scripts/bench/competitor-oracle");
-const outputPath = join(root, "apps/playground/static/performance-report.json");
+const outputPath = process.env.RSVELTE_REPORT_OUT
+  ? resolve(process.env.RSVELTE_REPORT_OUT)
+  : join(root, "apps/playground/static/performance-report.json");
 const astEquivBin = join(root, "target/release/ast_equiv_batch");
 const warmups = Number(process.env.REPORT_WARMUPS ?? 1);
 const runs = Number(process.env.REPORT_RUNS ?? 5);
@@ -53,12 +55,30 @@ const referenceModule = await import(
 const referenceCompile = (referenceModule.default ?? referenceModule).compile;
 const { createVerterCompiler } = await import(pathToFileURL(join(oracleDir, "verter-adapter.mjs")));
 
-const targets = [
+const allTargets = [
   { id: "client", generate: "client", dev: false },
   { id: "server", generate: "server", dev: false },
   { id: "client-dev", generate: "client", dev: true },
   { id: "server-dev", generate: "server", dev: true },
 ];
+// Re-measuring one surface must not cost the other three. A surface's own arms are
+// interleaved within its iteration, so dropping later targets cannot change an earlier
+// one's conditions; `outputPath` is refused below for a subset, because a report missing
+// three surfaces is not the published artifact.
+const requestedTargets = process.env.RSVELTE_REPORT_TARGETS?.split(",").map((s) => s.trim());
+const targets = requestedTargets
+  ? allTargets.filter((t) => requestedTargets.includes(t.id))
+  : allTargets;
+if (requestedTargets && !process.env.RSVELTE_REPORT_OUT) {
+  throw new Error(
+    "RSVELTE_REPORT_TARGETS measures a subset; set RSVELTE_REPORT_OUT so the published report is not overwritten with missing surfaces",
+  );
+}
+if (requestedTargets && targets.length !== requestedTargets.length) {
+  throw new Error(
+    `RSVELTE_REPORT_TARGETS names an unknown surface: ${requestedTargets.join(",")}; known: ${allTargets.map((t) => t.id).join(",")}`,
+  );
+}
 
 const optionsFor = (target, filename) => ({
   filename,
@@ -101,71 +121,114 @@ function stats(samples, fileCount) {
   };
 }
 
-async function benchmarkJs(compile, eligible, target) {
-  for (let i = 0; i < warmups; i += 1) {
-    for (const file of eligible) compile(file.source, optionsFor(target, file.id));
-  }
-  const samples = [];
-  for (let i = 0; i < runs; i += 1) {
-    const start = performance.now();
-    for (const file of eligible) compile(file.source, optionsFor(target, file.id));
-    samples.push(performance.now() - start);
-  }
-  return stats(samples, eligible.length);
-}
-
-async function benchmarkJsAttempts(compile, corpus, target) {
-  const run = () => {
-    for (const file of corpus) {
-      try {
-        compile(file.source, optionsFor(target, file.id));
-      } catch {
-        // Rejections are part of this complete-corpus elapsed-time metric.
+// An arm is `{ warm, once }`: `once` returns one elapsed sample. Splitting a
+// benchmark into samples is what lets `interleave` decide the ORDER the arms
+// run in, which is the whole point -- see its comment.
+function jsArm(compile, corpus, target, { tolerateRejections = false } = {}) {
+  const run = tolerateRejections
+    ? () => {
+        for (const file of corpus) {
+          try {
+            compile(file.source, optionsFor(target, file.id));
+          } catch {
+            // Rejections are part of this complete-corpus elapsed-time metric.
+          }
+        }
       }
-    }
+    : () => {
+        for (const file of corpus) compile(file.source, optionsFor(target, file.id));
+      };
+  return {
+    count: corpus.length,
+    warm: () => run(),
+    once: () => {
+      const start = performance.now();
+      run();
+      return performance.now() - start;
+    },
   };
-  for (let i = 0; i < warmups; i += 1) run();
-  const samples = [];
-  for (let i = 0; i < runs; i += 1) {
-    const start = performance.now();
-    run();
-    samples.push(performance.now() - start);
-  }
-  return stats(samples, corpus.length);
 }
 
-function benchmarkRust(eligible, target, mode) {
-  const fileList = join(root, `.report-files-${target.id}.txt`);
-  writeFileSync(fileList, `${eligible.map(({ path }) => path).join("\n")}\n`);
-  const args = [
-    "run",
-    "--release",
-    "-p",
-    "rsvelte_devtools",
-    "--bin",
-    "benchmark_runner",
-    "--",
-    "--mode",
-    mode,
-    "--task",
-    `compile-${target.generate}`,
-    "--files",
-    fileList,
-    "--iterations",
-    String(runs),
-    "--warmup",
-    String(warmups),
-  ];
-  if (target.dev) args.push("--dev");
-  const result = spawnSync("cargo", args, {
-    cwd: root,
-    encoding: "utf8",
-    maxBuffer: 1 << 24,
-  });
-  if (result.status !== 0)
-    throw new Error(result.stderr || `Rust benchmark exited ${result.status}`);
-  return stats(JSON.parse(result.stdout).times, eligible.length);
+// Run one sample of every arm per round, alternating the order each round, and
+// take each arm's `runs` samples from `runs` different rounds.
+//
+// Measured sequentially -- every sample of one arm, then every sample of the
+// next -- the arms occupy different wall-clock windows, and on this corpus they
+// occupy windows of wildly different LENGTH: official takes ~40s a sample and
+// rsvelte-multi ~2.7s, so official's five samples span ~4 minutes while
+// multi's span ~17 seconds. A load burst that covers the short window and
+// averages out over the long one moves the RATIO, which is the reported
+// number, and it moves it one way. That is not hypothetical here: on the
+// 2026-09-02 report, `official` and `rsvelte-single` came in at cv 0.5% and
+// 0.6% while `rsvelte-multi` -- the arm with the shortest window and the most
+// threads to lose -- came in at cv 8.1%.
+//
+// Alternating the order matters as much as interleaving: a fixed order inside
+// a round still charges the same arm for whatever the previous arm left warm.
+function interleave(arms) {
+  for (const arm of Object.values(arms)) {
+    for (let i = 0; i < warmups; i += 1) arm.warm();
+  }
+  const names = Object.keys(arms);
+  const samples = Object.fromEntries(names.map((name) => [name, []]));
+  for (let round = 0; round < runs; round += 1) {
+    const order = round % 2 === 0 ? names : [...names].reverse();
+    for (const name of order) samples[name].push(arms[name].once());
+  }
+  return Object.fromEntries(
+    names.map((name) => [name, stats(samples[name], arms[name].count)]),
+  );
 }
+
+// One sample per spawn, so a rsvelte arm can be interleaved with the JS arms.
+// The file list is keyed by mode too: `interleave` holds several rsvelte arms
+// open at once, and a shared name would let one arm's list be deleted while
+// another still needs it.
+function rustArm(eligible, target, mode, tag) {
+  const fileList = join(root, `.report-files-${target.id}-${tag}.txt`);
+  // Every sample is its own process, so the in-process warmup has to be per
+  // sample: a cold rayon pool and cold allocator arenas cost this arm ~60% on
+  // its first pass and nothing thereafter, which would otherwise land entirely
+  // on round 1 and drag the median.
+  const once = () => {
+    writeFileSync(fileList, `${eligible.map(({ path }) => path).join("\n")}\n`);
+    const args = [
+      "run",
+      "--release",
+      "-p",
+      "rsvelte_devtools",
+      "--bin",
+      "benchmark_runner",
+      "--",
+      "--mode",
+      mode,
+      "--task",
+      `compile-${target.generate}`,
+      "--files",
+      fileList,
+      "--iterations",
+      "1",
+      "--warmup",
+      String(Math.max(warmups, 1)),
+    ];
+    if (target.dev) args.push("--dev");
+    const result = spawnSync("cargo", args, { cwd: root, encoding: "utf8", maxBuffer: 1 << 24 });
+    if (result.status !== 0)
+      throw new Error(result.stderr || `Rust benchmark exited ${result.status}`);
+    return JSON.parse(result.stdout).times[0];
+  };
+  // `once` already warms inside its own process, so there is nothing left for a
+  // round of `interleave`'s warmup to do here.
+  return { count: eligible.length, warm: () => {}, once, cleanup: () => rmSync(fileList, { force: true }) };
+}
+
+// Single-arm shorthand for the comparison classes whose two sides are both
+// single-threaded JS: they occupy windows of the same length and lose the same
+// amount to a load burst, so interleaving them buys nothing measured.
+const benchmarkJs = (compile, eligible, target) =>
+  interleave({ only: jsArm(compile, eligible, target) }).only;
+const benchmarkJsAttempts = (compile, corpus, target) =>
+  interleave({ only: jsArm(compile, corpus, target, { tolerateRejections: true }) }).only;
 
 const outputCode = (output) =>
   typeof output === "string" ? output : typeof output?.code === "string" ? output.code : null;
@@ -306,12 +369,21 @@ for (const target of targets) {
   console.error(
     `[report] benchmarking ${target.id}: ${currentEligible.length} current, ${mrwaipEligible.length} mrwaip-reference`,
   );
-  const officialCurrent = await benchmarkJs(currentCompile, currentEligible, target);
-  const rustSingle = benchmarkRust(currentEligible, target, "single");
-  const rustMulti = benchmarkRust(currentEligible, target, "multi");
-  const officialCurrentAttempts = await benchmarkJsAttempts(currentCompile, files, target);
-  const rustMultiAttempts = benchmarkRust(files, target, "multi");
-  rmSync(join(root, `.report-files-${target.id}.txt`), { force: true });
+  // The headline ratios: official against rsvelte. These are the arms whose
+  // window lengths differ by more than an order of magnitude, so they are the
+  // ones `interleave` exists for.
+  const rustArms = {
+    rustSingle: rustArm(currentEligible, target, "single", "single"),
+    rustMulti: rustArm(currentEligible, target, "multi", "multi"),
+    rustMultiAttempts: rustArm(files, target, "multi", "attempts"),
+  };
+  const { officialCurrent, rustSingle, rustMulti, officialCurrentAttempts, rustMultiAttempts } =
+    interleave({
+      officialCurrent: jsArm(currentCompile, currentEligible, target),
+      officialCurrentAttempts: jsArm(currentCompile, files, target, { tolerateRejections: true }),
+      ...rustArms,
+    });
+  for (const arm of Object.values(rustArms)) arm.cleanup();
   const officialMrwaip = await benchmarkJs(referenceCompile, mrwaipEligible, target);
   const officialMrwaipAttempts = await benchmarkJsAttempts(referenceCompile, files, target);
   const mrwaipCoverage = await compileCoverage(
@@ -495,6 +567,40 @@ for (const target of targets) {
       },
     ],
   });
+}
+
+// Everything below this line is corpus-wide -- tool tasks, the printer, and
+// competitor arms -- and a subset run wants none of it. It is also where this
+// script has hung: @verter/wasm panics on a non-ASCII char boundary and the run
+// blocked there for 30 minutes with the surfaces already measured, then lost
+// them because the artifact is only written at the very end. Write the measured
+// surfaces first so a kill in the tail cannot discard a completed measurement.
+{
+  // A full run must not write a partial file to the published path, so its
+  // crash-safety copy goes to a sidecar; a subset run has nothing else to write.
+  const surfacesPath = requestedTargets ? outputPath : `${outputPath}.surfaces.json`;
+  writeFileSync(
+    surfacesPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 10,
+        kind: "rsvelte-performance-report",
+        generatedAt: new Date().toISOString(),
+        partial: {
+          surfacesMeasured: targets.map((t) => t.id),
+          surfacesOmitted: allTargets.filter((t) => !targets.includes(t)).map((t) => t.id),
+          incomplete: "surfaces only; tool tasks, printer and competitor arms not run",
+          note: requestedTargets
+            ? "Subset run (RSVELTE_REPORT_TARGETS). Not the published report; do not quote as one."
+            : "Crash-safety copy of a full run's surfaces, written before the corpus-wide tail. The published report is the sibling file.",
+        },
+        surfaces,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  console.error(`[report] wrote surfaces-only artifact to ${surfacesPath}`);
 }
 
 console.error("[report] benchmarking parser and toolchain tasks");
@@ -686,9 +792,41 @@ const result = {
   schemaVersion: 10,
   kind: "rsvelte-performance-report",
   generatedAt: new Date().toISOString(),
+  // A subset run is not the published artifact. Redirecting the output protects the
+  // published file; this marks the value itself, so a reader who opens the JSON — or
+  // quotes a number out of it — can see that three surfaces are missing.
+  ...(requestedTargets
+    ? {
+        partial: {
+          surfacesMeasured: targets.map((t) => t.id),
+          surfacesOmitted: allTargets
+            .filter((t) => !targets.includes(t))
+            .map((t) => t.id),
+          note: "Subset run (RSVELTE_REPORT_TARGETS). Not the published report; do not quote as one.",
+        },
+      }
+    : {}),
   provenance: {
     benchmarkDesign:
       "https://github.com/pikax/svelte-benchmarks/tree/e19c48b81ad24b75a6d4b81377b4a7ebc39a1900",
+    // The two arms do not perform identical work, and a speedup column invites the
+    // reader to assume they do.
+    armsDiffer:
+      "official's compile() sets result.ast = to_public_ast(...) unconditionally " +
+      "(compiler/index.js:58) - for the legacy shape a full convert(source, ast) walk - " +
+      "while rsvelte defers that field to its first reader, and neither this harness nor a " +
+      "bundler ever reads it. The speedup column therefore includes work only official " +
+      "performs. This is the comparison a bundler experiences (@sveltejs/vite-plugin-svelte " +
+      "is charged for the AST whether it wants it or not), so it is reported as-is rather " +
+      "than corrected; it is NOT a like-for-like compiler-throughput ratio. The deferral " +
+      "also cuts the other way: rsvelte's CompiledAst::get() does not serialize a retained " +
+      "tree, it rebuilds PreparedComponent from the source, so a consumer that reads .ast " +
+      "pays a fresh parse on top of the compile, where official's is already built. " +
+      "BOTH magnitudes are unmeasured - official's to_public_ast + convert, and rsvelte's " +
+      "re-parse. No shipping consumer currently reads .ast (a repo search finds it only in " +
+      "scripts/dev/test-napi-compile-options.mjs and in the playground, which calls " +
+      "parse_svelte rather than compile; control: .js.code has 109 read sites), so today the " +
+      "second direction is latent rather than paid.",
     reproduceCommand: "pnpm benchmark:reproduce",
     competitorPackages: [
       "@mrwaip/svelte-rs@0.0.0-canary.13.1",

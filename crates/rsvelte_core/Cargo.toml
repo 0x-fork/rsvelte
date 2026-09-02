@@ -130,6 +130,7 @@ lazy_static = "1.5.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
 oxc_ast_visit = "0.146"
 
+
 [dev-dependencies]
 # Testing
 rsvelte_ast_equiv = { path = "../rsvelte_ast_equiv" }

@@ -401,8 +401,81 @@ pub struct CompileResult {
     pub warnings: Vec<Warning>,
     /// Metadata about the compiled component.
     pub metadata: CompileMetadata,
-    /// The AST (if requested).
-    pub ast: Option<String>, // Will be properly typed later
+    /// The public AST, materialized on first read.
+    pub ast: CompiledAst,
+}
+
+/// The public AST of a compiled component, materialized on first read.
+///
+/// Upstream fills `result.ast` unconditionally, and so does this — but its JSON
+/// is derived from the source and the options alone, and the consumers that
+/// dominate real builds (bundlers, `svelte-check`, the language server) read
+/// `js`/`css`/`warnings` and never touch it. Building it eagerly measured 58%
+/// of a client compile, so the work is deferred to the first reader.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledAst(Option<std::sync::Arc<DeferredAst>>);
+
+/// Everything the deferred conversion needs, shared by the two results
+/// `compile_both` returns so one materialization serves both.
+#[derive(Debug)]
+struct DeferredAst {
+    source: String,
+    options: CompileOptions,
+    json: std::sync::OnceLock<Option<String>>,
+}
+
+impl CompiledAst {
+    /// No AST — the surface that produced this result omits it from its wire format.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn deferred(source: &str, options: &CompileOptions) -> Self {
+        Self(Some(std::sync::Arc::new(DeferredAst {
+            source: source.to_string(),
+            options: options.clone(),
+            json: std::sync::OnceLock::new(),
+        })))
+    }
+
+    /// Whether this result carries an AST at all.
+    #[must_use]
+    pub const fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Whether this result omits the AST.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The AST as JSON, building it on the first call.
+    #[must_use]
+    pub fn get(&self) -> Option<&str> {
+        let deferred = self.0.as_ref()?;
+        deferred
+            .json
+            .get_or_init(|| {
+                crate::toolchain::PreparedComponent::new(&deferred.source, deferred.options.clone())
+                    .ok()
+                    .map(|prepared| prepared.ast_json_owned())
+            })
+            .as_deref()
+    }
+
+    /// The AST as an owned JSON string, building it on the first call.
+    #[must_use]
+    pub fn into_string(self) -> Option<String> {
+        self.get().map(ToOwned::to_owned)
+    }
+}
+
+impl PartialEq for CompiledAst {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
 }
 
 /// Metadata about the compiled component.
@@ -924,7 +997,7 @@ pub(crate) fn finalize_compile_result(
                 .collect()
         },
         metadata: CompileMetadata { runes: runes_mode },
-        ast: None,
+        ast: CompiledAst::absent(),
     }
 }
 
@@ -1191,7 +1264,7 @@ pub fn compile_module(
                 .collect()
         },
         metadata: CompileMetadata { runes: true },
-        ast: None,
+        ast: CompiledAst::absent(),
     })
 }
 
@@ -1542,6 +1615,55 @@ fn strip_ts_from_attribute_value(
     Ok(())
 }
 
+/// Worker count for the batch pool, or `None` to run on the caller's pool.
+///
+/// Only `RSVELTE_BATCH_THREADS` answers this now. Sizing the pool to the
+/// performance cores was the default until it was measured against the number
+/// that matters: on an M2 Pro (6 performance + 4 efficiency cores) it does burn
+/// 20-33% less CPU, and it is 7% SLOWER in wall clock -- client throughput
+/// 19.56x against 21.04x over sixteen paired rounds, 3 of 16 rounds above 20x
+/// against 12 of 16. An efficiency core runs a Svelte compile at 0.22-0.24x a
+/// performance core, so it is a poor worker and still a worker. Throughput is
+/// the goal; the CPU saving is not worth 7% of it. `docs/perf-baseline.md`.
+#[cfg(feature = "parallel")]
+fn batch_pool_threads() -> Option<usize> {
+    if let Ok(raw) = std::env::var("RSVELTE_BATCH_THREADS")
+        && let Ok(n) = raw.parse::<usize>()
+        && n > 0
+    {
+        return Some(n);
+    }
+    // `RAYON_NUM_THREADS` sizes the global pool, so a caller who set it has
+    // answered this. Comparing against `current_num_threads` instead would
+    // spawn that pool, which is the thread count we are trying not to add to.
+    None
+}
+
+/// Run a batch on the pool `RSVELTE_BATCH_THREADS` asks for, or on the caller's
+/// otherwise. Already being on a rayon worker means a caller installed a pool,
+/// and that answer wins over this one.
+#[cfg(feature = "parallel")]
+pub fn in_batch_pool<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+    let Some(want) = batch_pool_threads() else {
+        return f();
+    };
+    let pool = POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(want)
+            .thread_name(|i| format!("rsvelte-compile-{i}"))
+            .build()
+            .ok()
+    });
+    match pool {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
 /// Compile multiple Svelte components in parallel.
 ///
 /// This function uses Rayon to compile multiple components concurrently,
@@ -1577,10 +1699,12 @@ fn strip_ts_from_attribute_value(
 pub fn compile_batch(
     inputs: &[(&str, CompileOptions)],
 ) -> Vec<Result<CompileResult, CompileError>> {
-    inputs
-        .par_iter()
-        .map(|(source, options)| catch_compile_panic(|| compile(source, options.clone())))
-        .collect()
+    in_batch_pool(|| {
+        inputs
+            .par_iter()
+            .map(|(source, options)| catch_compile_panic(|| compile(source, options.clone())))
+            .collect()
+    })
 }
 
 #[doc(hidden)]
@@ -1588,12 +1712,16 @@ pub fn compile_batch(
 pub fn compile_batch_with_external_sourcemap_content(
     inputs: &[(&str, CompileOptions)],
 ) -> Vec<Result<CompileResult, CompileError>> {
-    inputs
-        .par_iter()
-        .map(|(source, options)| {
-            catch_compile_panic(|| compile_with_external_sourcemap_content(source, options.clone()))
-        })
-        .collect()
+    in_batch_pool(|| {
+        inputs
+            .par_iter()
+            .map(|(source, options)| {
+                catch_compile_panic(|| {
+                    compile_with_external_sourcemap_content(source, options.clone())
+                })
+            })
+            .collect()
+    })
 }
 
 #[doc(hidden)]
@@ -1601,12 +1729,14 @@ pub fn compile_batch_with_external_sourcemap_content(
 pub fn compile_batch_without_ast(
     inputs: &[(&str, CompileOptions)],
 ) -> Vec<Result<CompileResult, CompileError>> {
-    inputs
-        .par_iter()
-        .map(|(source, options)| {
-            catch_compile_panic(|| compile_without_ast(source, options.clone()))
-        })
-        .collect()
+    in_batch_pool(|| {
+        inputs
+            .par_iter()
+            .map(|(source, options)| {
+                catch_compile_panic(|| compile_without_ast(source, options.clone()))
+            })
+            .collect()
+    })
 }
 
 #[doc(hidden)]
@@ -1614,14 +1744,16 @@ pub fn compile_batch_without_ast(
 pub fn compile_batch_without_ast_with_external_sourcemap_content(
     inputs: &[(&str, CompileOptions)],
 ) -> Vec<Result<CompileResult, CompileError>> {
-    inputs
-        .par_iter()
-        .map(|(source, options)| {
-            catch_compile_panic(|| {
-                compile_without_ast_with_external_sourcemap_content(source, options.clone())
+    in_batch_pool(|| {
+        inputs
+            .par_iter()
+            .map(|(source, options)| {
+                catch_compile_panic(|| {
+                    compile_without_ast_with_external_sourcemap_content(source, options.clone())
+                })
             })
-        })
-        .collect()
+            .collect()
+    })
 }
 
 /// Run one batch item's `compile()` call behind `catch_unwind`. Rayon

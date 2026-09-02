@@ -152,10 +152,19 @@ one is the same shape: a scanner assuming input it did not get.
 | the setter call is rendered on one line | the printer breaking it across lines |
 | a backtick opens a template literal | a ```` ```svelte ```` fence inside a JSDoc comment |
 
-Do not size this work against the performance case: re-parsing is 3-4% of compile time, the
-profile is flat (no symbol in rsvelte's own code above ~1.6% self-time), and per-pass
-`SemanticBuilder` construction measured ~2% with a 3.3% ceiling (#2602). **The justification
-is that these defect classes are unreachable in an AST pipeline, not that it is faster.**
+**The justification is that these defect classes are unreachable in an AST pipeline** — and
+that stands on its own, so it is what to lead with. The performance case is no longer the
+argument against it that this paragraph used to make. Re-parsing is 3-4% of compile time,
+the profile is flat (no symbol in rsvelte's own code above ~1.6% self-time), and per-pass
+`SemanticBuilder` construction measured ~2% with a 3.3% ceiling (#2602) — all still true, and
+all counting only the *parse calls*. The **byte scanning** was never in that denominator, and
+it is 11.53% of `compile()` on the client and 14.73% on the server, of which 9.78% / 12.20%
+sits under `3_transform` and exists precisely because there is no AST to ask where a
+statement ends (`str::pattern`, `memmem`, `js_scan::skip_opaque`; measured 2026-09-02, 3000-file
+slice, symbols classified by module path with two-sided controls). Read that as **an upper
+bound on what becomes unreachable, not as a saving**: an AST pipeline pays its own walk, and
+`str::traits::get` at 36 ms on the server is bounds-checked slicing that partly survives. How
+much of it is actually recovered is unmeasured.
 
 Two cautions before treating any of this as closed. The parse gate (#2591) catches only the
 loud half, and **how loud a given defect is depends on the input, not on the defect**: #2603's
@@ -323,7 +332,88 @@ of compile — under the ~5% code-layout floor. What the measurement did find is
 across an 18× file-size range**, which is the mechanism behind "uniformly heavy, slope
 not intercept". The identified target is the **representation** — one `Box` per
 expression node, and a fresh `String` malloc + `IndexMap` slot + SipHash per JSON object
-key, from a set of only 88 distinct static keys. Do not open a brief to fix a *site*
+key, from a small set of distinct static keys. The **mechanism** is confirmed twice over:
+`preserve_order` is enabled, so `MapImpl` is `IndexMap` and not `BTreeMap` — and the
+stronger evidence is that a recorded profile carries the monomorphised
+`get_index_of<String, serde_json::value::Value, str>` and `RandomState` hash frames, which
+a `BTreeMap` build cannot produce. `Value::Object(Map<String, Value>)` pins the key type,
+so 143 sites spell the malloc literally as `.insert("key".to_string(), …)` and there is no
+interning escape short of leaving `serde_json::Value`.
+
+**The "88" in that sentence was wrong and is worth keeping as a lesson about counting.** It
+enumerated `#[derive(Serialize)]` structs only, and missed the hand-written serializer in
+`ast/typed_expr.rs`, which writes keys through 123 `ser_node!` / `ser_opt_node!` /
+`ser_children!` uses — the path that carries `arguments`, `properties`, `superClass`,
+`quasis`, `specifiers`. Two independent recounts of the source give **147** and
+**166** distinct static keys, unioning different pattern sets. **The 88 cannot be
+reconciled with either, because its own population is not recorded**: it appears twice in
+`phase3-ast-refactor-plan.md` as a bare assertion, `alloc_sites.rs` contains no key
+counting at all (0 hits for `distinct`/`key` against 45 for `alloc`), no other instrument
+in the tree counts distinct keys, and the "two independent instruments agree across three
+corpora" clause beside it qualifies the **allocations-per-map-entry table that follows**,
+not the 88. So "88 is a 1.9x undercount" is unsupported, and so is "88 is the runtime-
+observed subset of the 166" — that second reading was offered with a file-and-line citation
+whose quoted text does not say it. Both are comparisons between populations, one of which
+is unstated. What actually sizes the lever is **key
+insertions per compile**, which is unmeasured; the distinct count bounds only how large an
+interning table would be, and 88, 147 and 166 are alike trivial for that. **A number that decides nothing is not
+merely left wrong — it is left unfalsifiable.** Nothing depends on it, so its derivation
+never gets recorded; with no derivation there is nothing to check it against later. Two
+people read this one independently, one taking it for a static inventory and the other for a
+runtime observation, and **the tree contains nothing that settles which**. Correcting the
+figure would have closed the entry and lost that; the derivation's absence is the finding.
+
+The sentence you are reading replaced one that said "wrong by most of a factor of two",
+written eight lines below the paragraph retracting exactly that claim, in the same edit —
+by the author who had just added the rule about a retraction and its number surviving in
+different paragraphs. Writing a rule down does not arm it.
+
+**A correct caution can fire on an unverified premise, and being correct is what keeps the
+premise from being inspected.** The caution here — do not compare numbers drawn from
+different populations — was exactly right, and it arrived attached to a reading of a cited
+passage that the passage does not support (a subordinate clause was read as qualifying the
+figure when it qualifies the table beneath it; the file, the line numbers and the quoted
+text were all accurate). Because the warning landed on a real problem, nobody asked what it
+was standing on. This is the same shape as taking a correct action for a wrong reason, one
+level up: the thing that goes unchecked is the *warning's* evidence rather than the
+decision's, and a warning is harder to challenge because agreeing with it feels like
+diligence.
+
+**A second instance the same day, from the other side: the conclusion was right and only
+its EXAMPLE was wrong.** Establishing that a 3000-file `22.64x` and a whole-corpus figure
+differ by population rather than by compiler is a `git merge-base --is-ancestor` away, and
+that check was run and returned what the argument needed. The paragraph written off it then
+named a perf commit as evidence of a compiler difference between the two trees — and that
+commit is an *ancestor* of the older tree, i.e. already inside the thing it was cited as
+differing from. The real difference is one file under `crates/`, a refactor. Two things
+generalize. **An example outlives the argument it illustrates**, because a later reader
+takes the concrete commit hash and not the reasoning around it; and a correct conclusion is
+the condition under which nobody re-derives the example, which is the paragraph above
+turned around — there the warning was right and its citation unchecked, here the inference
+was right and its instance unchecked. **The stronger claim was also the true one**: not
+"the trees differ only in ways that do not matter" but "exactly one file differs and it is
+a refactor". Checking the example did not weaken the paragraph, it sharpened it — which is
+the argument for checking it even when the conclusion is not in doubt.
+
+**The reconciliation was nearly skipped on exactly that reasoning, and skipping it would
+have cost the finding.** The first recount was 231, and the argument for not chasing the
+gap was that the value decides nothing — which is true of the *value* and false of the
+*discrepancy*. Chasing it found a method error, not a number: `ser_comments!`'s second
+argument is the node's **type name**, not a key (`($map, $type, $start, $end)`), so a regex
+reading "second argument of any `ser_*!` macro" counted 79 ESTree type names as object
+keys. **`distinct == sites` is the fingerprint** — a real key set repeats (`ser_node` is 73
+sites over 26 keys, `body` appears 17 times) while `ser_comments` read 79/79, and that was
+visible in the output before anyone knew what was wrong. The generalisation: **when two
+independent measurements disagree, the disagreement is evidence about method as well as
+about value, and the value being inconsequential does not make the method inconsequential.**
+The two agreed exactly (42 keys) on the three macros that really do take keys, which is what
+localised the error to the fourth.
+
+It also shows what a one-sided control cannot do. The recount's positive control passed —
+`children`, `type`, `arguments`, `superClass` were all present — because the 79 contaminants
+were *outside* what it asked about. A control that only asks "is what belongs here present"
+is silent on "is anything here that does not belong"; `CallExpression` as a negative control
+would have failed instantly. Do not open a brief to fix a *site*
 here; a representation brief starts from that section rather than re-deriving it.
 `crates/rsvelte_devtools/src/bin/alloc_sites.rs` is the instrument, and the section
 states its four limits and one retraction — a share of a bucket cannot be converted into
@@ -986,6 +1076,59 @@ so `pkill -f '<path>'` leaves the parent alive and only the `rustc` children —
 `--out-dir` — are matched. Record cargo's pid at launch and `kill` that, or resolve cwd per pid
 with `lsof -a -d cwd -p <pid>`.
 
+**And "is anyone else building" is a question about ownership, so counting cannot answer it.**
+A benchmark that shells out to `cargo` itself makes its own builds indistinguishable from a
+peer's by count: with the harness idle between calls, one foreign build reads as exactly the
+count a self-owned one does, and the rule "1 is mine" absorbs it — failing silently, in the
+same low-looks-normal direction as the fabricated zero above. The cmdline carries no
+attribution but the process tree does: walk each `cargo`/`rustc` pid's `ppid` chain and ask
+whether it reaches the harness's root pid, recorded at launch. That form also calibrates in
+**both** directions off one process — start `exec -a "/probe/bin/rustc" sleep 6`, classify it
+against the harness root (must read foreign) and against your own shell (must read mine) — which
+a counting rule cannot do, since it has no way to construct the "mine" case on demand.
+
+**And `cargo == 0` is not "the box is quiet" — the build's aftermath peaks exactly when
+cargo exits.** A gate run finished, `rustc`/`cargo` and `node` all read 0, and the window
+was one sentence from being declared free; the actual top of `ps -Ao %cpu=,comm= | sort -rn`
+was `mds_stores` at **96.7%** — Spotlight indexing the thousands of files the build had just
+written into `target/release` — with `mediaanalysisd` at 72.6% beside it. The compile
+processes are the part you started, therefore the part you think to count, and the part that
+ends first. Read the actual top of the CPU list before declaring a measurement window open,
+not a filtered count of the process names you are responsible for; load average will not
+tell you either, since no fixed threshold works on a box with a resident `llama-server`.
+(`target/CACHEDIR.TAG` does not stop Spotlight; a `.metadata_never_index` file in `target/`
+would, and is worth proposing to whoever owns the machine rather than adding unannounced.)
+
+**Three process detectors failed inside one hour, and only two of them were bugs.**
+(1) Counting `rustc`/`cargo` alone read a box as free while Spotlight sat at 96.7% indexing
+what the build had just written. (2) `grep -c -x -E 'rustc|cargo|perf_bench'` read **0**
+while a peer's `perf_bench.after` was running, because `-x` demands an exact match —
+watching `ps` is not enough on its own; **apply your own pattern to the output and confirm
+it selects something.** (3) The third is not fixable. The peer's experiment contains a
+*designed* 180-second idle between two of its points, so "no matching process is running"
+does not mean "the run has finished", and no threshold repairs that — raise it and the peer
+widens the gap. A run with an idle period is indistinguishable from a finished run by any
+process-count rule, and the detector was about to launch a six-process release build exactly
+across the three points that decide that experiment's verdict.
+
+Separate **"my instrument is miscalibrated"** from **"my observable cannot answer this
+question"**. The first two were calibration; the third means the only valid signal is the
+peer saying so. All three surfaced because the peer announced a start time — between agents
+sharing a machine, announcing start and finish is not courtesy, it is the instrument, and a
+process detector is not a substitute for it.
+
+**And the commitment is what fails, not the knowledge behind it.** Having written to a peer
+whose measurement window it was — "I will not start cargo; I will only read code and write
+instrumentation" — the author ran `cargo fmt` and then `cargo check --release` three minutes
+later: 84 files written into `target/release` inside that window, while the peer's benchmark
+was six seconds into a point. Nothing had been forgotten. The reflex to confirm that freshly
+written code compiles fired without consulting anything, and the sentence forbidding it had
+been typed by the same author minutes earlier. What works is not resolve but **not being in
+a position to reach for the tool**: move the whole task that ends in a build behind the
+window rather than doing its non-build half inside it. Every other entry here is an
+instrument being wrong; this one is the author, having twice that day told the same peer to
+respect the same window.
+
 **acorn checks JavaScript's early errors while parsing; OXC settles them after it, and rsvelte
 ran only the parser.** An early error is syntactically shaped but illegal, and none of the class
 is decidable from the token stream — each needs the enclosing scope or class — so OXC leaves them
@@ -1065,6 +1208,23 @@ no carrier"). Quoted and re-run, the first column read `1867`. Neither `echo $?`
 nor `$pipestatus` helps, because zsh's non-zero status is not a failure of the
 command you wrote; the only control that fires is a count you know is non-zero.
 
+**The controls above apply to evidence you CITE, not only to evidence you gather.**
+Told that a log line was the harness's own self-report and so no better than an
+arm's label, the reply named three independent facts — and one of them,
+"rsvelte depends on `oxc_traverse` 0.146, the panic came from 0.140", was never
+checked: `oxc_traverse` appears **0 times** in `Cargo.lock` and in every
+`Cargo.toml` (positive control: `oxc_parser`, 13 hits, 0.146.0). The claim was
+stronger than stated once checked — the crate is absent from the graph entirely —
+and still wrong as written, which is the shape to watch: a *citation* feels like
+it has already been verified because it is offered as the verification. It
+reached nobody's docs only because it was shared before being written down.
+
+And the inverse: `grep` returns matches when the thing is not there. Censusing
+which tools read a field, `.code` matched `.codegen` in a file that reads no
+output, and `js.map` matched a *comment* explaining a sourcemap default — two
+apparent counterexamples, both artifacts of the pattern. A positive grep is
+evidence of a byte sequence, not of a fact; open the hits before counting them.
+
 ### A truncating or discarding stage turns a failure into a green
 
 `grep` is one instance; the class is **any stage between a command and your
@@ -1140,7 +1300,13 @@ Rules, in the order they are cheap:
    remove it, and confirm the tree is byte-identical again (`git diff` empty).
    Only then does the quiet run mean anything. This is the same argument as the
    negative-grep control above, one level up: an empty result is evidence only
-   once you have shown the instrument can produce a non-empty one.
+   once you have shown the instrument can produce a non-empty one. For a
+   *process* detector the control is cheap and needs nobody else's cooperation:
+   `exec -a "/probe/bin/rustc" sleep 6` gives you a process whose argv you chose,
+   and the detector has to find it. That is how `pgrep -c -f 'cargo|rustc'
+   2>/dev/null || echo 0` — used to certify a benchmark window as idle, by
+   someone who had cited the row above three times that day — was caught
+   fabricating: macOS `pgrep` has no `-c`.
 3. **State the denominator.** "No warnings" is a claim about a population; say
    which one (`-p <crate> --lib --tests`), because the reader cannot tell from
    the output whether your file was in it.
@@ -1183,6 +1349,23 @@ Rules, in the order they are cheap:
    wrong `--stdio` spelling) were built and one of them was even independently
    real, which is what made the diagnosis stick for two rounds. Write to a file,
    then read the file; nothing else recovers an unflushed buffer.
+6. **A control that shares the measurement's broken stage certifies nothing.**
+   Checking whether a build was still progressing, `find target/release -newermt
+   '3 minutes ago' -type f 2>/dev/null | wc -l` returned `0`. The positive control
+   — the same command at `'60 minutes ago'`, which cannot be zero during a live
+   build — *also* returned `0`, and that was read as "so the build writes nowhere
+   near here" rather than as "so my instrument is broken". `find` here is `bfs`,
+   which rejects `'3 minutes ago'` outright (it wants ISO 8601); the `2>/dev/null`
+   turned the parse error into a `0` **in both the measurement and its control**,
+   because they differed only in the argument that was invalid in both. The rule that covers
+   it: **a control must bypass at least one stage the measurement passes
+   through.** Changing only an argument to the same command cannot detect that
+   command's own failure — check the claim with `stat` instead of `find`, or with
+   `wc -l` instead of the grep whose pattern you doubt. Varying the input while
+   holding the pipeline fixed is the weaker form, and it is the one that feels
+   like diligence. This is the instrument-level twin of a
+   port-vs-port test whose oracle is the other port: both are passed by a fault
+   the two halves share.
 
 ### A grid's cells carry a direction; the mechanism does not have to
 
@@ -1256,7 +1439,6 @@ twice in one day, in opposite directions:
 So when a cited row would license a new axis, a new skip, or a new expectation,
 spend the one probe that asks whether its population contains yours. The cost of
 not doing it is not a wrong answer — it is a column of cells that cannot move.
-
 **And when the cited row supplies a DIRECTION rather than an axis, check that the
 direction's derivation covers your case**, because a direction that does not
 apply is not a weaker claim, it is a wrong one. The row above about
@@ -1281,6 +1463,95 @@ generated cells and the movement was about to be quoted as its corpus reach — 
 ratchet moved 2, because the generated family manufactures the >320-column header
 that almost no real file has. A sweep's zero and a family's ten are both counts of
 inputs, and neither is a count of mechanisms.
+**A control has a direction, and one direction is not two.** Rule 2 asks for a
+positive control; the corresponding negative one — an input the instrument must
+score as *nothing* — is a different test, and each is passed by a broken
+instrument the other catches. Two clean examples on 2026-09-02, opposite ways
+round. A detector for a source-map defect counted segments anchored inside a
+string literal and returned 44 on the positive case: plausible, and wrong, since
+the mapper is *supposed* to map inside a string — the negative control, a file
+with nothing wrong in it, returned 24 and killed the predicate. A profile classifier that had to say which frames
+sit under `3_transform` scored `js_scan::skip_opaque` at 77% / 7.4%, when the
+function lives in `3_transform/shared/js_scan.rs` and nothing but ~100% can be
+true; its negative control (`phase1_parse` = 0%) read correctly **before and
+after** the fix, so the negative side alone certified a classifier that
+understated the bucket by 2.3x — and it understated it in the direction of an
+attractive conclusion ("the AST migration buys little"). A one-sided control set
+is passed by whichever failure leans its way.
+
+**Where a control can be built by changing the INSTRUMENT rather than the input,
+it constrains more.** Every control above varies what the instrument is fed, which
+shows only that two inputs differ. Classifying one live process against two
+candidate root pids — it must read foreign against the harness's root and mine
+against your own shell — pins that the classifier is reading *the root*, because
+anything else it might key on is held fixed and the answer still has to flip.
+Prefer that form when the instrument takes a parameter you can move.
+
+**Remember a rule by the failure it prevents, not by when to apply it.** The rule
+above — identify an arm by a discriminating probe on its output, never by its
+file name — was quoted at an experiment that measures the *box*: one binary,
+24 samples, code held constant and only the clock moving. It does not apply
+there, and the reason is mechanical rather than a judgement call. What the probe
+prevents is **mixing up two arms**; with one arm there is nothing to mix up, and
+the invariant that experiment actually needs ("did all 24 samples hit the same
+bytes?") is answered by hashing the file before and after, which a probe cannot
+answer at all since it observes one invocation. Naming the failure mode settles
+applicability for free, where "check whether the rule's dependency holds" only
+poses the question. Applying a rule where nothing it guards is at stake is the
+mirror image of quoting one and then walking into it — in both, the rule is
+being recalled as a slogan rather than as a mechanism.
+
+**And an interpretation's plausibility is not evidence for the number under it.**
+Both of those wrong numbers came with a sound-sounding story attached, and in
+both cases the story is what made the next step feel unnecessary. The rule that
+survives: when a measurement arrives already fitting your thesis, that is the
+moment the control is worth its cost, not the moment to spend it elsewhere.
+
+**A number can be right and the inference it supports still false — and checking
+the number will never find it.** This file said "re-parsing is 3-4% of compile
+time" and concluded *do not size the AST-pipeline work against the performance
+case*. The 3-4% is correct; it counts `Parser::new` / `SemanticBuilder::build`.
+What it does not count is the **byte scanning** — `str::pattern`, `memmem`,
+`js_scan::skip_opaque` — which is 11.53% (client) / 14.73% (server) of
+`compile()`, of which 9.78% / 12.20% sits under `3_transform` and is there
+*because there is no AST to ask*. So the sentence set "what the migration
+returns" equal to "what re-parsing costs", and the scanning was never in the
+denominator. Every check anyone could run on the 3-4% would have confirmed it.
+Ask separately what a figure is, and what it is being used to decide.
+
+**A shortfall smaller than the deciding arm's own drift is not a shortfall.** A
+report read client 9.63x, server 19.59x, client-dev 13.89x, server-dev 19.98x
+against a 20x goal and was reported as *no surface reaches it*. But the arm that
+decides the ratio — the only one loading all ten cores — drifts ~5% **within a
+single run** (`first2/last2` 0.946-0.958, while both single-threaded arms are
+flat at 0.989-1.045), and server's shortfall is 2.1% with server-dev's at 0.1%.
+Recomputing the ratio off the first two and the last two samples gives
+19.2-20.3x: 20x is inside, and neither verdict is supported. Two of the four
+surfaces are genuinely short and two are undecidable, and reporting all four
+under one sentence let the undecidable pair inherit the decided pair's answer.
+**A negative verdict about your own work is still a claim and needs the
+precision a positive one would get** — the direction that flatters nobody is
+exactly the one that gets waved through the check. Before reporting a miss, put
+the shortfall next to the spread of whichever arm the ratio is most sensitive
+to; a within-run trend is not visible in a cv or a median, so it has to be
+looked for on purpose.
+
+**Before designing an experiment, check whether the instrument already answers
+it.** Asked to separate a thermal cause from a contention one, the proposed
+design was two arms — with and without a cool-down between rounds — which
+confounds the thing being varied with total wall-clock exposure to external
+load (the long arm sits in the world longer, so an external cause makes the
+*cooled* arm look worse and reads as "cooling does not help, so not thermal").
+The redesign that replaced it needed one arm. But the deeper miss is that
+`perf_bench` already prints CPU time beside wall clock, and its own doc comment
+states the discriminator: a frequency drop spends more CPU seconds on the same
+instructions, while contention raises wall alone. The experiment was being built
+to measure something the existing output separates for free. And a second
+deduction was available with no measurement at all — the harness spawns a fresh
+process per sample, so anything carried between samples is not process state,
+which eliminates allocator arena growth and pool warm-up before any run starts.
+Read what the instrument already emits, and ask what the measurement design
+already rules out, before adding an arm.
 
 ### Nothing about a measurement arm is evidence of what it measured
 
@@ -1296,6 +1567,7 @@ has been wrong on this repository within one day of the others:
 | "the same branch as last time" | the branch was rebased between the two builds, so the arms differ by whatever landed on `main` in between |
 | the source the build read | it was edited *while* the build ran, so the artifact answers to no tree at all — and nothing in the name, the path, or the `Compiling` line records it |
 | two labels, one artifact | a `sed` rename chain applied in an order that made both arms resolve to the same file — the arms were never distinct |
+| the flag you passed to select the arm | the tool never parsed it — `compile_profile` hardcoded `GenerateMode::Client` and read its other flags through scattered `env::args()` predicates, so `--target server` profiled the client |
 
 Two rules cover the first six. **Identify an arm by a discriminating probe on its
 output** — one input whose answer differs between the two arms, run through the
@@ -1330,6 +1602,15 @@ exactly the way a baseline is, so name the tree in the output (`git rev-parse HE
 counts) rather than in your intention; a number with no revision beside it cannot be checked by
 anyone, including the person who produced it.
 
+**A running measurement holds the working tree until its LAST `cargo` call, and
+"no cargo is running" does not mean the build is behind you.** `run-performance.mjs`
+builds each surface lazily, so a report started at 01:04 spent fifteen minutes in the
+JS arm with no compiler in sight and then invoked `cargo` at 01:19:31 — twenty seconds
+after an unrelated source edit, which it compiled into the arm it was about to measure.
+The row above ("edited *while* the build ran") only fires once you know a build is in
+flight; here the process list said there was none, and it was telling the truth. Before
+editing, ask what the running harness has left to do, not what it is doing.
+
 **And a two-arm sweep has two ways to report zero, so the key check and the arm
 check are both necessary and neither is sufficient.** A 135,560-pair sweep
 reported `MOVED=0` twice for opposite reasons. The first time the reader had the
@@ -1348,6 +1629,17 @@ A second, independent signal is the **diff between the two arms' trees** (`git d
 -- crates/`): a one-line answer to "do these arms differ by the change I think they do". Neither
 signal is sufficient alone — the `Compiling` line says which tree was read but not what is in it,
 and the diff says what is in a tree but not that the arm was built from that one. Read both.
+
+**The flag row is the cheapest to defend against and was the last to be found.**
+`perf_bench`, in the same directory, ends its argument loop with
+`other => panic!("unknown arg {other}")`; `compile_profile` had no loop at all.
+One instrument rejects what it does not understand and its sibling ignores it,
+and the permissive one produced a false client-vs-server comparison whose shares
+agreed to 0.2pp — read as "the two targets do the same work" when it was one
+target measured twice. **A flag is a label**, so it earns no more trust than a
+file name does; the discriminating probe has to be on the output. When adding a
+tool, make an unknown argument an error, because the failure it prevents is not
+a crash, it is a comparison between an arm and itself.
 
 The last row is the expensive one, because its symptom is a plausible result.
 A `before -> after` sweep reported 4 output changes "toward official", two of
@@ -1384,6 +1676,141 @@ not re-derive**. The mechanism was a single `sed -e 's#a#b#; …; s#c#a#'` whose
 first substitution pushed the new arm aside and whose third re-created its name:
 collapsing a rename chain into one command hides the intermediate state that
 would have shown `a` being defined twice.
+
+### When the result is a ratio, pair the arms in time
+
+The section above is about *which binary* an arm measured. A second class is
+about *when*. A speedup is `official / rsvelte`, and measuring the two minutes
+apart divides two numbers taken under different load — which reads as noise and
+is drift. One tree measured **16.3x-20.3x** with the arms taken separately and
+**22.64x median over 16 rounds** with official and rsvelte run back to back
+inside each round, the ratio formed inside the round and the order alternated
+so a monotonic drift within a round cannot favour either. The correction
+exceeded either arm's own variation, so re-reading the separated numbers could
+not have found it. ABBA across *arms* does not cover this: the thing measured
+separately is the comparison target.
+
+Pick one statistic and use it on both sides. `max(A)/min(B)` produced a
+withdrawn 1.354x on the same day, and a 6-versus-10 thread comparison flips
+sign between "best block" and "median of block minima".
+
+### "Measured but not established" is a work item, not a caveat
+
+Two changes shipped whose own commit messages said the decisive number had not
+been taken, neither with a follow-up queued. The batch pool sized to the
+performance cores said "whether it is also slower in wall clock is measured but
+not established" — it was **7% slower** (client 19.56x against 21.04x), and that
+was the difference between meeting a throughput goal and missing it. A UTF-16
+column resolved by subtraction on ASCII carried a 2.14% upper bound from a
+profile and measured **null** (median 1.0007, range 0.9778-1.0047) on a corpus
+that is 88.9% ASCII, i.e. its own best case. Both were reverted; **nothing
+committed on an unmeasured estimate has yet come back positive.**
+
+### Name a residual `unattributed`
+
+`compile_profile` computed one row as the phase total minus six timers and
+printed it as "Pre-frag setup". A residual always makes the table sum to 100%,
+so the row reads as a measurement of the thing it is named after; it was 11.7%
+of client compile and the name was a guess. Two mechanical traps came with it.
+`Phase3Breakdown` is summed **field by field** at the call site, so a new field
+on the struct compiles and reports `0.00ms` — indistinguishable from a timer
+that never fires. **That recurred on 2026-09-02, to the person who wrote this
+sentence**, on the first new field added after it: five named slots printed
+`0.00ms` and were read as "these calls are free". A documented trap whose only
+defence is the documentation is not defended — the struct now carries an
+`AddAssign`, so the requirement sits beside the definition rather than in a
+binary nobody opens when adding a field. It still has to be edited; what changed
+is where the editor is looking when they must. And a timer bracketing "everything after the match" contained
+another timer's region, so one bucket double-counted and the residual was
+subtracted twice; **a wrong instrument rejects the correct hypothesis** — with
+the over-wide timer, map work summed to 11.6% against a 12.2% ablation, which
+reads as two independent measurements agreeing. The contradiction was found by
+a second party's arithmetic, not by re-reading the code.
+
+### The instruments drop a field too, and they drop the same one
+
+Gate blind spots are a question about what a comparison commits to. This is a
+different shape: of the 10 binaries under `crates/rsvelte_devtools/src/bin/`
+that read `js.code`, **0 read `js.map`** before 2026-09-02 (three were fixed
+that day). Not a tendency — no exceptions. The denominator is 10 and not 41 or
+27 on purpose: 27 of the 41 call `compile`, and 17 of those consume no output
+at all (they count allocations, time phases, or read the AST), so a tool that
+never looks at `js.code` is not blind to `js.map`. `ab_dump.rs`, the tool for reducing
+a corpus divergence to one diagnosable file, is among the blind ones, so a
+divergence that moves only the map disappears the moment someone reduces it.
+Whether this is "the map is not output" as a premise, or only that these tools
+were written for throughput and code equality, is **not separated** — the 10/10
+is what was counted.
+
+### Quoting a hazard is not defending against it
+
+Three instances in one day across three agents, each by someone who had cited
+that exact rule earlier the same day: a `| tail -30` that kept the exit status
+honest through `pipestatus` and threw away the test denominators; a `grep`
+against a task-output file rather than the log it wrapped; a `debug_assert_eq!`
+written into an instrument whose own comment said it would run under
+`--release`. The knowledge was present every time and the trigger was not.
+
+**What fires these rules, in practice, is a second derivation — not vigilance and not
+head count.** Over one day of three sessions working the same measurements, every rule
+that actually caught something was triggered by someone else's number disagreeing, and
+none fired from inside the person holding the error. The discriminator is visible in
+which errors were caught and which sat: two counts of the *same quantity by different
+methods* (147 vs 231) exposed a method fault within minutes; one number read by two
+people under *different assumed populations* (a static inventory vs a runtime
+observation) exposed that its derivation was never recorded; while two figures nobody
+else had any reason to compute — a share quoted against the wrong denominator, and a
+key-set size — sat unchallenged until their own author happened back over them. So the
+condition is **the same quantity produced twice by independent derivations**, and extra
+people are only one way to buy that. Two runs of one harness buy nothing. Writing the
+rule down supplies the vocabulary to name the fault once it surfaces; it does not
+surface it. This is `two-ports-inventory` read forwards: that file lists places where
+two implementations exist and are never compared, which is the same lever with the
+comparison missing.
+
+**Three variants of "it was there and did not connect" turned up in one day, and the
+documentation variant is the one to act on.** A rule quoted that morning and then walked
+into; a finding established that morning and re-derived from scratch that afternoon by its
+own author; and a paragraph in `docs/perf-baseline.md` that ended *"the report **should**
+say so in `provenance.benchmarkDesign`"* — where the field held a bare URL and the
+disclosure had never been written. The first two are attention; the third is mechanical and
+permanent, because **a sentence that ends in "should" is indistinguishable from a sentence
+that ends in "does" to everyone who is not currently editing that file**, and nothing greps
+for it. When a finding implies a change somewhere else, make the change in the same commit
+or open the issue; do not leave the obligation in prose. What surfaced this one was not the
+re-derivation — it was checking the re-derived claim against what the tree already said,
+and asking why a recorded fact was not in effect.
+
+**Prefer an oracle whose failure cannot be mistaken for its answer.** Every entry in the
+truncating-stage table above shares one mechanism: the failure returns a value with the same
+shape as a result — `tail` returns lines, `|| echo 0` returns a number, `2>/dev/null`
+returns an empty set, a rejected timestamp returns a count. A grep whose pattern is wrong
+still returns a count; a type check whose premise is wrong does not compile. So where a
+claim can be *stated as a type* — "no key on this path is computed" becomes a `&'static
+str` parameter — the compiler answers it with a shape that cannot be read as data: it
+builds, or it names the counterexamples with positions. Choose the instrument whose return
+shape matches the claim's shape.
+
+Two shapes of the same failure are worth naming separately, because neither
+looks like forgetting the rule. **A control you designed yourself still has to
+be run**: a key-set difference was reduced by grep, the difference looked
+explicable, and the runtime step of the author's own four-step procedure — check
+that a key in the difference really is absent at runtime — was skipped because
+step 3 had already produced an answer. That step would have failed instantly on
+the first key in the list. The procedure was written when the hazard was clearly
+in view and abandoned at the moment it would have paid.
+
+**And a disqualified number keeps circulating as a number.** Two client figures
+existed, 14.35x from an instrument whose defect had been found and 9.63x from a
+window its own author had contaminated. Both were rejected, in writing, in this
+file. A delegation written afterwards still opened with "the factor needed is
+14.35x → 20x = 1.39x", and the same message explained a paragraph later why
+9.63x was untrustworthy — the contradiction survived because the rejection and
+the reuse sat in different paragraphs. The needed factor is 1.39x or 2.08x
+depending on which is current, and 2.08x is above what the largest known lever
+can deliver, so the two readings point at different work. **When you retract a
+measurement, retract the quantity, not just the sentence around it** — otherwise
+the retraction is a note and the number is still load-bearing.
 
 ### Three things answer to "the official compiler", and they disagree
 
