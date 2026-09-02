@@ -363,6 +363,22 @@ same string for every push to `main`, so at a high merge rate each merge cancell
 predecessor and `main` carried no verdict at all. **A cancelled run and a green run are
 indistinguishable in the branch header.**
 
+**And the same is true one step earlier: a ratchet's correctness is relative to the tree it is
+measured on, and a PR's tree is the MERGE REF.** `pull_request` CI checks out
+`refs/pull/N/merge` — the branch merged with `main` — so when `main` moves, a branch that has not
+changed by a byte can go red. Measured the day #4161 landed: it took `known-failures.client.json`
+from 34 to 28, and three open PRs still carrying the 34-entry file had **6 listed-but-passing
+entries** each, which is a FALSE-SHRINK failure. Their 86 queued jobs were therefore guaranteed
+red before any of them ran; rebasing did not cost the queue, it *freed* it (`running 16 → 8`,
+`queued 153 → 104`). The trap is that **the branch's own tree is self-consistent**, so nothing
+measurable locally explains the red — "the ratchet is right on my branch, so the rebase can wait"
+is a true statement and an irrelevant one. **And the same fact is a tool, not only a
+hazard**: a PR run's artifact records its own `projectRevision` as the merge ref, so it says which
+upstream commits were *in* the tree it measured. Reading that first shrinks or dissolves the
+question "does `main` moving invalidate this measurement" — in one instance four commits' worth of
+reachability was traced by hand and the artifact then showed three of them had been in the
+measured tree all along.
+
 **And a cancelled run also shows up RED, where it is indistinguishable from a real regression.**
 `Tests` is a rollup job that reads its shards' `result`s and exits 1 unless every one is
 `success` — so a cancellation makes the rollup `FAILURE` while every shard under it is
@@ -483,9 +499,9 @@ is why that suite reads 100% while the class exists. **A gate's first baseline m
 the surface was ungated, not how much someone let rot.**
 
 **Those three numbers are the FIRST baseline (2721 entries) and none of them is a current work
-item.** The ratchet stands at 304 over ten clusters — `span` 78, `node-type` 62,
+item.** The ratchet stands at 301 over ten clusters — `span` 78, `node-type` 62,
 `comment-attachment` 50, `estree-fields` 38, `unclustered` 36, `child-count` 14, `css-shape` 14,
-`loc-presence` 9, `ast-mode` 2, `accepts-what-official-rejects` 1 — and there is no
+`loc-presence` 6, `ast-mode` 2, `accepts-what-official-rejects` 1 — and there is no
 `character` cluster at all. Grepping the keys for `character` returns 0 and **means nothing**,
 because `verify.mjs` folds `start`/`end`/`loc` into one key per node type, so a
 `loc.start.character` divergence sits inside `span`. Measured directly on one input, both
@@ -493,12 +509,19 @@ compilers emit zero `character`-bearing `loc`s and `phases/1-parse` does not imp
 `locate-character` at all (only `preprocess/index.js`, `state.js` and
 `utils/compile_diagnostic.js` do) — which suggests the paragraph above describes the
 *diagnostic* path rather than `parse()` output, but one input is not a population. Count the
-JSON, not this paragraph — and this paragraph has already been wrong once: it read 459 over a
-cluster split that summed to 459 while the file held 321, so **the count and the split go stale
-together and neither checks the other**. And read `304` as `165 bases × axis`: 139 of those bases
-carry a key on both axes and 26 on one, so the defect ceiling is 165, not 304. The collapse is not
-uniform across clusters (2.00x for `estree-fields` and `comment-attachment`, 1.56x for
-`css-shape`), so a per-cluster estimate cannot be had by scaling the total.
+JSON, not this paragraph — this paragraph has already been wrong twice, and the second time
+named the mechanism. It once read 459 over a cluster split that summed to 459 while the file
+held 321. Then it read 304 / `loc-presence` 9 while the file held 301 / 6 — and the history says
+those were **correct one commit earlier**: `051e359dc` moved the JSON and the doc's partition
+line together and left this file untouched, because `known-failures-md-check.mjs` gates the
+partition line and gates no prose. That is the same mechanism `fmt`'s attribution paragraph
+carried for 241 entries. So it is not that a count and a split go stale together — **one half is
+gated and the other rots alone**, and the gated half is where to read the number. And read `301`
+as `163 bases × axis`: 138 of those bases carry a key on both axes and 25 on one
+(`138×2 + 25 = 301`), so the defect ceiling is 163, not 301. The collapse is not uniform across
+clusters — measured, 1.00x to 2.00x against a whole-file 1.847x, so scaling the total gives
+`css-shape` 7.6 where it actually has 9 — which is why a per-cluster estimate cannot be had by
+scaling the total.
 
 **And the clusters partition KEY SHAPES, not causes, so a mechanism can span three rows while
 each row reads as its own backlog.** `lang="ts"` does not merely enable extra syntax — it selects
@@ -695,6 +718,18 @@ rather than ported: both compilers reject, and matching would mean reproducing t
 Normalization is deliberately identical to `verify.mjs`, so a divergence this gate reports is one
 the corpus gate would also report. `--update-baseline` refuses to run under `--no-fmt` or a
 `--families` subset (both would FALSE-SHRINK the ratchet).
+
+**A ratchet entry's justification is a hypothesis about the AXIS, and a repro built from it
+inherits that hypothesis.** A svelte2tsx entry was recorded as "a `//` comment is dropped from a
+mustache in a mixed attribute value". The rule is not about comments: upstream copies the
+mustache interior **verbatim**, and rsvelte sliced by the expression node's span, so everything
+between `{` and the start of the expression was lost. Four cells —
+`class="x {// c⏎a} z"`, `{/*c*/a}`, `{ a }`, `{a /* t */}` — and **two of them contain no
+comment at all**, so a fix built from the entry's own wording (extend the range to cover a
+leading comment) passes half the grid and reads as done. The lesson is one level earlier than
+"reason is not attribution": the prose does not merely fail to say *where* a divergence is
+answered, it can name the wrong *axis* to reproduce it on, and the grid that would catch that is
+the one whose cells are not all instances of the stated cause.
 
 ### Transform idempotency (`scripts/compat-corpus/idempotency-verify.mjs`)
 
@@ -999,7 +1034,7 @@ VS Code Dev Containers ("Reopen in Container") also works.
 
 ### grep can return nothing and mean nothing
 
-Four ways `grep` has silently reported "no matches" for strings that were
+Five ways `grep` has silently reported "no matches" for strings that were
 present. All of them produce a confident empty result, so a negative grep is
 never on its own evidence that something is absent — confirm with a positive
 control on a string you know is there.
@@ -1010,6 +1045,15 @@ control on a string you know is there.
 | `Binary file … matches`, no lines printed | one NUL byte anywhere in the file (not non-ASCII — UTF-8 is fine) | `command grep -a`, or `git grep` |
 | `git show rev:file \| grep X` finds nothing | the wrapper's `-I` discards binary-looking **stdin** | `git grep X rev -- file` |
 | later matches missing | `\| head -N` (or `\| tail -N`) truncates with no error | state the denominator, or drop the cap — see the section below, this is the narrow case of a general hazard |
+| every count comes back `0` | zsh expanded an **unquoted** `--include=*.svelte` as a glob, found no match in cwd, and never ran the command | quote every glob-shaped argument: `--include='*.svelte'` |
+
+The fifth row is the one that is not a `grep` bug at all: the other four reach
+`grep` and then lie, while this one means `grep` never ran. Two people hit it in
+one session, an hour apart, and both times the fabricated answer — `0` for every
+repository — **agreed with the hypothesis being tested** ("this population carries
+no carrier"). Quoted and re-run, the first column read `1867`. Neither `echo $?`
+nor `$pipestatus` helps, because zsh's non-zero status is not a failure of the
+command you wrote; the only control that fires is a count you know is non-zero.
 
 ### A truncating or discarding stage turns a failure into a green
 
@@ -1027,6 +1071,7 @@ followed on the next:
 | `pgrep -c … \|\| echo 0` | `0` | the `\|\|` arm fabricated a datum that reads exactly like a measurement |
 | `cargo test … \| grep -E '^test \|test result' \| head -20` | `TEST_EXIT=101` from `$pipestatus[1]`, and twenty *passing* lines | the **verdict** was read correctly and the lines explaining it were outside the window |
 | `join before.tsv after.tsv` over paths sorted by Rust's byte order | two non-ASCII paths reported as **changed** that were byte-identical | `join` requires its inputs in the locale's collating order and silently **mispairs** rows when they are not |
+| `timeout 120 node probe.mjs 2>&1 \| head -20` | nothing at all, twice | `head` closed the pipe and `timeout` killed the process, so node's block-buffered stdout was **never flushed** — the verdict was not outside the window, it was never produced |
 
 Rules, in the order they are cheap:
 
@@ -1087,6 +1132,45 @@ Rules, in the order they are cheap:
 3. **State the denominator.** "No warnings" is a claim about a population; say
    which one (`-p <crate> --lib --tests`), because the reader cannot tell from
    the output whether your file was in it.
+4. **Check the instrument before the result, not after.** A predicate written to
+   answer "is the CI scheduler stalled" — `status === 'queued' && started_at` —
+   matched **210 of 213** jobs, which agreed with the hypothesis and was
+   internally tidy (the other 3 were exactly the `in_progress` count). It is
+   non-discriminating: the Jobs API stamps a queued job's `started_at` with its
+   `created_at`. What exposed it was the *shape* — six different jobs carrying
+   the identical timestamp to the second — not the count, which is the same
+   signal that named the `awk` key collapse above. The corrected predicate
+   (`started_at > created_at`) reported **0**, so the platform-side signature was
+   absent and the question stayed open. Run the check on a population where the
+   predicate MUST fire before you read a run where it must not.
+   **And the instrument check is only as good as the population it runs on.**
+   Half an hour later the same investigation reported `in_progress: 4` against a
+   20-job ceiling and concluded the scheduler was stalled. It was saturated at
+   exactly 20. `actions/runs?per_page=100` returns the hundred most recent runs
+   **of any status**, and filtering those client-side drops every still-running
+   run older than the window — here a 16-shard job created an hour earlier.
+   Server-side (`?status=in_progress`, `?status=queued`) with paging gives 20 and
+   208. This is the paging-window hazard, and what makes this instance worse than
+   the usual one is that **it faked a plausible number rather than a zero**: `4`
+   was explicable, agreed with the hypothesis under test, and was internally
+   consistent (the "predicate could fire" control read 4 too, because it drew
+   from the same truncated population). A peer's report of 16 running shards
+   contradicted it outright and the contradiction was not treated as evidence
+   about the instrument. **When someone else's measurement disagrees with yours,
+   the first hypothesis is your instrument, not their arithmetic.**
+5. **A window can kill the verdict's PRODUCTION, not only its display.** Rows 1-5
+   of the table lose a verdict that exists; row 6 loses one that never got
+   written. `console.log` to a pipe is block-buffered, `head` closes the pipe and
+   `timeout` sends SIGTERM, so whatever is still in the buffer is gone — and the
+   same command redirected to a file prints all five lines. The distinction
+   matters because **the usual fix does not apply**: widening to `head -200`
+   changes nothing, because the width was never the problem, and someone who
+   knows the table will re-run at the same width and get the same nothing. It
+   also mis-attributes in a specific direction — an empty probe reads as "the
+   thing I am probing is broken", so two plausible mechanisms (a wrong `cwd`, a
+   wrong `--stdio` spelling) were built and one of them was even independently
+   real, which is what made the diagnosis stick for two rounds. Write to a file,
+   then read the file; nothing else recovers an unflushed buffer.
 
 ### Nothing about a measurement arm is evidence of what it measured
 
@@ -1100,8 +1184,10 @@ has been wrong on this repository within one day of the others:
 | the artifact's path | with `CARGO_TARGET_DIR` set, the path no longer depends on cwd — so it stops proving which tree was compiled |
 | the branch you think you are on | an agent's shell cwd silently resets to the main checkout, and `cargo` then compiles someone else's working tree with no error |
 | "the same branch as last time" | the branch was rebased between the two builds, so the arms differ by whatever landed on `main` in between |
+| the source the build read | it was edited *while* the build ran, so the artifact answers to no tree at all — and nothing in the name, the path, or the `Compiling` line records it |
+| two labels, one artifact | a `sed` rename chain applied in an order that made both arms resolve to the same file — the arms were never distinct |
 
-Two rules cover all five. **Identify an arm by a discriminating probe on its
+Two rules cover the first six. **Identify an arm by a discriminating probe on its
 output** — one input whose answer differs between the two arms, run through the
 binary you are about to measure with. A probe only separates the hypothesis you
 handed it: an arm was probed with one fix's fingerprint, came back clean, and was
@@ -1125,6 +1211,15 @@ this session" is an assumption, and the two disagree silently. The prefix does n
 reset — it only makes each call independent of the previous call's cwd. What it cannot fake is
 the build's own `Compiling <crate> (<path>)` line, so read that before trusting any arm.
 
+**And the same hazard has a read-only form that no `Compiling` line can catch.** A ratchet census
+run in the primary checkout reported `known-failures.client.json` at **17**; `origin/main` reads
+**14**, because that checkout was parked on a documentation branch cut before three merges. There
+was no build, no arm and no binary — just `readFileSync` over `compatibility/`, which is the
+cheapest possible measurement and was of the wrong tree. A census is a measurement of a tree in
+exactly the way a baseline is, so name the tree in the output (`git rev-parse HEAD` beside the
+counts) rather than in your intention; a number with no revision beside it cannot be checked by
+anyone, including the person who produced it.
+
 A second, independent signal is the **diff between the two arms' trees** (`git diff <base> HEAD
 -- crates/`): a one-line answer to "do these arms differ by the change I think they do". Neither
 signal is sufficient alone — the `Compiling` line says which tree was read but not what is in it,
@@ -1138,6 +1233,33 @@ and the four files were `.svelte.js`, which the changed template visitor cannot
 reach at all. **Ask what mechanism could carry the change to each moved file
 before attributing any of them**; a direction that matches your hypothesis is
 the cheapest thing for an artefact to imitate.
+
+It recurred, and the second instance is cheaper to detect than the first because the
+discrepancy is a git fact rather than a mechanism argument. A baseline arm was built at
+`4cdc135cb` while the head branch's own merge base had moved to `95ba24874` one merge earlier,
+so the two arms differed by the change under test **and** by the PR that had landed in between.
+The sweep reported **4** moved units, all `MISMATCH -> match` — the flattering direction, at a
+plausible size. Rebuilding the baseline at the branch's actual merge base gave **2**, and the
+other two were the intervening PR's. `git merge-base <branch> origin/main` against the commit
+the baseline binary was built from is one command and settles it; run it before the sweep, not
+after a result you like.
+
+**The last row is a different failure and the probe cannot see it.** Rows 1-6 are
+an arm whose *identity* is wrong, and a discriminating probe settles every one of
+them. Row 7 is two arms that are the *same* arm — and probing both returns the
+same answer, which reads as "the two runs agree, my instrument is sound". What
+denies it is `sha256` of the two artifacts, and hashing alone is not enough
+either: two different files can legitimately hold the same behaviour, so equal
+outputs from distinct hashes is a real zero. The hash rules out sameness and the
+probe rules out mislabelling; **neither substitutes for the other, and both are
+needed on a measurement whose answer is 0**. Note the scope: this class can only
+surface on a run that reports nothing moved, so it is invisible to every
+`moved > 0` sweep, and the instance that produced it was the *third* consecutive
+`moved 0` on the same instrument — **the number you predicted is the one you will
+not re-derive**. The mechanism was a single `sed -e 's#a#b#; …; s#c#a#'` whose
+first substitution pushed the new arm aside and whose third re-created its name:
+collapsing a rename chain into one command hides the intermediate state that
+would have shown `a` being defined twice.
 
 ### Three things answer to "the official compiler", and they disagree
 
@@ -1246,6 +1368,77 @@ release test targets were all green. What attributed it was a completed *previou
 same corpus sweep: without a baseline rate, a sweep that stops printing is indistinguishable from
 a sweep competing with a build for CPU.
 
+### If the mechanism already has a name in the code, measure the name
+
+Asked whether two CSS residuals were one mechanism or two, the instruction given was "flip one
+arm and see whether the fix moves both" — which needs two builds and answers only *after* a fix
+exists. The cheaper answer was already in the tree: the empty-rule elision sits inside
+`!ctx.dev`, so varying `dev` reports **which path a case takes** directly. One build, and the
+two rows separate (`DIFF/DIFF` for the one that is not the empty check, `DIFF/EQ` for the one
+that is). A two-arm probe measures *what a change does*; an existing flag measures *where the
+input goes*, and the second question is usually the one being asked. This is the sibling of
+"a mechanism with a name is settled by `git log -S`" — that one is about provenance, this one
+about path.
+
+The same family answers *"is this predicate wrong, or is it never reached"* — two hypotheses that
+one sentence ("`is_rule_empty` does not seem to be reached") hides and that repair in different
+functions. A `#[track_caller]` counter settles it in one build: 0 lines on the failing input,
+**4 lines on a neighbouring input that takes the other branch**, so the zero is the wiring and
+not the instrument. It named `transform_rule` → `transform_global_block` →
+`transform_rule_preserving`, where upstream has one `Rule` visitor evaluating
+`is_empty(node, is_in_global_block(path))` at every depth. That is the two-ports shape with a
+piece missing rather than a piece disagreeing: **the second port does not carry the decision at
+all.** Reading the predicate instead would have been a careful study of the correct function.
+And "A was not called" does not entail "B was": where output exists, something wrote it, so the
+probe has to name the writer and not only clear the suspect.
+
+The same episode carries the shape of a well-run zero. The carrier count over 32,650 collected
+components was **0**, and it is only readable because the detector was positive-controlled
+first: 11 constructed cells, **two of which must answer `none`**, so the instrument is shown to
+produce both a hit and a miss; and the target selector was checked by running a known-diverging
+file through the identical wiring and watching it swing per target, which is what rules out a
+silently ignored argument. State the denominator's own deviation too — 32,650 is not the
+pipeline's 33,893 (no markdown blocks, one submodule unexpanded) — and say the difference could
+contain a carrier rather than asserting it cannot.
+
+### Say which of the summary and the distribution is primary
+
+"Keep the distribution beside the summary so a wrong summary can be recomputed" is the rule this
+repository nearly adopted after a `6.00` that should have been `5.96` — recoverable exactly
+because the distribution (3,551 files at 6, 81 at 4) was written next to it. It is not the rule.
+The `parse-ast` paragraph has the opposite failure on record: a summary of `459` above a cluster
+split that *also* summed to 459, while the JSON held **321** — the two went stale together and
+neither checks the other. The recoverable form is **naming the primary source**: the map's
+numbers are recomputable because the JSON is primary and the prose is derived. A distribution
+transcribed into prose is just a second summary.
+
+### A guard and the computation behind it are two claims about one shape
+
+`try_hug_mixed` admitted a line prefix with `indent.ends_with('>')` — written for a parent's
+hugged `>` alone on the line — and then computed the hug's indentation as *the prefix sliced up
+to its last space*, which is only that same string on that same shape. A comment ends in `>`
+too, so a leading `<!-- … -->` passed the guard and was re-emitted as indentation on top of its
+own `-->`: text `compile()` rejects, 1 file in 33,644 (#4151). **Tightening the guard is the
+cheap direction and it is usually wrong.** It removed the corruption, and it also removed the
+hug — the same 5-case grid then read 3 MATCH / 2 DIFF where the oracle wants 5, and the version
+that widened the guard later cost 4 corpus entries. Fixing the *computation* (the line's own
+leading whitespace, which agrees with the slice on the shape the slice was written for) took the
+grid to 5/5 and the ratchet from 549 to 547 with 0 new failures. Ask which of the two encodes
+the shape: the guard names it, the computation assumes it, and only one of them is load-bearing.
+
+The other half is that the premise under the guard was itself wrong. "Comments are always line
+boundaries" is a sentence in the code; the oracle glues `><!-- … -->` to a wrapped open tag
+exactly as it glues text, which one probe settles. **A refusal justified by a comment is a place
+to probe the oracle, not a place to work around.**
+
+And the closing measurement needed a **set difference, not a count**. Compiling both sides'
+formatted output over the whole population returns 1,014 rejections on each side — the sources
+that do not compile at all (`lang="ts"` and friends) — so the raw count answers nothing. The
+quantity is *rejected by rsvelte and accepted by the oracle*: 1 before, 0 after. The mirror
+direction is not decoration either; it returned 2, both already carried by
+`fmt-oracle-excluded.json`, which is what says the 0 is a property of the fix and not of a
+population that lost its rejections for some other reason.
+
 ### Split the verdict before you split the cause
 
 A cell that reports one pass/fail per input tells you the input diverges; a cell that
@@ -1338,6 +1531,38 @@ and which a direction-free key had reported as uniform.
 edge, so a change under `crates/rsvelte_projection/src/svelte2tsx/` reaches it and a
 changeset naming only `@rsvelte/svelte2tsx` fails `check-core-consumer-changesets.mjs`.
 Name every consumer the checker lists, not the one whose directory you edited.
+
+### A fix that reaches the reported file has reached one of the places that register the rule
+
+Upstream declares a `let:` binding once, in `phases/scope.js`. rsvelte registers one in
+**three** places — `build_slot_function` (the component's own), `process_element_let_directives`
+(a slotted element's own) and `visit_svelte_fragment` (a `svelte:fragment`'s own) — so a rule
+about `let:` scope is three edits, and the count is not visible from any one of them. The
+reported file reached the second and a corpus file reached the third, which is why the first
+corrected version still moved 4 units the wrong way: `<C let:a>` around `<span slot="t" let:a>`
+had the child's binding masked by the parent's, because the mask is keyed by NAME and upstream's
+`determine_slot(node) ? context.state : …` declares a slotted node's own `let:` in the ENCLOSING
+scope. The fourth candidate, `<svelte:element let:x>`, needs nothing — both compilers reject it,
+which is what closes the enumeration rather than a search that stopped finding things.
+
+Two cheap controls came out of it. **A cell that separates a scope STACK from a flag**: inside
+one named slot, an `{#each xs as a}` body reads `$.get(a)` and the very next expression reads a
+bare `a` — a mask that is set once and never restored gets exactly one of the two. And **the
+control cell whose value on `main` is already correct is not an identity probe**: `main` has no
+mask at all, so the same-name arrangement passes there by construction; it discriminates the
+broken fix from the corrected one and says nothing about which arm you are holding.
+
+### Two fixes in one file make the arm probe a liar even when the probe is right
+
+An arm is identified by a discriminating probe on its output, and the probe answers only the
+hypothesis it was handed. Two independent fixes landed in `regular_element.rs` on the same
+afternoon — a `let:`-scope mask and the raw-vs-normalized attribute name — and a `git checkout`
+with an uncommitted working tree carried the second onto the first's branch. The probe asked
+"is the `let:` fix in?" (yes) and "is the destructured-rest fix in?" (no, correct), and reported
+a clean arm identity for a binary containing **both** changes; a 30%-complete 135,560-unit sweep
+had to be discarded. The rule the truncation table already states for verdicts applies to arms:
+probe for what the arm should contain **and** for what it should lack, and add a cell per
+in-flight change in the files you touched, not per change you believe you are measuring.
 
 ### A reconstruction of a gate misses in a direction, and the direction is the stage it dropped
 
@@ -1445,6 +1670,7 @@ of that row going unwritten:
 | the ratchet — the ids that fail today | did anything that passes today break | **population** (the set is the complement of the question's) |
 | `js.code + css.code` over 135,592 pairs | a `loc` change reaching phase 3 comments **and** the source map | **carrier** (nothing in that hash carries a map) |
 | the corpus manifest, 33,898 components | 58 samples under `packages/svelte/tests/sourcemaps` | **population** (same mechanism, disjoint inputs) |
+| `corpus_hash` over 104,439 units, `MOVED 0` | does the class-field `$state` fix move anything | **population** (`corpus_hash` walks `.svelte` only, and `compile_module` parses plain JS — all 923 `.svelte.(js\|ts)` returned the *same* `js_parse_error` in both arms, which is the host the defect lives in) |
 
 None of the three is visible as "measured / not measured", and all three produce a `0` that
 reads as an answer. Writing the population out loud is what makes the first one self-evident —
@@ -1459,6 +1685,41 @@ the same line would print if the arrangement were reversed. Nothing is missing f
 so re-reading it more carefully cannot help; only a different operation can — **read the names
 of the tests that ran, not the count**, and where a suite prints its own denominators
 (`770/770 official segments`, `0/1634 out of range`) run it with `--nocapture` so those appear.
+
+**A verdict over a set must state the set's size, because an empty set satisfies every rule
+written as "nothing failed".** A check-run monitor asked "is any run incomplete, is any run a
+failure" and printed `COMPLETE seen=0 total_count=0 fail=0` for two different PRs — a green
+sentence about a commit that has no checks at all. One of the two is not a transient: a
+Changesets release PR is opened with `GITHUB_TOKEN`, which does not trigger `pull_request`
+workflows, so **that PR structurally has zero check-runs and no gate has ever seen it**. The fix
+is not an `if seen == 0` arm; it is that the reader must print the denominator and refuse to
+conclude at zero, and must additionally assert `seen == total_count` — the check-runs API pages
+at 30, so `total_count` and the length of what you received are two different numbers and only
+the second is yours. Both halves have now produced a false green on this repository within one
+day of each other.
+
+**A gate can be written, unit-tested, self-tested and wired to nothing.**
+`scripts/ci/attribution-check.mjs` owns the question "is every ratchet entry attributed", ships 8
+passing controls under `pnpm run test:attribution-check`, and
+`grep -rn 'attribution-check\|check:attribution' .github/workflows/` returns **0**. On the day
+this was found, *both* people who had published a census of that question had built it by hand
+from the `Attribution of` prose in `KNOWN-FAILURES.md` rather than by running the checker — one of
+them in the same report that named that prose as ungated and rotting. The two hand-built censuses
+agreed to within a difference that fully explains (16 = client 22→14 plus client-dev 36→28), and
+**that agreement is not evidence the method is sound**: two readings of one document are one
+measurement. Ask which artifact in the tree *owns* a question before answering it; "it is not in
+CI" is a reason to run it locally, never a reason it is not the authority.
+
+**An instrument can be dead on exactly the population that carries the defect, and it reports
+that as agreement.** Row 4 above is not a missing column so much as a column filled in with a
+number the instrument could not have produced any other value for: every unit of the carrying
+host errored identically in both arms, so `MOVED 0` was arithmetically forced. The check is one
+line and it is the same one as everywhere else here — **count the live units, not the compared
+units**. Re-run through the gate's own preparation (here `compile.mjs`'s esbuild TS strip) and
+the answer becomes `MOVED 2`, both of them the file the issue names. It is worth stating the
+residue too: 110 of the 923 still fail to compile in both arms for reasons both compilers agree
+on, so the module sweep's live population is 813 — a number that belongs in the report, because
+"923 files swept" and "813 files could have moved" are different claims.
 
 ### Working with Subagents
 

@@ -228,7 +228,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 24 | `await_waterfall` runtime parity | the `await_waterfall` warnings a **mounted** rsvelte-compiled component logs vs. official's, 3 cases | one warning code, one component shape; nothing else about the running component is observed | [D] |
 | 25 | Differential output-preservation corpus hash | per `.svelte` source × client/server/client-dev/server-dev hash from base-core vs merge-ref-core | changes outside `crates/rsvelte_core`; every PR without the maintainer-applied `output-preserving` label | [S] |
 | 26 | esrap generated-output corpus | parsed JS output × official/rsvelte tree × 4 targets; AST equivalence, comment kind/body sequence, code/map equality, map bounds/order | production synthetic AST spans and whether a mapping points at the corresponding source token | [S] |
-| 27 | LSP differential parity | normalized JSON response field per request against the pinned official server and selected upstream snapshots | **every server notification**; incremental edit and resolve sequences; **inside a corpus `(file, method)`, everything but the divergent-request count**; the oracle-calibration floor is skipped on the corpus job, which enrols 66.7% of the entries, and that job never installs the repositories it measures | [S] [D] |
+| 27 | LSP differential parity | normalized JSON response field per request against the pinned official server and selected upstream snapshots | **every server notification**; incremental edit and resolve sequences; **the whole corpus half — its key carries no divergence and 3,632 of 3,637 files are already listed, so it cannot report a NEW (27o)**; the oracle-calibration floor is skipped on the corpus job, which enrols 66.7% of the entries, and that job never installs the repositories it measures | [S] [D] |
 | 39 | svelte2tsx option axis | full TSX text per (option variant x source) against the official tool, options carried in the fixture | option values outside its grid (`rewriteExternalImports`, `runes`, most `namespace` x `mode` products); `emitDts`; the map, `exportedNames` and `events` | [S] [D] |
 | 38 | NAPI `cssHash` | the scope class the callback produces, and the callback's own argument list, against **official** | one component shape and one option set; only `css.code` / the class in `js.code`; nothing about the wasm or facade ports of the same option | [S] |
 | 39 | Print fixture suite (`tests/print.rs`) | per-sample printed Svelte text vs upstream's `output.svelte` | it compares the text, not **which code produced it** — a source-text shortcut around the whole AST printer was invisible for 43 of 43 samples | [D] |
@@ -446,8 +446,11 @@ differ in the digest alone and 3 in the field count, while `divergentRequestCoun
 of its 3,632 keys) against **0 of 3,632** for `textDocument/definition` and 3 for
 `textDocument/hover`, so what varies is which completion items the two live servers return for the
 same position, not the harness. A shrink-only ratchet cannot hold a key that a re-run rewrites, so
-the field count and the digest are gone and the key is the request count alone; both sweeps then
-reproduce the committed baseline with 0 new and 0 stale.
+the field count and the digest are gone; both sweeps then reproduce the committed baseline with 0
+new and 0 stale. **The request count went the same way afterwards** (`ratchet.mjs:47-55`: two runs
+ten non-Rust commits apart moved one file's hover count 91 → 90 and 88 → 90, "sensitivity without
+direction"), so the key today is `fileId|method|phase` and nothing else — see 27o, which is what
+that leaves.
 
 What that removes is real and is not recoverable from any other row: for a `(file, method)` already
 listed, a newly wrong field in an already-divergent response, a divergence moving to a different
@@ -848,6 +851,39 @@ published code that compiles — 0 of 6,788 real-world sources reach that diverg
 about the **projection's error recovery**, whose population is a document being typed, where a
 half-written expression is the normal case rather than an adversarial one. The two rules point
 opposite ways on the same-looking input, and only the population separates them.
+
+### Blind spot 27o — the corpus half cannot report a NEW, because it is saturated and its key carries no divergence [D]
+
+Two facts compose into one. The aggregate key is `aggregate:${fileId}|${method}${stage}`
+(`ratchet.mjs:55`) — after 27g removed the digest, the field count and finally the request count,
+it carries **nothing about the divergence**. And the corpus population is saturated: of 3,637
+`.svelte` files across the four pinned repositories, **3,632 diverge**, and the five that do not
+are **0 bytes**.
+
+| repository | files | diverging | share |
+|---|---|---|---|
+| bits-ui | 617 | 616 | 99.8% |
+| flowbite-svelte | 1,296 | 1,293 | 99.8% |
+| melt-ui | 43 | 43 | 100.0% |
+| shadcn-svelte | 1,681 | 1,680 | 99.9% |
+| **total** | **3,637** | **3,632** | **99.9%** |
+
+Read off the committed ratchet rather than from a sweep: its 21,630 `aggregate:` keys cover
+exactly **3,632 distinct file ids**, 3,551 of them carrying 6 entries (three methods × two
+phases) and 81 carrying 4. So **every non-empty corpus component already holds an entry for every
+`(method, phase)` the harness sends**, and any new divergence anywhere in that population — of any
+field, of any severity, in any response — is suppressed by a key that is already listed. The only
+direction the corpus half can move is a `(file, method)` becoming *entirely* clean.
+
+This is not an argument that the aggregate key is worthless: a per-identifier key was rejected
+because it produces a six-figure file, this is the granularity that replaced it, and it is what
+makes the shrink direction work at all. It is an argument about what a green run **means**. On
+this half, green is not earned, it is guaranteed. The 2,116 `differential:` / `expected:` keys —
+**8.9% of the ratchet** — are the only ones that carry a divergence pointer, and therefore the
+only ones with live discriminating power.
+
+**Evidence [D]:** the file counts and the key distribution above are measured; the suppression
+follows from the key's own definition at `ratchet.mjs:55`.
 
 ---
 
@@ -5312,6 +5348,27 @@ has no view of the reverse direction, a divergence that is real and **not** reco
 that population is bounded only by the ratchets whose `.md` attributes entries to this document,
 and today only 6 of 31 ratchet docs make any such attribution.
 
+**A fourth, and it is not reachable from the gate's own code.** The three above fall out of
+reading `test-deliberate-divergences.mjs`; this one only appears when a section's claim is put
+beside the product. A recorded divergence asserts *we choose not to close this difference* — it
+does not assert *we do not have this*. `settings.rs` reads `completions.emmet` and defaults it to
+`true`, and **no code outside `settings.rs` reads that field**, so filing the emmet cluster as
+deliberate and pinning it would freeze a contradiction: the product declares a feature on and
+nothing implements it. The honest terminal states are the feature itself or an explicit decision
+to make the setting truthful; until one of them, the entries stay listed and are described as
+unimplemented. A blind-spot row whose evidence is only ever *structural argument from code* may
+be reporting that its author never looked outside the gate — the reading that produced this one
+was a positive-controlled count of readers, not an argument about the checker.
+
+Measured on `origin/main` (`fd72d98f1`), 6 of the 15 non-empty ratchets carry no `Attribution
+of …` table at all: `lsp-known-failures.json` 23,746, `fmt-known-failures.json` 549,
+`parse-ast-known-failures.json` 301, `known-failures.client-dev.json` 40,
+`known-failures.client.json` 26, `svelte2tsx-unparseable-known-failures.json` 1 — **24,663
+unattributed against 423 attributed**. The ~20 ratchets absent from both columns are empty.
+Read those `n` in the ratchet's own key units and not as defects: `lsp-known-failures.json`
+alone carries two conversions, `aggregate:` at 5.96 entries per diverging file and
+`differential:`/`expected:` at 1.87 per (unit, method, phase).
+
 ## Adding a gate, or a row here
 
 When you add a gate, add its row **before** the ratchet is first baselined, and answer the
@@ -5328,6 +5385,15 @@ entry that reproduces it as `MATCH`.
 
 If you cannot answer with a discriminating case or a file:line citation, write `[U]` and say
 what would resolve it.
+
+**A fourth evidence form, and it fails differently from the other three.** A *positive-controlled
+exhaustive search that came back empty* is not a **structural argument from code**: nothing was
+derived, a range was swept and found bare. `completions.emmet` has no reader outside
+`settings.rs`, shown against `settings.html.enable` (read from `server.rs`) as the control that
+the search can find a reader when one exists. The two are refuted by different things — a
+structural argument falls to an error in the reasoning, an empty search falls to an error in the
+search's *range* — so labelling one as the other tells the next reader to re-check the wrong
+half. Write it as its own form and name the range that was swept.
 
 <a id="two-ports-inventory"></a>
 
