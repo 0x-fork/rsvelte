@@ -322,6 +322,27 @@ wall-clock is unusable on a loaded box, are in
 The 6.59x client-dev figure against `@mrwaip/svelte-rs` predates #2511/#2512 and is **not**
 current.
 
+### A justification's own numbers are the cheapest way to check the justification
+
+`reason is not attribution` says a prose justification explains why a divergence exists
+without saying where it is answered. There is a worse case: the prose can name the wrong
+**owner**, and then the entry stops looking like work at all. A `fmt-oracle-excluded.json`
+entry was classed `engine-divergence` with the reason "oxc vs prettier template-literal
+\`${}\` substitution indentation … rsvelte delegates to `oxc_formatter`. Upstream
+oxc-alignment item." Measured on two arms, `oxc_formatter` was **identical in both** and
+only rsvelte's embedding moved — the entry was an rsvelte defect filed as an upstream one,
+which is the one classification that makes an entry look like it cannot be worked.
+
+What is reusable is that the reason **falsified itself**. It cites the oracle indenting to
+8/10 spaces where oxc uses 4/6 — a *uniform* offset, and a uniform offset is not what a
+line-breaking disagreement produces; two engines that disagree about where to break do not
+agree about every column by a constant. So the numbers a justification quotes to sound
+specific are the ones that can be checked without reproducing anything: read them for
+internal consistency with the mechanism they name, before spending an arm on it. An
+attribution to "upstream" deserves that read first, because it is the only attribution
+whose consequence is that nobody ever measures it again.
+
+
 ### Where compile time goes ([`docs/phase3-ast-refactor-plan.md`](docs/phase3-ast-refactor-plan.md) § Findings 2026-08-08)
 
 The 40.3% of non-kernel CPU that a profile attributes to allocation + hashing + memcpy
@@ -470,6 +491,60 @@ upstream commits were *in* the tree it measured. Reading that first shrinks or d
 question "does `main` moving invalidate this measurement" — in one instance four commits' worth of
 reachability was traced by hand and the artifact then showed three of them had been in the
 measured tree all along.
+
+**The dangerous direction of that is not red, it is GREEN.** A branch going red when `main`
+moves announces itself. A branch that stays green holds an answer about a superseded tree and
+nothing prompts anyone to look. Measured on one PR the moment its sibling merged: its
+`Compiler parity` had started at 13:49:55Z, the sibling merged at 14:43:14Z, and the PR still
+reported every check green — a verdict about a tree an hour out of date, with
+`gh pr view` returning `mergeable=UNKNOWN/UNKNOWN` because GitHub had not finished
+recomputing. The two PRs edited disjoint ratchet JSONs and the **same**
+`compatibility/KNOWN-FAILURES.md`, whose prose asserted `known-failures.client.json, 12
+entries` on the stale branch against a JSON holding 11 on `main`.
+
+**The predicted harm did not occur, and that half was inferred rather than measured — it is
+recorded because the inference was wrong.** Rebasing applied five commits with no conflict and
+the result was already self-consistent at 11, because the three lines were changed by *one*
+side only: git's three-way merge keeps the side that moved, and the stale `12` never survives
+unless **both** branches edit those lines, in which case it conflicts and stops safely. So a
+shared file plus disjoint JSONs is not by itself a hazard, and asserting a specific merged
+text without performing the merge is the ordinary mistake of pricing a mechanism you have not
+run.
+
+What survives is the asymmetry, which is about *noticing* rather than about breaking: a branch
+that goes red when `main` moves announces itself, and one that stays green does not, so
+whether the stale verdict happens to still hold is exactly what you cannot know without
+looking. The check is one comparison and costs nothing — **the verdict's `startedAt` against
+the last merge into `main`** — and it is worth running after every merge on every PR still
+open. "It turned out fine" is the answer it gives half the time; it is not a reason to skip it,
+because the run that is not fine looks identical beforehand.
+
+**And the check has a population, which is smaller than "every open PR": only a branch that
+has NOT been pushed since `main` moved can carry a stale verdict at all.** A push — a rebase,
+a force-push, any new head — recreates every check against the new head, so nothing old
+survives to be misread.
+
+**That is true of the PR and false of anything watching it.** A monitor keyed on check state
+reports what `statusCheckRollup` held when it sampled, and a force-push between the sample and
+the read leaves it describing a head that no longer exists: measured here as a `DONE-CLEAN
+(46 checks, 0 pending, 0 failing)` for a PR whose rollup was **empty** by the time it was
+acted on, because the rebase had replaced every check. Put the head SHA in whatever the
+watcher emits. It costs nothing, it makes a new head produce a new line rather than a repeat
+that a de-duplicating reader swallows, and without it the instrument built to catch stale
+verdicts is itself a source of them.
+
+So the claim above needs one word: a push destroys the old verdicts *after* it lands, and
+between the push and the recreation of the checks there is a **window** in which the old
+rollup is still served for the new head. Inside that window every cheap identity test agrees
+— the local HEAD matches the PR head, the count is plausible, nothing is failing — and the
+one thing that would separate them, *which commit those checks ran against*, appears nowhere
+in the output. Two agents hit this within the same hour on the same repository, and both were
+stopped by a **presence** condition (are the heavy gates registered as rows at all) rather
+than by any freshness test, because a replaced head has zero rows and a settled head has all
+of them. The PRs that need this check are therefore exactly the ones nobody has
+touched, which is also the set least likely to be looked at. Two PRs in one session made the
+contrast: one was rebased and its verdicts were all newly created; the other had not moved in
+an hour and reported a full green measured 53 minutes before its sibling merged.
 
 **A superseded run shows up RED too, and `gh pr checks` counts it.** A PR whose title was edited
 re-runs the title-dependent job; the old run's `FAILURE` conclusion stays attached to the PR, so
@@ -1251,7 +1326,16 @@ Rules, in the order they are cheap:
    put the filter *after* capturing the status (`PIPESTATUS[0]`, or write to a
    file and grep the file). `2>/dev/null` and `|| echo <literal>` are the same
    hazard wearing different clothes: the first throws away the half that carries
-   the failure, the second manufactures the answer.
+   the failure, the second manufactures the answer. And there is a third: an exit
+   code that makes **a different failure look like the failure you expected**.
+   `git merge-tree --write-tree A B` was run to ask whether two branches conflict
+   and returned `128`, which was read as "conflict". git returns **1** for a
+   conflict and **128** for fatal, and that flag needs git 2.38 while the machine
+   had 2.33 — `stderr` said `unknown rev --write-tree`, meaning the conflict test
+   had never run. An exit code does not say *which question* it answered; the
+   message does. That is what makes `2>/dev/null` worse than it looks: the half it
+   discards is not merely the failure, it is the only part that identifies which
+   failure it was.
    **Capturing the status is not enough.** Row 4 above kept the exit code and
    still lost the failure: a window that admits only passing lines answers "did
    it fail" and never "what failed", and the run that produced it did not
@@ -1366,6 +1450,40 @@ Rules, in the order they are cheap:
    like diligence. This is the instrument-level twin of a
    port-vs-port test whose oracle is the other port: both are passed by a fault
    the two halves share.
+
+### A probe filter that discards on BOTH sides reads as agreement
+
+A six-cell reduction reported `EQ` on every cell, and the reduction was correct — the
+instrument was not. Two independent bugs, and fixing the first left the second answering
+identically: the NAPI `compile` returns an object where the probe called `JSON.parse` on
+it, and the line-picker matched `"f"` while the generated code spells
+`$.prop($$props, 'f', …)`. After the first fix the picker returned `(none)` for **both**
+sides, so the comparison was `(none) === (none)`: six cells of nothing printed as six
+cells of agreement. The cell that finally moved was byte-identical to cell 1 of the broken
+grid.
+
+This is the truncation table one level in — the discarding stage is inside the comparison
+rather than before it, and that changes its signature. A filter that drops the carrier
+**asymmetrically** produces a loud `DIFF`; one that drops it **symmetrically** produces a
+silent `EQ`. So the positive control has to run **before** the result is read, not after:
+here the control (the real corpus file the entry came from) reproduced immediately and
+named the instrument, but the six green cells had already been reported. The same session then armed a
+CI monitor three times and made its green predicate unsatisfiable twice, in two different
+ways. First it required four heavy gates matching a regex containing `^Tests$` — no check is
+named `Tests`, they are `Test (ubuntu-latest, N)` — so the count could never reach four.
+Corrected to a real name list and verified against live data at 7, it then required all seven
+to be `SUCCESS`, and `Output-preserving corpus diff` is legitimately **SKIPPED** on a
+path-filtered PR, so seven-of-seven could never happen either.
+
+That is the reusable list. A success predicate has three independent ways to be unsatisfiable
+— **a name that matches nothing**, **a count that cannot be reached**, and **a conclusion
+value that never legitimately occurs** — and a skip is the one people forget, because it is
+neither success nor failure and reads as neither. Each guard here was added to fix a false
+green and replaced it with a permanent silence. **Both directions of a dead predicate cost the
+same thing, and neither announces itself**, so evaluate the predicate against live data
+*before* arming it, and confirm it would fire on a state you have actually observed rather
+than on the state you imagine "done" looks like.
+
 
 ### A grid's cells carry a direction; the mechanism does not have to
 
@@ -2027,6 +2145,92 @@ outputs. It is comparing a *projection* of outputs. Before widening a family, as
 throw away — and prefer the widest key the assertion can carry, because rows are expensive and a
 key change is free.
 
+### A filter's error lives in the bucket it discarded, so sample the REJECTED side
+
+This file already says a population of only-invalid inputs is blind to one direction of a
+compiler's accept/reject check. The same hazard applies to a **classifier that sorts work**,
+and there it is worse, because the kept side is not merely uninformative — it looks perfect.
+
+Measured on a 1,316-item inventory of catch-all `match` arms. The pre-filter was "a sibling
+arm whose head is an enum path is a *kind* dispatch (keep); a sibling arm whose head is a
+literal is a *value* dispatch (discard)", giving 714 kept and 590 discarded. Sampling twelve
+from the **discarded** bucket found four that were kind dispatches *spelled as strings* —
+`match node_type(e) { Some("Identifier") … }` — and counting the whole bucket rather than
+extrapolating gave **149 of 590, 25%**. The correct candidate set was 863. Every one of the
+149 sat in the JSON-walking lint rules, which is precisely the population where a dropped
+node type is invisible, so the filter's error was concentrated on the inputs that most
+needed inspecting.
+
+Reading the kept side can never find this: each of the 714 really is a kind dispatch, so the
+filter scores 100% against the only sample most people take. Spend the first probe on what
+the filter threw away — and count the whole rejected bucket once a single counterexample
+appears there, because the rate in a sample of twelve is not the rate you need to act on.
+
+The same inventory's second sieve is the honest companion to this. "Is the `_` arm reachable
+at all", computed as the enum's variants minus what the siblings name, eliminated **1 of 714**
+— a visitor handling 3 of `Expression`'s 47 variants is ordinary here, so a residue of 44 says
+nothing about whether dropping them is safe. What discriminates is whether the caller discards
+the `None`, which is not a property of the arm and is not syntactically decidable. Reporting
+that sieve as "zero discriminating power" is worth more than a sieve that removes a few rows
+for a reason nobody can state.
+
+
+### An entry condition that is a conjunction is wrong in both directions at once
+
+A job that runs only when two independent conditions hold can be misread by two people in
+opposite directions, and neither error is visible from the side its author read. Measured
+on `lsp-corpus`, the 950-job-minute gate:
+
+```yaml
+if: >-
+  (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+   || needs.changes.outputs.lsp-ratchet == 'true')
+  && needs.changes.outputs.lsp-corpus != 'false'
+```
+
+One reader looked at `corpus-compat-job-filter.mjs`, saw that `packageOf` returns `null` for
+any path outside `crates/` and that `null` enables **every** job, and concluded a docs-only
+PR is expensive — holding a documentation branch out of the queue for it. The other looked
+at the event-name guard, saw that a pull request is neither a schedule nor a dispatch, and
+concluded a docs-only PR is cheap. **Both premises are true and both conclusions are
+wrong**: the filter really does emit `lsp-corpus=true` for a docs change, *and* the job
+still does not run, because `lsp-ratchet` is false and a pull request fails the event
+guard — while the other eight Corpus Compat jobs the filter enabled do run. The real answer
+is neither "everything" nor "nothing" and cannot be reached from either condition alone.
+
+Run the filter with the actual file list (`node scripts/ci/corpus-compat-job-filter.mjs
+--changed-files <list>`) **and** read the workflow's `if`. The two artifacts answer
+different halves of one question, and the half you did not read is the one that makes your
+answer confident.
+
+**And "will this job run" is still not "can this change move it" — there are three
+quantities, not two.** The filter derives a blast radius from the *build closure*
+(`cargo metadata`), which is a deliberate over-approximation: running a job you did not need
+is cheaper than skipping one you did. So a change to `crates/rsvelte_formatter/src/script.rs`
+yields `lsp-corpus=true`, and the filter is not wrong — it is answering the outer question.
+
+```
+in the job's build closure          (the filter says true)
+  ⊋ the changed code is reachable from the gate's population   (measured: false)
+      ⊋ the output actually moves
+```
+
+Measured on that PR: the real-world LSP suite issues ten methods
+(`codeAction`, `completion`, `definition`, `diagnostic`, `documentSymbol`, `foldingRange`,
+`hover`, `inlayHint`, `linkedEditingRange`, `selectionRange`) and **`textDocument/formatting`
+is not among them** — it appears only in the fixture manifest, a different suite — while the
+language server reaches the formatter from exactly one file,
+`crates/rsvelte_language_server/src/format.rs`. The binary links the crate and no request
+can reach it, so waiting on a 950-job-minute run would have bought zero bits.
+
+Two controls made that a measurement rather than a grep. The method list needs a **positive
+control** (`hover` returns 3, so the pattern works) before `formatting` returning 0 means
+anything. And a literal grep is blind to a **dynamically composed** method name
+(`"textDocument/" + x`), so the bare `textDocument/` matches have to be read: here all three
+are `startsWith` filters and nothing is composed, which is what closes the set. Without that
+second check the zero is a statement about the instrument, not about the suite.
+
+
 ### Widening a set to close an enumeration hazard moves you along a new axis
 
 A hand-written list of "the kinds this applies to" is only right if the domain is closed, so
@@ -2048,6 +2252,21 @@ original grid held constant**, so name that axis and grid it before trusting the
 prefer a *complement* over a union when one exists — here the answer is `state.transform`
 minus the names the earlier pass already rewrote, which is closed on both sides, where a union
 of five hand-listed kinds is closed on neither.
+
+**And the real file carried an axis the synthetic grid held fixed.** The same assignment-chain
+work ended with one residue that was a different family entirely: upstream declines to wrap the
+innermost assignment of `a[i] = a[j] = a[k] = gray`, because `scope.evaluate(right)` follows
+`gray`'s binding initializer to `Math.round(...)` and calls it primitive, while rsvelte's
+`is_known_primitive` reads the expression's shape only. Every synthetic cell had used a **function
+parameter** as the right-hand side, where upstream wraps too — so a 13-cell grid never reached the
+family, and one real component did. Same shape as #2535 one level down, and a candidate sixth
+member of #3539's binding-initializer residue cluster.
+
+One further note on that component, `svelte-bits/.../MetallicPaint.svelte`: it is the carrier for
+**four** independent mechanisms found in one afternoon (the module `$.assign` value position, the
+chain ordering, the only structural carrier of the two-script site collision, and this
+binding-initializer family). Read that as a statement about the other 6,901 components rather than
+about this one — a corpus that is green is a corpus whose files mostly do not carry the axes.
 
 **The corpus could not have caught it.** A 139,252-unit sweep of the double-applying arm moved
 **2** units, and both are the file the fix repairs — the regression has zero witnesses. Only 33
@@ -2169,6 +2388,45 @@ pairs the gate had *already named* as passing were run through it first; they ca
 which is the only reason the two bugs were found. **Reconstruct a gate against cases the gate
 has already ruled on, before running it on cases it has not.**
 
+### A stricter reconstruction is free only while it counts DIVERGENCES
+
+The asymmetry above says a stricter reconstruction reporting **zero** needs no fidelity
+argument, because zero under a stricter comparison is zero under the gate. That licence is
+tied to the sign of what is being counted, and the two-sided ratchet asks a question on the
+other side of it: *stale* asks whether a baseline entry now **matches**. A stricter
+comparator produces **fewer** matches, so "no baseline entry came out EQUAL under my
+reconstruction" does not give "no baseline entry passes under the gate" — the gate's oxfmt
+normalization and `ast_equiv_batch` convert exactly the entries the reconstruction called
+divergent.
+
+The witness arrived in the same message as the claim: an instrument reporting `stale 0`
+across four ratchets also reported 33 `huly` units DIFF where the ratchet holds 4, so it
+was over-counting the divergent side by 29 — any of which could be a baseline entry that
+passes. Confirming a **retire** from a strict EQUAL is sound and needs nothing further;
+asserting **stale 0** from an absence of EQUALs is not. One instrument, two uses, one of
+them free, and the free one is not the one that looks like a zero.
+
+
+### An arm and a ratchet from different trees re-detect what was already retired
+
+A ratchet is a measurement of a tree, which is why re-baselining before a rebase enrols
+entries that already pass. The same fact has a second, quieter failure on the **reading**
+side: run a new arm's binary against an **older tree's** ratchet file and the pair reports
+entries as stale that a merged fix already retired. Measured in one command — a local
+already-passes check run from a worktree cut before a merge, with a NAPI arm built after
+it, reported 2 where the correct answer was 1, and the extra entry was exactly the one the
+intervening PR had retired.
+
+Nothing about that output looks wrong: it is a plausible count, in the right direction, on
+the right ratchet. The rule is that the arm and the ratchet are **two halves of one
+measurement** and both are properties of a tree, so check out the arm's own tree before
+running the comparison rather than reading the ratchet from wherever the shell happens to
+be. And the control that catches it is the one worth copying: add a **known-retired** entry
+back to the list and confirm the instrument names that entry and no other — an oracle whose
+answer is already established independently, which is what separates "my instrument is
+silent" from "my instrument is dead".
+
+
 ### `pipestatus` protects the verdict; nothing protects the denominator
 
 The truncation table above is about reading a *verdict* through a stage that can drop it. There
@@ -2220,6 +2478,83 @@ are a `{@const}`, the fifth an each index inside a template literal, which the h
 walker had no arm for. Both are the same defect: **a name test needs an enumeration and a scope
 test does not**, so every shape the enumerator's author did not think of is a silent miss.
 
+### A success test with no denominator in it reads "nothing yet" as "went well"
+
+Three instruments, two people, one afternoon. Each test is *correct* on a non-empty input, which
+is why none of them looks wrong when you re-read it:
+
+| the test | what was empty | what it reported |
+|---|---|---|
+| `pending == 0` over `statusCheckRollup` | a PR pushed to seconds earlier had **0** checks registered | `ALL GREEN` |
+| `pgrep -f "cargo build"` in a wait loop | cargo had not launched — the command starts with `git checkout` | fell straight through and staged the **previous** build as the base arm |
+| two output hashes compared | both compilers threw, so both hashes were the same *error* hash | `match`, and `MOVED = 0` |
+
+The defect is not truncation and not a wrong comparison: the criterion never asks how many things
+it looked at. The three repairs are one repair in three spellings — require `total > 25` beside
+`pending == 0`; wait on the build's own `Finished` line rather than on a process being visible;
+print `live-units / dead-units / total` and refuse to score a dead unit as agreement. The
+superseded-run hazard above (`group_by(.name) | max_by(.startedAt)`) is the same shape once more,
+with "runs per check name" as the denominator.
+
+**A fabricated zero contains nothing that tells you to look again; an honest blank does.** One
+missing esbuild type-strip produced `ORACLE-THREW` on one instrument and `MOVED = 0` on the other
+— same defect, and only the first is recoverable. Prefer an instrument that can say `UNMEASURED`
+over one that folds an unmeasurable unit into agreement.
+
+### The cell that kills an explanation is usually the one that PASSES
+
+A grid assembled from the cells a defect breaks cannot narrow to one cause, because every
+candidate cause predicts those cells. It is the cells a candidate says should be **green** that
+discriminate. Measured against one defect — `AssignSites` reporting a constant column for a
+computed-key assignment chain — three named candidates, all consistent with the symptom:
+
+| candidate | killed by |
+|---|---|
+| ordered consumption of same-shaped sites is broken | `const r = (o.a = {}); const s = (o.a = {});` — byte-identical text twice — is **EQ** |
+| a conjunction of key-collapse and nesting | `computed depth=2` (no inner rewrite at all) is DIFF and `static depth=5` is **EQ** |
+| `location()`'s `static_path` is `None` for a computed key, so `take` misses and `unwrap_or_else` falls back | nothing in the grid — see below |
+
+**The third could not be killed by any cell**, because the fallback and the real cause — the site
+list is rebuilt each `rewrite_batched` pass, so pass 2 hands out site 0 again — *both* predict a
+constant column. Two mechanisms with one observable are not separable by adding inputs; only
+reading the inside separates them. Widening a grid and instrumenting are not substitutes with
+different costs, they have different preconditions.
+
+This is the same hole as "a grid of failing cells cannot regress", seen from its other exit: there
+you lose regression detection, here you lose hypothesis discrimination.
+
+And the procedural half, which cost a build: **to show a branch was NOT reached you must first
+arrange a line that prints when it IS.** Instrumenting `take` and its `used` transitions cannot
+distinguish "fell into the fallback" from "the predicate was false" — in both cases nothing
+happens inside `take`. Silence is also what instrumentation that never compiled looks like.
+
+### A true observation counted as an independent fault
+
+Two people made the same leap on the same defect inside an hour, and both started from something
+that was **correct**:
+
+| observation (true) | inference (false) |
+|---|---|
+| the reported column never advances | therefore this path never reads the site list |
+| the site list is rebuilt every rewrite pass | therefore consumption state must be carried across passes |
+
+Neither implication holds. A path can read the list correctly and still return a constant if it
+restarts; a rebuilt list is harmless as long as each pass rescans the source in the order the walk
+consumes it. The cause was one thing — the walk is post-order (`walk::walk_assignment_expression`
+runs first), so in a chain the visit order is the reverse of the source order the site list is in
+— and reserving the site on the way *down* fixed every depth from 2 to 5. The second "fault"
+evaporated, and the fix for it would have been a change with no cell able to ablate it.
+
+This sits one step short of "a plausible mechanism is not the cause" and is worse in one way: a
+false observation dies under a check, a true one does not. Ask what an observation **entails**,
+separately from whether it is true — and write the entailment down as a prediction, because that
+is what makes the extra fix falsifiable instead of prudent.
+
+Upstream has no counterpart to that state at all — it reads `locate_node(left)` off the node — so
+"does the port have every condition upstream has" cannot find this class. rsvelte introduced an
+ordering dependency upstream does not have and got its direction wrong; `build_bind_this`'s `seen`
+is the mirror image, where upstream has the ordering and the port dropped it.
+
 ### Nothing is always spelled as something, and the two ends of a measurement spell it differently
 
 The truncation table records tools that manufacture a datum — `|| echo 0`, a `comm` against an
@@ -2233,6 +2568,7 @@ failure and a different spelling. Collected on one day:
 | a workflow run that never started | no check line at all, which reads as "not required here" |
 | a job still waiting on `needs:` | **nothing** — it is not a check-run yet, so it is absent from `pending` as well as from `total_count`, and a poller reading `pending == 0` calls the run finished |
 | a cancelled shard under a rollup | `FAILURE`, indistinguishable from a real regression |
+| a query whose key silently matches nothing | `total_count=0`, a well-formed answer to a question the API never asked — an **abbreviated** commit SHA passed to `?head_sha=` matches no run, and the full SHA returns 10 |
 
 Two of these fake a **value** and two fake a **verdict**, and that is the useful split: a faked
 value is caught by printing the carrier beside the number (`mechanism | carrier | result`, with
@@ -2309,6 +2645,25 @@ the answer becomes `MOVED 2`, both of them the file the issue names. It is worth
 residue too: 110 of the 923 still fail to compile in both arms for reasons both compilers agree
 on, so the module sweep's live population is 813 — a number that belongs in the report, because
 "923 files swept" and "813 files could have moved" are different claims.
+
+### An absent submodule appears only as a smaller denominator
+
+`corpus-sources.json` lists 104 sources and a linked git worktree checks out **none** of
+them. Measured the same day on two trees of one repository: the main checkout
+`populated=104 EMPTY=0`, a campaign worktree `populated=1 EMPTY=103` — the one being
+`compatibility/pattern-corpus`, which is checked in rather than a submodule. A sweep over
+an empty submodule raises nothing: the files are not `ABSENT`, they are simply not
+enumerated, so the run prints a smaller number and looks entirely normal. Three `MOVED`
+results were reported that way and retracted.
+
+The sharpening is that **the population field was written and still failed**. The figure
+`7,142 files` was *true*; what it did not say is that 7,142 is 8 of 104 sources — a true
+observation costing more than a false one would have, because a false one dies under a
+check. So the printed field cannot be the size of what you counted; it has to be **the
+names of what you could not count**: one `EMPTY <path>` line per zero-file source, derived
+from the manifest by set difference. Ninety-six such lines are unmissable. The number
+7,142 is not.
+
 
 ### Working with Subagents
 
