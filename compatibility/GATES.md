@@ -207,7 +207,7 @@ samples) — see `AGENTS.md` § "Generated shape matrix" and issue #2281.
 | 3 | Compiler warning positions | multiset of `code@line:col` | warning **end** span | [S] |
 | 4 | Compiler **error** parity | `error.json` `code`, `message`, `start`, `end`, `frame` | `filename`; the NAPI entries the corpus does not call; a missing artifact scored `match` until the per-tree precondition | [D] |
 | 5 | Generated shape matrix | per-case × target JS text + warning `code` multiset, or error `code` where official rejects | neither output is parsed — identical **non-JavaScript** scores `match`; CSS; warning **position**; error **message** and **position**; multi-directive and ancestry rules; whether a folded constant is the *right* value | [D] |
-| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout; whitespace inside a statement; anything about an error both sides raise; how the port decided a token was code | [S] [D] |
+| 6 | svelte2tsx TSX text parity | per-component TSX text, oxfmt-normalized | `exportedNames` / `events`; TSX line+column layout; whitespace inside a statement; anything about an error both sides raise; how the port decided a token was code; whether an output it scores `match` is TypeScript at all (6j) | [S] [D] |
 | 7 | svelte2tsx source map | structural invariants and corpus-wide mapped-line coverage on rsvelte's own map | relation between generated text and mapped original text; source index | [D] |
 | 8 | css-prune sweep | `css.code` + `code@line:col` warnings of 1969 generated components | `js.code`; **every element in the grid is a plain `<div>`/`<p>` in one component** | [D] |
 | 9 | Formatter parity (JS corpus) | whole-file bytes vs oxfmt oracle | ids whose oracle file is absent are skipped, uncounted | [D] |
@@ -2180,6 +2180,43 @@ break. Re-measured over all 33,898 manifest components the fix moves 10 files, 9
 official and 0 away, and the broken intermediate scores 1 away — which is the positive control
 for the wider population, not for the fix.
 
+
+### Blind spot 6j — the mirror of `oracle-invalid` had no name, so it had no ratchet
+
+`svelte2tsx-verify.mjs` asked one direction of one question: *is the ORACLE broken* — official's
+TSX unparseable while rsvelte's parses (`oracle-invalid`, a pass, blind spot 6e above). The other
+direction — **official parses and rsvelte's output is not TypeScript** — had no verdict, so it
+fell to `ts-mismatch` and was ratcheted by id alongside ordinary text differences. **[D]**
+Measured on `origin/main` (`c33096604`) by running both implementations on the 22 listed sources
+with the options `svelte2tsx-compile.mjs` passes and applying the gate's own `oxfmtParses` to each
+side's output: **3 of the 20 `ts-mismatch` entries were rsvelte emitting text no TS parser
+accepts** — `ha-fusion/src/routes/+layout.svelte` and
+`mathesar/…/new-column-cell/NewColumnCell.svelte` (`Expected function body`), and
+`svelte-virtuallists/src/lib/VirtualListNew.svelte` (`Unexpected token`). The official side parses
+on all 20. Because the ratchet key is the id, a newly unparseable output on any already-listed
+component would have been suppressed.
+
+The predicate's *name* is what hid it. `oracle-invalid` says which side it found broken and never
+prompts the question "what is it called when the other side is". Two of the three turned out to be
+one mechanism, so the class was also under-counted while it was unnamed: an element carrying
+`slot=` inside a component went through a second attribute emitter, which wrote a `use:` action as
+an entry *inside* the props object and a transition as `ensureTransition(f)(tag, {})` — inventory
+row 28.
+
+Closed by a separate `output-unparseable` verdict with its own shrink-only ratchet
+(`compatibility/svelte2tsx-unparseable-known-failures.json`, 1 entry). A separate file rather than
+a verdict-qualified key in the existing one, for the reason the compiler-error gates keep `start`
+and `end` apart: an entry listed for one class suppresses everything its key cannot tell apart.
+The extra cost is zero `oxfmtParses` spawns — the `oracle-invalid` test already computed both
+sides' parseability and threw one of the two answers away.
+
+**What it still cannot see is the same shape one level out.** The verdict is computed only where
+the two texts already differ, so it is a property of the *ratcheted* population, not of the
+corpus: an id whose output is unparseable on both sides, or unparseable while byte-equal to
+official's, is scored `match` and never reaches the parse call. Gate 19 is the compiler's answer
+to that question and svelte2tsx has no counterpart — **unmeasured** how many of the 33,898
+components' TSX would fail `oxfmtParses` outside the ratchet.
+
 ---
 
 ## 7. svelte2tsx source map
@@ -2194,6 +2231,25 @@ calibrate. Official's map serves as a *veto*: if it violates an invariant, the e
 **The seven invariants** (`sourcemap.mjs:102-157`): decodable VLQ; no more mapping lines than
 generated lines; generated columns sorted within a line; no 3+ "stalled copy run"; generated
 column in bounds; original line in bounds; original column in bounds.
+
+### Where this gate sits in the family, which is one rung below idempotency
+
+The parity a diff would assert is not merely hard here, it is **empty**. Measured over the
+13,464 corpus components for which both tools return a map
+(`KNOWN-FAILURES.md#svelte2tsx-map-known-failures`): `mappings` byte-identical **0 of 13,464**,
+decoded segment sets identical **0 of 13,464**, `originalPositionFor` identical at every
+generated position **0 of a 245-component sample**, and per-generated-line sets of referenced
+original lines identical **4 of the same 245**. A parity ratchet would therefore start at ~100%
+of the corpus and gate nothing — that is the measurement behind "official is used only to
+calibrate", not a preference.
+
+So this is the second gate here whose subject is a **property of rsvelte's own output** rather
+than a comparison, the other being transform idempotency. It is one rung weaker. Idempotency is
+a *necessary* condition — a correct compiler is idempotent on that step, so a violation is a
+defect. Well-formedness of a map is **not even that**: a map can satisfy all seven invariants
+and point everywhere wrong (blind spot 7b measures exactly that, with two hand-written maps the
+gate accepts). Read a green here as "nothing is structurally broken", never as "the map is
+right".
 
 ### Blind spot 7a — closed: corpus-wide mapped-line coverage floor (#2453)
 
@@ -5372,6 +5428,12 @@ whose oracle is the other implementation is only as good as its independent expe
 | [19](#19-where-does-a-keywords-source-map-anchor-go--d-defended-at-degree-2) | Where does a keyword's source-map anchor go? | 2 | **[D]** | defended at degree 2 |
 | [20](#20-what-does-a--reactive-statement-assign--d-closed) | What does a `$:` reactive statement assign? | 2 | **[D]** | closed |
 | [21](#21-does-this-write-target-resolve-to-the-components-binding-or-to-a-shadow--d) | Does this write target resolve to the component's binding, or to a shadow? | 44 rewrite passes, 8 scope-aware | **[D]** | 4 ports closed at degree 1 |
+| [28](#28-how-is-an-elements-attribute-list-rendered--d) | How is an element's attribute list rendered? | 2 emitters (+2 copies of `action_arguments`) | **[D]** | 1 defect open |
+| [29](#29-is-a-name-inside-a-named-slots-body-reactive--d) | Is a name inside a named slot's body reactive? | 2 (phase 2 scope fork, phase 3 name lookup) | **[D]** | open |
+
+**Rows 22–27 have bodies below and no line in this table** — measured 2026-09-02 by
+enumerating the `#### <n>.` headings against the table's own `[n]` links. The index is the
+stale half, not the inventory: read the bodies for the count.
 
 ---
 
@@ -6872,6 +6934,97 @@ Degree 3 is worth reaching for whenever the decision is cheap to recompute, beca
 corpus you already have into a detector for this class **at whatever size it happens to be**.
 
 <a id="ast-equivalence"></a>
+
+
+#### 28. How is an element's attribute list rendered? — [D]
+
+**Upstream:** one `Attribute.ts` (`packages/svelte2tsx/src/htmlxtojsx_v2/nodes/Attribute.ts`).
+`handleAttribute` is called from the element handler and from the component handler alike, so
+`numberOnlyAttributes`, the quoting rules and the shorthand rules are decided in one place
+regardless of what the element is nested inside.
+
+**Ports.** rsvelte has two, and they are not two spellings of one function — they emit different
+*types*:
+
+- `append_attribute_node_segments`
+  (`template/attributes/attribute.rs:476`) builds `Seg`s, so it carries source positions into the
+  map. This is the element path.
+- `format_attribute_node` (`same file:37`) returns a `String`. Four call sites reach it
+  (`attributes/mod.rs:336`, `nodes/inline_component.rs:932`, `nodes/slot_element.rs:297`,
+  `nodes/component_slots.rs:848`), and the last of those is a **regular element** — one carrying
+  `slot=` inside a component, which `component_slots.rs` renders itself instead of handing to
+  `handle_regular_element`.
+
+So the same `<button tabindex="0" use:a transition:t>` is rendered by one emitter at top level and
+by the other when it carries `slot="x"`. **[D]** — four divergences from official, all on that
+single condition, all measured on 2026-09-02:
+
+| what the string emitter did | official |
+|---|---|
+| wrote a `use:` action as an entry inside the props object | `const $$action_0 = …` before the `createElement` |
+| wrote a transition as `ensureTransition(f)(tag, {})` inside the props object | a call after the `createElement` |
+| gave `$$action_N` no enclosing block | one block per element |
+| emitted `tabindex="0"` as `` `0` `` | a bare number (`numberOnlyAttributes`) |
+
+The first two produce text no TypeScript parser accepts, which is how the class was found (blind
+spot 6j) rather than by anyone reading the two emitters. **The duplication is not closed.**
+Routing named-slot elements through `build_directive_prefix_suffix` and porting
+`needsNumberConversion` into `format_attribute_node` fixes these four; the second emitter, its
+four call sites and every other rule `Attribute.ts` decides once remain two implementations with
+nothing comparing them. `action_arguments` is a smaller instance inside the same file set — it was
+duplicated in `nodes/element.rs` and `nodes/special_element.rs`, and only the first copy was
+folded into `attributes/directive_suffix.rs:102`; `special_element.rs:396` still carries its own.
+
+**What a closing test looks like.** Not a corpus run: the two emitters return different types, so
+the comparable surface is their *text*. The template is § *The one place this is already
+defended* — feed one attribute list to both and pin the expected string independently, so a pair
+that is wrong in the same way cannot pass.
+
+#### 29. Is a name inside a named slot's body reactive? — [D]
+
+**Upstream:** one `Component` visitor in `phases/scope.js`, which builds a named slot's body scope
+as `node.metadata.scopes[slot_name] = context.state.scope.child()` — a child of the **component's
+own** scope, not of the `let:` scope. A `let:` name is therefore *global* inside a `slot="…"`
+child, and the reactivity question about it is answered the same way as for any other free name.
+
+**Ports.** rsvelte forks the scope the same way in phase 2
+(`2_analyze/scope_builder.rs::visit_component_children:2925`), and then answers the reactivity
+question again in phase 3: `expression_has_reactive_state`
+(`3_transform/client/visitors/shared/utils.rs:4685`) → `identifier_has_reactive_state` (`:4814`),
+whose positional narrowing `by_position` (`:4861-4868`) **filters `BindingKind::Let` out** and
+whose surviving lookups are keyed by name (`context.state.transform.get(name)`, `:4883`). The
+phase-2 answer is correct and the phase-3 lookup does not consult it.
+
+**The exclusion carries a comment stating its reason** — "`let:` bindings are excluded: their
+reactivity is decided by whether the directive's transform is installed … not by the binding
+itself" — which is the shape this file warns about above: a comment asserting fidelity reads as a
+citation. It is right about the `let:` directive's own scope and says nothing about a named slot's
+body, where upstream has re-parented the scope out from under the directive.
+
+**[D]** — named input:
+
+```svelte
+<M let:options={db}>
+  <span slot="title">{db.name}</span>
+</M>
+```
+
+official emits `span.textContent = db.name;`, rsvelte
+`$.template_effect(() => $.set_text(text, db.name));`. Measured on a 9-case × 4-target grid:
+**`EQ 32 | DIFF 4`** — `named-slot/text` and `named-slot/attr` on `client` and `client-dev` only.
+**All four `server` cells are EQ**, which locates the defect in the client lowering rather than in
+the shared analysis.
+
+**One hypothesis is falsified, and it is recorded because it is the cheap wrong answer.** Routing
+`is_pure_node`'s `find_binding_any_scope` through `get_binding` does **not** move this grid: the
+two arms differ by binary hash and the grid stays `EQ 32 | DIFF 4`. It is also a no-op everywhere
+else — **0 changed units over 139,252 (4 targets)**, measured by rsvelte-75 — so it was withdrawn
+rather than shipped, even though it is the spelling that matches upstream. The grid alone could
+not have said that: a change can leave one grid still and move a corpus, and the two questions
+take two measurements.
+
+**Unmeasured:** the blast radius of making the `let:` transform scope-aware. Two corpus entries
+reproduce this, so nobody has priced the fix.
 
 ## AST equivalence — what the gates compare
 
