@@ -4537,8 +4537,9 @@ it loads, and every assertion then measures a binary that predates the change un
 manifest. Axes: `modern` (`parse(src, { modern: true })`), `legacy` (`parse(src)` — the default
 shape), and `loose` (seven inline sources). Both sides are compared after
 `JSON.parse(JSON.stringify(...))`. Shrink-only ratchet
-`compatibility/parse-ast-known-failures.json`, 480 keys, justified per cluster in the paired
-`.md`. Runs as a step in the `corpus` job (~50s over 28,208 compared pairs).
+`compatibility/parse-ast-known-failures.json` — count the JSON, which is primary; this sentence
+has carried 480 while the file held 301 — justified per cluster in the paired `.md`. Runs as a
+step in the `corpus` job (~50s over 28,208 compared pairs).
 
 **Why it exists.** `parse()` is a documented export of `svelte/compiler`, distinct from
 `compile()`, and nothing here compared its return value to official's. It is the
@@ -4547,8 +4548,10 @@ for want of inputs: the pipeline had 14,331 components and never called the func
 
 **[D] The comparator manufactures nothing.** Running the gate's own `diffKeys` with the
 **official** compiler on both sides of the same population produces **0 keys from 28,178
-self-compared pairs**, so all 652 listed keys are attributable to rsvelte's side rather than to
-the harness. Two failure directions were also driven: deleting `modern::Root#span` from the
+self-compared pairs**, so every listed key is attributable to rsvelte's side rather than to
+the harness (the run that produced this was the 652-key first baseline; the conclusion is about
+the comparator, not about that number). Two failure directions were also driven: deleting
+`modern::Root#span` from the
 ratchet exits 1 with `NEW divergence (12,324 entries)`, and adding a key that no longer diverges
 exits 1 with `listed key no longer diverges`; restoring the file returns exit 0 and a
 byte-identical tree.
@@ -5458,6 +5461,64 @@ unattributed against 423 attributed**. The ~20 ratchets absent from both columns
 Read those `n` in the ratchet's own key units and not as defects: `lsp-known-failures.json`
 alone carries two conversions, `aggregate:` at 5.96 entries per diverging file and
 `differential:`/`expected:` at 1.87 per (unit, method, phase).
+
+Those six numbers are a measurement of `fd72d98f1` and nothing re-derives them, so read the
+live answer out of gate 43 below rather than out of this paragraph — it is the artifact that
+owns the question, and `compatibility/attribution-pending.json` is the list in machine-readable
+form. On `5dc32eac2` it is **five** ratchets and 24,606 entries (`lsp` 23,746, `fmt` 524,
+`parse-ast` 301, `client-dev` 24, `client` 11); `svelte2tsx-unparseable-known-failures.json`
+reached 0 and left the column, which is the terminal state this document keeps having to
+describe in prose.
+
+## 43. Attribution of ratchet entries — `scripts/ci/attribution-check.mjs`
+
+**Unit.** One ratchet JSON, and inside it one row of the `Attribution of \`<file>\`:` table that
+names it. Every ratchet with entries must carry exactly one block; the block's `n` column must sum
+to the JSON's length; each row must cite either a path under `upstream_issues/` that exists on disk
+or the literal `deliberate-divergences` (which gate 42 separately holds to naming a test). An empty
+ratchet must carry no block, and a block naming a file that is not a ratchet fails. Two modes:
+the default is the DoD and stays red while `compatibility/attribution-pending.json` is non-empty;
+`--gate-known` — the one CI runs — drops **exactly one question**, "is this ratchet's attribution
+finished yet", for the ratchets that file names: it exempts a missing block and a table that covers
+only some of the entries, and nothing else. A table claiming MORE entries than the ratchet holds is
+never exempt — that is the shape that shipped through #4191 — and a pending ratchet whose table
+becomes complete must leave the list in the same change. Hard gate, no ratchet of its own. `pnpm run
+check:attribution` / `check:attribution-known`, and 19 controls under `pnpm run
+test:attribution-check`.
+
+The partial exemption is not slack, it is the middle state made legal. The first cluster of a
+23,746-entry ratchet is filed long before the last, and requiring a complete table before any row
+could be written would make a partial table *worse* than no table — which is exactly backwards for
+a document whose purpose is to record where each entry is answered.
+
+**Why it exists, and why the pending list is not a fourth end state.** Three end states are
+allowed for a listed entry — it is gone, it is attributed to a filed upstream report, or it is
+attributed to a deliberate divergence — and an entry that is rsvelte's own unfixed defect has only
+the first. The pending list records that a ratchet has not been *placed* in one of the three, which
+is why the default mode keeps failing on it; measured on `5dc32eac2`, 24,606 entries across five
+ratchets sit there, and the self-compare control inside gate 39 (`0 keys from 28,178 self-compared
+pairs`) is what says 301 of them have no upstream target to name. Writing a table for those would
+not satisfy the requirement, it would fabricate the target column.
+
+**[D] and positive control.** The gate was written before it was wired, and in the interval a real
+defect shipped: #4191 retired one `fmt-oracle-excluded.json` entry, deleted the prose bullet and
+left the table's `n` at 4, so the table asserted 26 against a ratchet of 25. `known-failures-md-check`
+(C2) is wired in three places and **does not read attribution tables at all**, so both doc checks
+returned `EXIT=0` — correctly, about a different question. `--gate-known` reports that defect on
+the current tree, which is the control that says exempting the pending list did not exempt the
+thing the flag was built to catch. The self-test additionally pins both directions of the exemption:
+the same tree passes with `--gate-known` + a pending entry and fails with either one removed.
+
+**[S] What it does not look at.** It never opens the cited `upstream_issues/` report, so a citation
+that exists but describes a different defect passes — the "a live but wrong citation never 404s"
+shape, one level up from a path check. It cannot tell whether an `n` is apportioned to the right
+cluster: only the sum is compared, so moving 10 entries between two rows of the same table is
+invisible. It has no view of an entry that should be listed and is not, because its population is
+the ratchets on disk. And `--gate-known`'s exemption is per **file**, not per entry, so a ratchet
+on the pending list contributes nothing to any of the other checks either — a partial table for a
+pending ratchet is neither required nor validated.
+
+---
 
 ## Adding a gate, or a row here
 

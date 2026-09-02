@@ -36,6 +36,16 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const DIR = process.env.ATTRIBUTION_DIR || path.join(ROOT, 'compatibility');
 const ANCHOR = 'deliberate-divergences';
 
+// `--gate-known` drops ONE question — "does every ratchet have a block yet" — and keeps
+// every other one. It exists so the structural half (a table whose `n` no longer sums to
+// its JSON, a target that does not exist, a block for a ratchet that is empty) can be
+// gated in CI today, while the backlog of ratchets with no block at all is still open.
+// The default mode is the DoD and stays red until `attribution-pending.json` is empty; the
+// flag's name is the claim about what it does not look at.
+const GATE_KNOWN = process.argv.includes('--gate-known');
+const PENDING_FILE = path.join(DIR, 'attribution-pending.json');
+const pending = fs.existsSync(PENDING_FILE) ? JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')) : [];
+
 const problems = [];
 const fail = (m) => problems.push(m);
 
@@ -93,16 +103,33 @@ for (const f of ratchets) {
 	}
 	const b = blocks.get(f);
 	if (!b) {
-		fail(`${f} has ${n} listed entr${n === 1 ? 'y' : 'ies'} and no \`Attribution of \\\`${f}\\\`:\` block`);
+		if (!(GATE_KNOWN && pending.includes(f))) {
+			fail(`${f} has ${n} listed entr${n === 1 ? 'y' : 'ies'} and no \`Attribution of \\\`${f}\\\`:\` block`);
+		}
 		continue;
 	}
 	const sum = b.rows.reduce((a, r) => a + r.n, 0);
+	// Two-sided, like every ratchet here: a file whose table is COMPLETE must leave the
+	// pending list in the same change, or the list stops describing the backlog. A partial
+	// table on a pending file is the expected middle state — the first cluster of a
+	// 23,746-entry ratchet is filed long before the last — so it is not an error, and
+	// requiring completeness before any row could be written would make a partial table
+	// worse than none.
+	if (pending.includes(f) && sum >= n) {
+		fail(`${f}'s attribution is complete but it is still listed in attribution-pending.json — remove it`);
+	}
 	if (sum < n) {
 		// A partial table is the honest shape while some clusters are still being
 		// filed, so say which entries are uncovered rather than reporting a
 		// bookkeeping mismatch — the two read very differently to whoever is next.
-		fail(`${b.file}:${b.line}  ${f}: ${sum} of ${n} entries attributed, ${n - sum} carry no target`);
+		// `--gate-known` exempts a pending ratchet from this for the same reason it
+		// exempts a missing block: the backlog is the thing it is not asking about.
+		if (!(GATE_KNOWN && pending.includes(f))) {
+			fail(`${b.file}:${b.line}  ${f}: ${sum} of ${n} entries attributed, ${n - sum} carry no target`);
+		}
 	} else if (sum > n) {
+		// Never exempt: a table claiming more entries than the ratchet holds is wrong
+		// whatever the backlog looks like, and it is the shape that shipped through #4191.
 		fail(`${b.file}:${b.line}  attribution of ${f} sums to ${sum}, the ratchet holds only ${n}`);
 	}
 	for (const r of b.rows) {
@@ -127,17 +154,30 @@ for (const k of blocks.keys()) {
 	if (!ratchets.includes(k)) fail(`${blocks.get(k).file}: attribution block names \`${k}\`, which is not a ratchet`);
 }
 
+for (const p of pending) {
+	if (!ratchets.includes(p)) fail(`attribution-pending.json names \`${p}\`, which is not a ratchet`);
+	else if (count(JSON.parse(fs.readFileSync(path.join(DIR, p), 'utf8'))) === 0)
+		fail(`attribution-pending.json names \`${p}\`, which is empty — remove it`);
+}
+
 if (problems.length) {
 	console.error(problems.join('\n'));
 	console.error(
-		`\n[attribution-check] ${problems.length} problem(s). Every listed ratchet entry must be eliminated,\n` +
-			'attributed to a filed `upstream_issues/` report, or attributed to `deliberate-divergences`\n' +
-			'(which must in turn be pinned by a test). Prose without a target is not an attribution.',
+		GATE_KNOWN
+			? `\n[attribution-check --gate-known] ${problems.length} problem(s) in the attribution that EXISTS.\n` +
+					'This mode does not ask whether every ratchet has a block yet — the ratchets listed in\n' +
+					'`attribution-pending.json` are exempt from that one question and from nothing else.'
+			: `\n[attribution-check] ${problems.length} problem(s). Every listed ratchet entry must be eliminated,\n` +
+					'attributed to a filed `upstream_issues/` report, or attributed to `deliberate-divergences`\n' +
+					'(which must in turn be pinned by a test). Prose without a target is not an attribution.',
 	);
 	process.exit(1);
 }
 
 console.log(
-	`[attribution-check] ${ratchets.length} ratchets: ${empty} empty, ` +
-		`${ratchets.length - empty} carrying ${attributed} attributed entries.`,
+	`[attribution-check${GATE_KNOWN ? ' --gate-known' : ''}] ${ratchets.length} ratchets: ${empty} empty, ` +
+		`${ratchets.length - empty} carrying ${attributed} attributed entries` +
+		(GATE_KNOWN && pending.length
+			? `; ${pending.length} still awaiting one (${pending.join(', ')}) — this mode does not gate that.`
+			: '.'),
 );
