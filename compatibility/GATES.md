@@ -885,6 +885,105 @@ only ones with live discriminating power.
 **Evidence [D]:** the file counts and the key distribution above are measured; the suppression
 follows from the key's own definition at `ratchet.mjs:55`.
 
+
+### Blind spot 27p — a rejected request and an unchanged document are the same empty response [D]
+
+`on_formatting` answers a params deserialization failure with `respond_no_edits`
+(`server.rs:736-742`), and `worker.rs:659` states the same rule for the pass below it —
+"Formatting is never an error to the client: a failure yields no edits". So four distinct
+outcomes — the session has no formatter config, the formatter panicked, the formatter errored,
+and the document was already formatted — all reach the client as `[]`. The ratchet key records
+the response, so **it cannot say which of the four produced it**, and a malformed request is
+indistinguishable from agreement about a document that needs no change.
+
+That is not hypothetical here: the harness's own `textDocument/formatting` request omits
+`options`, which `lsp-types` declares without `#[serde(default)]`
+(`DocumentFormattingParams`, `formatting.rs:27-33`), because `suites.mjs:150-179` adds extra
+params only for `completion` / `hover` / `linkedEditingRange` (position), `selectionRange`
+(positions) and `codeAction` (range + context). Measured against the debug server on the ten
+`plugin-format-*` fixture documents' text:
+
+| request | response | stderr |
+|---|---|---|
+| `{textDocument}` — what the gate sends | `[]` | ``textDocument/formatting: missing field `options` `` |
+| `{textDocument, options}` | one edit, `newText: "unformatted\n"` | — |
+
+The twenty `differential:fixtures/plugin-format-*|textDocument/formatting` entries therefore
+measure the harness, not the compiler, and their recorded payload confirms it: the entry's
+`hash=f411dae2ecdd` is `digest(["item-" + digest(edit)])` over official's single edit, and
+recomputing that chain from the *measured rsvelte* edit reproduces `f411dae2ecdd` exactly — so
+the two edits are byte-identical and supplying `options` retires all twenty rather than
+converting them.
+
+**The key describes a measurement that was not performed.** A ratchet key carries a `|line:col|`
+segment — `documentHighlight`'s read `|0:13|`, `|0:24|`, `|0:9|`, `|0:2|`, `|1:4|` — and that
+segment is `request()`'s third argument, a **label**, not the `position` that went on the wire.
+`suites.mjs` adds a real `position` for `completion` / `hover` / `linkedEditingRange` only, so
+every `documentHighlight` unit states a position it never asked about. This is worse than the
+formatting case: an empty response merely fails to distinguish four causes, whereas a key naming
+a column actively misleads whoever reads it. `prepareRename` (4 cases) and `colorPresentation`
+(3) are the same defect one step further — each declares a `params` object in the fixture
+manifest that `suites.mjs` reads at three sites, all inside the `codeAction` branch, so those
+declarations are never sent either. **Both hold zero ratchet entries, and that zero is not
+coverage**: two servers that both return nothing agree, so an empty bucket here is a statement
+about the population, not an observation about the mechanism.
+
+**And the ten formatting fixtures cannot express the axis they were written for.** Their
+document is `entry.source` verbatim, which for all ten is the eleven bytes `unformatted` — one
+word. Upstream's ten tests differ only in `expected.engine` (`prettier-config`,
+`prettier-plugin`, `prettier-fallback`, `prettier-options`, `user-prettier-v2`,
+`user-prettier-module`, `builtin-prettier`), i.e. which Prettier resolution path is taken; but
+every engine formats a single word to itself plus a newline, and the digest above shows official
+and rsvelte producing byte-identical edits. So repairing `options` makes these ten *agree*, and
+they will still measure nothing about Prettier-versus-native. Reaching a decision point is not
+being able to tell two rules for it apart.
+
+**Evidence [D]:** the two responses and the stderr line are one measured probe against
+`target/debug/rsvelte-language-server`; the digest reconstruction is arithmetic over the
+committed ratchet; the label-versus-parameter claim is read off `suites.mjs:150-192`. A rate
+table over "does the harness supply this method's required params" was computed and is **not**
+reported, because it does not discriminate — `formatting` and `documentHighlight` are 100% while
+`colorPresentation` and `prepareRename` are 0% in the same group, and those two zeroes may be
+empty denominators rather than agreement.
+
+### Blind spot 27q — the cache cleanup spares exactly the caches that matter [D]
+
+`rsvelte-language-server` digs an overlay cache at whatever project root it is pointed at
+(`CACHE_DIRECTORY = ".rsvelte-language-server"`, `tsgo_overlay.rs:26`), and this gate points it at
+fixtures inside the pinned `submodules/language-tools`. The harness does clean up: `verify.mjs`
+snapshots the caches that exist before the run and, in a `finally`, deletes the ones that appeared
+(`verify.mjs:1120-1135`, `removeNewServerCaches`). A completed run therefore leaves the submodule
+byte-clean — measured, 5 created and 5 removed, `git status --porcelain` empty afterwards.
+
+**The gap is that it deletes only the caches it created.** One that is already present when the run
+starts is classified as pre-existing and spared — by every subsequent run, permanently. So a cache
+that survives once, because a run was interrupted or aborted between creating it and reaching the
+`finally`, is never collected again. That is not hypothetical: one checkout carried a `tsgo/` two
+days older than the run that noticed it, while another was clean, and the difference was whether a
+run had ever been killed part-way.
+
+A survivor is not inert. `build` (`tsgo_overlay.rs:222-258`) calls `create_dir_all` on the shadow
+directory and **never clears it**, rewriting a shadow per `.svelte` it finds — so a shadow whose
+source is gone, renamed, or no longer discovered simply stays. And the generated tsconfig includes
+that directory by **glob**, `"include": ["svelte/**/*", …]` (`write_tsconfig`,
+`tsgo_overlay.rs:963-1001`), so whatever remains is in the next run's program. Nothing in the path,
+the file names or the config records which binary produced them, and there is no `tsBuildInfoFile`
+in this crate (grep returns none; positive control: `rootDirs` is present). **A measurement taken
+after changing the binary can therefore read a projection the previous binary wrote** — the input
+side of the rule that an artifact's name, path and branch never establish what it is.
+
+Delete any surviving cache before measuring across a binary change, and treat "does the answer move
+when it is deleted" as its own measurement.
+
+**Evidence [D]:** the create-and-remove counts, the empty `git status` after a completed run, and
+the globbed `include` are read from one run's own output; the spare-the-pre-existing rule from
+`removeNewServerCaches`, and the never-cleared and not-binary-keyed properties from `build` and
+`write_tsconfig`. **Unmeasured:** whether a stale shadow has ever actually changed a recorded
+answer here, and whether the corpus suite writes the same cache — only the fixture suite was
+observed. And a count of zero untracked directories proves nothing on its own: it is equally what a
+checkout shows *before* a run reaches its first fixture, which is how this was first reported as
+reproducing on one machine and not another.
+
 ---
 
 ## 1. Compiler output parity — `scripts/compat-corpus/verify.mjs`
@@ -5413,7 +5512,9 @@ sample of one tree's output, not an enumeration of the shapes upstream emits.
 
 ## 42. Deliberate-divergence pinning — `scripts/dev/deliberate-divergences-check.mjs`
 
-**Unit.** One `## ` section of `compatibility/deliberate-divergences.md`, 20 of them. The check is
+**Unit.** One section of the `deliberate-divergences` anchor, 25 of them. The document was
+consolidated into `compatibility/GATES.md`, so `locate()` falls back to that anchor and the
+heading it parses is `### `; `compatibility/deliberate-divergences.md` no longer exists. The check is
 that each names at least one repository path that (a) exists on disk and (b) is a test — under a
 `tests/` directory, in `compatibility/pattern-corpus/`, or a `scripts/**/test-*.mjs` harness.
 Run by `ci.yml`'s `Corpus verify baseline-flag contract` job and `pnpm run
@@ -8436,6 +8537,91 @@ the divergence is real, no ratchet holds it, and the only thing standing between
 Remove this entry when upstream subtracts `node.pos`
 (`nodeText.substring(tag.pos - node.pos, tag.end - node.pos)`); rows 2 and 3 both collapse into
 row 1 at that point and the pinned test fails.
+
+### The completion trigger characters include a space
+
+**Pinned by** `crates/rsvelte_language_server/tests/protocol.rs` (the `triggerCharacters`
+assertion, which lists `" "`) and `scripts/compat-lsp/capability-hashes.test.mjs`.
+**Ratchet.** `lsp-known-failures.json`, the
+`/capabilities/completionProvider/triggerCharacters:extra-rsvelte` entry.
+
+Upstream excludes whitespace from `completionProvider.triggerCharacters` and says why
+(`server.ts:299-301`): *"No whitespace because it makes for weird/too many completions of other
+completion providers"*. rsvelte includes `" "`.
+
+That comment is upstream's own product judgement, not an assessment of rsvelte, and the two
+servers do not have the same thing to trade away. rsvelte answers a completion request at a
+position immediately after the space in a start tag with the element's HTML attributes —
+`completions_with_strict_mode("<div ", 5, …)` returns `class`, pinned in
+`crates/rsvelte_language_server/src/completions.rs`. A character absent from this list never
+reaches the server at all, so dropping `" "` would not merely align the advertisement, it would
+make that behaviour unreachable from a real client while the code answering it stayed.
+
+Remove this entry if rsvelte stops serving attribute completions at a bare space, or if upstream
+starts.
+
+### Two `source.fixAll` code-action kinds upstream does not have
+
+**Pinned by** `crates/rsvelte_language_server/tests/protocol.rs` (the `codeActionKinds`
+assertion) and `scripts/compat-lsp/capability-hashes.test.mjs`.
+**Ratchet.** `lsp-known-failures.json`, the
+`/capabilities/codeActionProvider/codeActionKinds:extra-rsvelte` entry.
+
+Under the differential gate's client capabilities upstream advertises six kinds; rsvelte
+advertises those six plus `source.fixAll` and `source.fixAll.rsvelte`. Both are served —
+`FIX_ALL_KIND` is `crates/rsvelte_language_server/src/code_actions.rs` and the tsgo-backed
+`source.fixAll` is handled in `textDocument/codeAction`.
+
+This is the direction a capability difference is allowed to run: the advertisement is wider than
+upstream's because the implementation is. Narrowing it to match would hide working behaviour.
+
+### `workspace.workspaceFolders` is advertised
+
+**Pinned by** `crates/rsvelte_language_server/tests/protocol.rs` (the
+`capabilities["workspace"]["workspaceFolders"]` assertion).
+**Ratchet.** `lsp-known-failures.json`, the `/capabilities/workspace:extra-rsvelte` entry.
+
+Upstream's `initialize` result carries no `workspace` key at all. rsvelte advertises
+`workspaceFolders` with `supported` and `changeNotifications`, and acts on both: the server tracks
+workspace roots and picks an overlay per document by longest matching root.
+
+The entry is `extra-rsvelte` for the whole `workspace` object, so it is one field rather than a
+set difference. As with the code-action kinds, the advertisement is truthful and matching upstream
+would mean withdrawing a capability that works.
+
+### `positionEncoding` is stated rather than defaulted
+
+**Pinned by** `crates/rsvelte_language_server/tests/protocol.rs` (the `positionEncoding`
+assertion).
+**Ratchet.** `lsp-known-failures.json`, the `/capabilities/positionEncoding:extra-rsvelte` entry.
+
+Upstream omits `positionEncoding`; rsvelte sends `"utf-16"`. The LSP default when the field is
+absent **is** `utf-16`, so the two servers agree on the encoding and differ only on whether they
+say so. The gate compares fields, and an absent field and a field holding the default are not the
+same field, so it reports one.
+
+Stating it is deliberate: the tsgo child is negotiated separately to UTF-8 and every internal
+mapping is byte-based, so the editor-facing encoding is a value this server has an opinion about
+rather than one it inherits. There is no behavioural difference to close.
+
+### `diagnosticProvider.identifier` is advertised
+
+**Pinned by** `crates/rsvelte_language_server/tests/protocol.rs` — the `identifier` assertion and,
+in the same test, the comparison of the pulled diagnostics against a direct lint of the same
+source.
+**Ratchet.** `lsp-known-failures.json`, the
+`/capabilities/diagnosticProvider/identifier:extra-rsvelte` entry.
+
+Upstream advertises `diagnosticProvider` without an `identifier`; rsvelte sets it to
+`rsvelte-language-server`. The field is optional in the protocol and lets a client scope
+`previousResultId` per provider, which matters here because the server owns `.ts`/`.js` documents
+alongside `.svelte` ones rather than running beside another provider.
+
+The pin is deliberately two assertions and not one. Advertising a string nothing backs is the
+failure mode this document already records for `completions.emmet` — a declared capability with
+no implementation — so the entry that fixes the advertisement in place is paired with the one
+that shows diagnostics are actually answered.
+
 
 <a id="README"></a>
 
