@@ -15,6 +15,7 @@ import { createHash } from "crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
 import { arch as nodeArch, cpus, loadavg as osLoadAvg, platform as nodePlatform, tmpdir } from "os";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "fs";
+import { pgoEnv } from "./pgo-env.mjs";
 import { join, dirname, relative, basename, isAbsolute, sep } from "path";
 import { fileURLToPath } from "url";
 import { format as oxfmtFormat } from "oxfmt";
@@ -358,6 +359,7 @@ async function benchmarkRust(
     const proc = spawn("cargo", args, {
       cwd: join(__dirname, "../.."),
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...pgoEnv(binName) },
     });
 
     let stdout = "";
