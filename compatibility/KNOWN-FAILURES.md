@@ -4903,9 +4903,49 @@ ours are different facts, and writing one as the other puts a sign on an unmeasu
 Either one blocks its entry from an attribution table, and the checker reports how many entries
 are blocked rather than folding them into a pass — a blank and a zero render the same.
 
-The scope of these figures: 151 entries from one of sixteen corpus shards, so the *counts* are not
-convertible into ratchet-wide ones and none of them has been. What is established is structural,
-and on the corpus half only.
+The scope of that table is 151 entries from one of sixteen corpus shards. It is now also measured
+ratchet-wide, from the complete 17-artifact set of the `2026-09-02T20:48Z` `lsp-corpus` run. At
+`46f07b412`, that run's `projectRevision` carried the same `lsp-known-failures.json`,
+`mechanism.mjs` and `merge-current.mjs` blobs as `main`, so the id set could not have moved and
+re-baselining shrank nothing: the control run reported `23746 current, 0 new, 0 stale` and the
+ratchet came back byte-identical. #4221 then retired four entries, and the four were dropped from
+the sidecar by set difference against the rebased ratchet — which is why the figures below are
+23,742 rather than the 23,746 that control quotes.
+
+All **23,742** entries carry a set, at a mean of **7.36** labels each — 1 to 28, with 3,606 entries
+(15.2%) carrying exactly one. The structural claim survives the change of population and the
+magnitudes do not:
+
+| label | appears on | sole label on |
+|---|---|---|
+| `rsvelte-empty` | 10602 | 148 |
+| `completion-item-set-extra-ts` | 7262 | **0** |
+| `completion-text-edit-range-end` | 7262 | **0** |
+| `completion-command-presence-rsvelte-only` | 7260 | **0** |
+| `completion-item-set-missing-mixed` | 7212 | **0** |
+| `completion-item-set-extra-html` | 7024 | **0** |
+| `completion-item-set-missing-ts` | 7018 | **0** |
+| `rsvelte-empty-import-only` | 6720 | 982 |
+| `official-empty` | 6682 | 4 |
+
+**10 of the 72 labels are ever the sole label of an entry** (the shard read 9 of 62), and the
+largest completion labels are still zero — repairing any one of them removes no entry from the
+ratchet.
+
+**Two counts of "labels" answer different questions, and the smaller one is the work.** The sidecar
+declares more labels than the artifacts use: **72** are carried by an entry, and because the merge
+only ever adds a label, every other declared label is carried by zero entries and has nothing behind
+it to establish a terminal for. Sizing the terminal work by the declared vocabulary counts a
+vocabulary, not a population — `pnpm run check:lsp-mechanisms` prints the declared count, so it is
+not restated here. Going the other way, a greedy union over the used labels touches every one of
+those entries with **12** labels, and two of them (`rsvelte-empty`,
+`completion-item-set-extra-ts`) already reach 75.2% — so neither the declared vocabulary nor 72 is
+the number of decisions that would move the ratchet either.
+
+`unclassified` is 2,120 entries and is the sole label on 2,116 of them, which is the `differential:`
+and `expected:` half spelled out rather than left blank: the classifier runs on the corpus branch
+only. Those are the entries a terminal cannot be established for without a second classifier, not
+entries awaiting a judgement.
 
 Normalization removes only these non-parity fields and path-specific values:
 
