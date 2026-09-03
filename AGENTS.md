@@ -1451,6 +1451,169 @@ Rules, in the order they are cheap:
    port-vs-port test whose oracle is the other port: both are passed by a fault
    the two halves share.
 
+### A timeout is not an answer, and the cheapest probe spells it as one
+
+`await_id()` returned Python's `None` on timeout and the probe printed it with
+`json.dumps`, which spells `None` as **`null`**. So "official answered `null`" and
+"official did not answer within 60 seconds" came out as the identical line, and the
+first reading was reported. This is the probe-side form of *nothing is always spelled
+as something*: the earlier table collects cases where a missing measurement prints as
+an empty cell or as somebody else's verdict, and this one prints **in the answer's own
+vocabulary**. Print a non-answer as a non-answer — `NO RESPONSE WITHIN 25s (not a null
+result)` — and never through a serializer that has a value for it.
+
+The second half is worse and is what made it stick. The positive control (`<div></div>`,
+which must return ranges) came back with the same `null`, and that was read as "my
+`workspace/configuration` reply is wrong, so the HTML plugin is disabled" — a mechanism
+that is real, findable in the source (`HTMLPlugin.ts:484-489`, `featureEnabled('html
+.linkedEditing.enable')`), and supported by no evidence at all. **A control that fails
+is the moment a plausible mechanism is cheapest to find and least worth trusting**,
+because the same symptom now has two producers and the instrument is one of them.
+
+### `-p <crate>` is not the denominator either
+
+The file already says to state the denominator of a test run and to read a suite's
+names rather than its count. Both are about which *tests* ran. There is a third
+quantity, and adding a variant to a shared type is where it bites: `JsNode` lives in
+`rsvelte_core` and is matched exhaustively in `rsvelte_bindings_support`, so
+`-p rsvelte_core --lib` plus thirteen named targets was green while the workspace did
+not build. What caught it was the pre-commit hook's `cargo clippy --all-targets`, not a
+wider test list — so the fix is not "run more tests", it is: **when the change is to a
+type another crate names, the denominator is `--workspace`.**
+
+### A cleanup keyed on "what I created" leaks a set that perpetuates itself
+
+`verify.mjs` removes the server caches its own run created
+(`removeNewServerCaches(cachesBefore, …)`), so anything already present when the run
+started is classified as pre-existing and spared — and every later run makes the same
+classification. **Whatever survives once is never reclaimed.** The size of the leak is
+therefore proportional not to how many runs there have been but to how many exited
+abnormally, and an abnormal exit is most likely while something is being changed — so
+the moment that creates a survivor is the moment its staleness matters most. The
+survivors are not inert: the shadow tsconfig's `include` is a glob
+(`["svelte/**/*", …]`), so a survivor joins the next run's type program. This is why the
+same gate produced three untracked directories on one machine and none on another; the
+difference was one killed run in the past, not a difference in the gate.
+
+### A two-option question hands over its shared premise unexamined
+
+"Widen the pattern or narrow the ranges" was offered as the two ways to resolve a
+`linkedEditingRange` divergence. Both assume the oracle returns ranges at all. Stating
+the options without stating what they share means the receiver measures the difference
+between them and never the assumption under both. **Write the premise the options share
+in the same message**, so the first thing measured is the thing that can delete the
+question.
+
+### One cell per file cannot see one fragment changing another's print path
+
+A single unparseable fragment drops the whole file from the AST printer to the text
+fallback, so a broken declaration silently rewrites the output of the correct
+declaration next to it — `() => (state = 1)` printed where official prints
+`() => state = 1`, with blank lines moved, none of which is about the construct being
+studied. Cutting the same three cells into their own file made all three arms EQ. An
+18-cell grid with one cell per file was green throughout. The direction is one-way:
+this makes a grid pass where the corpus fails, never the reverse, because every real
+file puts many declarations in one file. When a family's cells are one construct per
+file, its green says nothing about the same constructs sharing a file — and the
+interference is invisible in the output of the fragment that causes it.
+
+### A number written as a literal is a claim, and knowing that does not stop you writing one
+
+Three instances in one afternoon, and the third is the one to keep. A test file's closing line
+said `19 controls pass` where the file ran **22**. The P3 attribution gate's summary said
+`14 carrying 24158 attributed entries` where the tables attribute **418** -- `attributed += n`
+added the whole ratchet for any file holding a block, so one partial table on a 23,746-entry
+ratchet moved the campaign's own progress readout by 58x, in the flattering direction, while the
+per-file line two screens above it printed the right answer all along. Then the commit repairing
+those two **introduced three new literals**: prose reading `23,740 of the 23,746` and
+`covers 6 of 23,746`, in a section where `known-failures-md-check` gates the partition lines and
+gates no prose, three hours before a peer's PR moved the ratchet to 23,744.
+
+The first two are ordinary. The third is the finding: the author was, in that same commit
+message, writing down that a gated half and an ungated half rot separately -- and put three
+ungated numbers into the ungated half. Knowing a rule, and having just typed it, does not arm it.
+
+What arms it is not vigilance but **having no literal to check**. The repair was not to pick the
+right number, it was to write the rule against the artifact instead of against a count: "every
+entry outside the table below", "one for every entry the table does not cover", "over every
+remaining key". The section now contains exactly one occurrence of the ratchet's size -- the
+declaration the checker reads -- verified by changing it and watching the checker name the file,
+the stated number and the JSON's. A count that cannot be written cannot go stale, and that beats
+a count someone promises to re-derive.
+
+### A pre-registered falsification is only as good as its "then" clause
+
+Handing a peer a check to run after a merge, the wording was: "the default mode reports
+5 problems; re-count after this PR lands, and **if the count does not change, my exemption
+list is wrong**." The count did not change -- correctly, because the PR adds a flag and a
+pending list and touches none of the default mode's inputs -- and the exemption list is
+right, because the flagged mode exits 0. **No outcome of that measurement could have said
+anything about the exemption list**, since the count and the list are read by two different
+modes. The pre-registration made a non-discriminating test look like a committed one, which
+is worse than no test: a bare guess invites a check, and a guess with a falsification
+condition attached looks as though it has already survived one.
+
+The check is mechanical and costs one sentence: **name the artifact each half of the "if"
+reads.** If the observation and the conclusion do not share one, the conclusion does not
+follow from the observation whichever way it comes out. And it is the same shape as a
+port-vs-port test whose oracle is the other port -- the form is right and the two halves
+are not independent.
+
+### A flag the tree does not implement is ignored, so the mode you ran is not the mode you typed
+
+`attribution-check.mjs` has two modes: the default one is the DoD and stays red until every
+ratchet entry is attributed, and `--gate-known` asks only about the attribution that exists.
+Typing `--gate-known` against a tree where that PR has not landed runs **the default mode** —
+the script reads its own argv, an unknown flag is not an error, and the red that comes back is
+correct, load-bearing, and about a different question than the one asked. `command grep -n
+'gate-known' scripts/ci/attribution-check.mjs` returning nothing is the whole check.
+
+Two things generalize. **Which tree implements a flag is part of the flag's meaning**: a flag
+added by an unmerged PR reads on `main` as absence, never as error, so "I ran it with the CI
+flag" is a claim about the tree as much as about the command. And the fix is the one already
+recorded for `perf_bench` against `compile_profile` one directory over — an instrument that
+rejects what it does not understand cannot produce this, and a permissive one produces a
+comparison between a mode and itself. The instance is kept because it happened **thirty minutes
+after telling a peer the same thing about the same script**, by the author of that correction:
+quoting a hazard is not defending against it, and knowing which hazard is not either.
+
+### When an empty input means "assume everything", check the output whose default is the opposite
+
+`corpus-compat-job-filter.mjs --changed-files` takes a **path to a list file**, not a list of
+names; `existsSync` turns anything else into `[]` with no error. `:147-149` then reads an empty
+list as "a schedule or dispatch run" and gives every `JOB_TARGETS` job `true`, which is the
+documented, deliberate over-approximation. `:155` computes `lsp-ratchet` as `[].some(…)`, which
+is **`false`**. So one malformed argument fails *open* on every sibling output and *closed* on
+exactly one — and `lsp-ratchet` is the escape hatch that re-admits the 950-job-minute
+`lsp-corpus` job on a pull request, the only event where it is consulted at all (a schedule or
+dispatch already satisfies the first disjunct). A broken argument silently disables the hatch on
+precisely the PR class it exists for, and the comment at `:147` documents only the open
+direction.
+
+Measured four ways on one tree: the ratchet JSON's real path → `lsp-ratchet=true` (positive
+control); a crate in its own Cargo workspace → every output false (negative control); a
+nonexistent path and a bare file name → `lsp-corpus=true, lsp-ratchet=false`. The rule is not
+"validate the argument" — it is that a function with a documented "empty means everything"
+default has to be read output by output, because a `.some()` over the same empty array points
+the other way and inherits none of that comment.
+
+### Two things spelled `hash=`, and the comment describing the other file had both halves backwards
+
+An LSP ratchet key can carry `missing-rsvelte-field[hash=digest(left[key])]`, where the digest is
+of the **value** and an artifact recovers it, or
+`:extra-rsvelte-element[count=N,hash=digest(extraRsvelte.sort())]`, where the digest is of
+identity keys that are themselves `item-<digest(value)>` — doubled, and not preimage-able.
+`diff.mjs`'s comment says the key "keeps the suffix and drops the bracket"; `verify.mjs:462`
+strips `-element`/`-field` and keeps the bracket, so **both halves are inverted**. A comment
+about what a *downstream* stage does with your value is checked by neither file, which is the
+same rot class as a count written into prose.
+
+The measurement is what makes it actionable rather than a warning: of 23,746 keys, **0** carry a
+suffix that would separate the two and **1,880 carry `count=`**, so `count=` is the only
+surviving discriminator and 92% of keys are preimage-able. Written as a bare "the hash has no
+preimage", the note stops the next reader from trying the thing that works nine times in ten —
+**a caution sized to the exception is a false statement about the rule.**
+
 ### A probe filter that discards on BOTH sides reads as agreement
 
 A six-cell reduction reported `EQ` on every cell, and the reduction was correct — the
