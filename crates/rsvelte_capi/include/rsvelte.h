@@ -136,7 +136,9 @@ extern "C" {
 #endif // __cplusplus
 
 /**
- * Library version (matches the `rsvelte_core` crate version).
+ * Library version — this crate's own version. The C ABI follows an
+ * independent `capi-vX.Y.Z` scheme, so it does NOT track `rsvelte_core`
+ * or the npm `@rsvelte/compiler` version.
  *
  * Returns a static, NUL-terminated UTF-8 string. The caller MUST NOT
  * free the returned pointer.

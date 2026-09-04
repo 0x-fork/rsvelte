@@ -41,7 +41,7 @@ library, the static archive (where applicable), and `include/rsvelte.h`.
 #   darwin-arm64, darwin-x64,
 #   linux-x64-gnu, linux-arm64-gnu,
 #   win32-x64-msvc
-VERSION=0.1.1
+VERSION=0.2.0
 TRIPLE=darwin-arm64
 
 curl -L -o rsvelte_capi.tar.gz \
@@ -90,7 +90,7 @@ git dependency in the meantime:
 
 ```toml
 [dependencies]
-rsvelte_capi = { git = "https://github.com/baseballyama/rsvelte", tag = "capi-v0.1.1" }
+rsvelte_capi = { git = "https://github.com/baseballyama/rsvelte", tag = "capi-v0.2.0" }
 ```
 
 ## API at a glance
@@ -102,7 +102,7 @@ typedef struct RsvelteBuf {
   uintptr_t cap;    // reserved for rsvelte_free / rsvelte_free_raw
 } RsvelteBuf;
 
-const char *rsvelte_version(void);                    // static string, do not free
+const char *rsvelte_version(void);                    // this crate's version, not the compiler's; do not free
 void        rsvelte_free(RsvelteBuf buf);             // release any returned buffer (struct-by-value)
 void        rsvelte_free_raw(uint8_t *data,           // out-of-band variant for hosts that can't
                              uintptr_t len,           //   pass structs by value (Ruby Fiddle, etc.)
@@ -161,7 +161,9 @@ Every call returns one of:
 
 `opts_json` is the same shape as the existing NAPI options object
 (camelCase, all fields optional). Pass `NULL` / length 0 to use the
-defaults.
+defaults. An unrecognised key is **rejected** with an
+`Unrecognised compiler option <key>` envelope, mirroring the official
+compiler — 0.1.1 ignored unknown keys silently.
 
 ### Memory ownership
 
@@ -171,7 +173,9 @@ defaults.
   (or `rsvelte_free_raw` for hosts that can't pass structs by value).
 - A zero-initialised buffer (`{NULL, 0, 0}`) is safe to free.
 - `rsvelte_version` returns a pointer into static storage — do **not**
-  free it.
+  free it. It reports this crate's own version (the independent
+  `capi-vX.Y.Z` scheme), not the `rsvelte_core` / `@rsvelte/compiler`
+  version.
 
 ## Examples
 
@@ -240,8 +244,8 @@ intentionally independent from the npm/changeset pipeline that ships
 3. From `main`, tag and push:
 
    ```bash
-   git tag capi-v0.1.1
-   git push origin capi-v0.1.1
+   git tag capi-v0.2.0
+   git push origin capi-v0.2.0
    ```
 
 4. The release workflow builds the five-triple matrix, packages each
