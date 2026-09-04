@@ -1189,6 +1189,17 @@ widens the gap. A run with an idle period is indistinguishable from a finished r
 process-count rule, and the detector was about to launch a six-process release build exactly
 across the three points that decide that experiment's verdict.
 
+**A fourth failed the next day, and it corrects the reading the second one invites.** Row 2
+reads as "`-x` was too strict", so the repair looks like dropping `-x`. Measured on 2026-09-04
+while a peer was mid-commit: `ps -Ao comm=` filtered on `(^|/)(cargo|rustc)$` returned **0** with
+`rustfmt` at 97.2%, and the same sample counted **11** once `rustfmt` and `clippy-driver` joined
+the alternation — 1 of 11 visible, with `-x` already gone. The toolchain's process names are not
+closed by `cargo` and `rustc`: a hook's `cargo fmt` runs as `rustfmt` and `cargo clippy` as
+`clippy-driver`, neither of which contains either word. A pattern's **strictness** and its name
+**set** are two independent ways to read zero, and repairing one leaves the other. What separated
+them was the peer naming a process the detector had not — a detector is calibrated from outside
+itself, which is where the paragraph below arrives from the other three.
+
 Separate **"my instrument is miscalibrated"** from **"my observable cannot answer this
 question"**. The first two were calibration; the third means the only valid signal is the
 peer saying so. All three surfaced because the peer announced a start time — between agents
@@ -2027,6 +2038,24 @@ from **3629 to 8120 calls**. A call count is deterministic; a duration on one ru
 is not. When a profile prints both, the counts are where a hypothesis should start,
 and the timings are what needs the repeated, interleaved measurement.
 
+### A process sample is an instant, and "the box is free" is a claim about an interval
+
+The recorded process-detector failures are about the instrument: a filter that selects nothing, a
+count that ignores what you are not responsible for, an observable that cannot separate a designed
+idle from a finish. This one is about the **tense of the report**. Asked whether a build window was
+open, `ps -Ao %cpu=,comm= | sort -rn` was read correctly — no `rustc`, no `cargo`, the top of the
+list was `node` and `WindowServer` — and reported as "cargo/rustc: 0 processes". A peer sampling
+moments later found `rustc` at 99.9% with a parent whose cwd named a third worktree. Both
+measurements are right. The sample was of one instant and was published in the vocabulary of a
+window.
+
+The direction matters, because it is the opposite of the one already recorded here. That row says a
+process being invisible does not mean the run has **finished**; this one says it does not mean the
+run had **not started**, and it is the reading that grants permission rather than withholding it.
+The remedy is not a better sample — no sample answers a question about the future — it is to report
+only what you know: **"I will not start a build"** is a fact about your own intent and is durable;
+"the box is free" is a claim about everyone else's, and it expires before it is read.
+
 ### A quiet-box check that prints is not a quiet-box check
 
 A thread-scaling sweep ran to completion with `mdworker_shared` at **44.7%** — the
@@ -2247,6 +2276,24 @@ cell — **the constant it held fixed was the branch condition**. That is the sa
 grid whose bindings all share one name, where a name-keyed test cannot see shadowing: adding an
 axis is not what finds these, moving a held constant is.
 
+### A property claim has no oracle attached, so measure the oracle's rate before filing
+
+An output-equality claim gets its oracle for free, because the gate already runs both sides. A
+claim about a **property** — idempotency, termination, determinism — has no gate, so nothing has
+ever run that property against the oracle, and the step gets skipped precisely because the
+property obviously ought to hold.
+
+Measured on 2026-09-04 over 520 live ratchet entries: rsvelte's formatter is non-idempotent on
+**28**, and the oracle is non-idempotent on **8** — 3 shared, 5 that only the oracle fails. Filed
+from the first number alone the report claims 28 defects; the defensible claim is the **25** where
+the oracle converges on its second pass and rsvelte does not. The gate's own normalizer had said
+so in a comment (`scripts/compat-corpus/fmt.mjs`, "oxfmt rewrites in place and is not idempotent
+on all inputs"), and deciding to measure is what sent anyone to read it.
+
+The same measurement falsified a predicted sign domain: increase / decrease is not a partition,
+because 5 of the 28 keep the line count and differ only in bytes. Report the prediction that
+missed beside the one that held — the next person measuring this needs the domain, not the tally.
+
 ### A changed hash is not a fixed file, and five samples can be one sample
 
 Two independent measurements of a fix's blast radius converged on the same two
@@ -2311,6 +2358,27 @@ never arrives, so there is nothing to compare. A 70-cell grid, three committed r
 release test targets were all green. What attributed it was a completed *previous* run of the
 same corpus sweep: without a baseline rate, a sweep that stops printing is indistinguishable from
 a sweep competing with a build for CPU.
+
+### A file-level reachability label crosses with anything, and it is not an attribution
+
+"Is this function called while compiling this file" is cheap, and it makes a table that reads like
+a result. Chasing a formatter divergence, 72 carriers were split 51/21 on whether
+`build_element_doc` runs at all, and the 51 was written up as *the majority of carriers go through
+this port*. Then the smallest reaching carrier was minimized: the divergence reproduced exactly,
+and the counter read **`[hug] 0`**. The original file calls that function elsewhere, for some other
+element. So the label answers *does this file contain a call* and was read as *did that call write
+this*.
+
+The recorded neighbour is one direction of this — "A was not called" does not entail "B was". This
+is the other: **"A was called somewhere" does not entail "A wrote this."** It is the more dangerous
+of the two, because the first leaves you with nothing and the second leaves you with a number.
+Crossed against the divergence's sign, the file-level label produced a 3x2 contingency table with
+plausible margins, and every cell of it is a statement about files rather than about hunks.
+
+What repairs it is not more minimizing — 213 hunks is not a minimization budget. Make the
+**writers** emit the output span they produced, run the carriers *unminimized*, and attribute each
+hunk to whichever writer covered it. One instrumented run replaces the whole per-case exercise, and
+it cannot suffer the failure that produced the retraction, because the input never changes.
 
 ### If the mechanism already has a name in the code, measure the name
 
@@ -2409,6 +2477,33 @@ one level down, inside a grid, where it is easier to miss because a grid feels l
 outputs. It is comparing a *projection* of outputs. Before widening a family, ask what its cells
 throw away — and prefer the widest key the assertion can carry, because rows are expensive and a
 key change is free.
+
+### A key that conflates two causes does not retire, and the survival is the only signal
+
+Four `parse()` fixes retired 7 of 219 ratchet keys. The one that did NOT retire is the finding.
+`FunctionDeclaration.params[]#length` counts a function's parameter array coming out short, and
+rsvelte drops parameters two independent ways: `params.rest` was never walked by the typed path,
+and a TypeScript `this` parameter — which TSESTree models as an ordinary `params[0]` — is never
+consulted at all. Fixing the first leaves the key listed on both axes, and measured over ten
+function shapes it moves 10 diverging cells to 6, with a `this + rest` cell showing the two
+compose rather than mask each other.
+
+This file already says a ratchet entry suppresses everything its key cannot tell apart, and treats
+that as a hazard. Here the coarse key was the **detector**: a key fine enough to separate
+`params.rest` from `this_param` would have gone green on the first fix and the second cause would
+have shipped as closed. So the rule has a second half — when a fix you believe is complete leaves
+its key listed, that is a measurement, not a re-baselining chore, and the question to ask is which
+*other* cause the key is also counting.
+
+The mirror case landed in the same batch and is why this is one row rather than two. A key can
+retire for a reason that is not its own name: `legacy::Text.type#value` went green from an
+unrelated `<svelte:options>` whitespace fix, because the comparison pairs array children strictly
+by index, so restoring one dropped node re-pairs every sibling after it. Measured by deleting that
+same `Text` from official's own AST across the corpus's `<svelte:options>` files — 5 carriers
+produce `Text.type#value` on the legacy axis, each alongside the `Fragment.children[]#length` key.
+`GATES.md` 39b records the adding direction, where fixing a divergence makes its children
+reachable; this is its complement, and neither is readable from the key's name. **A listed key can
+be two defects and a retired key can be zero.**
 
 ### A filter's error lives in the bucket it discarded, so sample the REJECTED side
 
@@ -2754,6 +2849,15 @@ the control's name as a prediction about the cell's *input text* and grep the in
 A control named `KNOWN-global:Number` whose source contains no `Number` is caught in one
 command; no amount of ablation finds it, because ablation moves the code and holds the cells.
 
+**The same misnaming runs the other way, and that direction understates a fix rather than a
+control set.** The one moving cell of a 16-cell grid was named `N1_negctl_unused`, so "the fix
+moves only a negative control" was about to be written — which reads as *the fix does nothing*.
+The cell's arrow body is `const q = 1; console.log(q)`, the defect's own shape; the `unused` in
+its name refers to an unrelated `const` in the instance script. Measured, the fix moved that
+cell `DIFF -> EQ` and moved zero cells the other way. The remedy is the same grep — the name is
+a prediction about the input text — but the failure it prevents is the opposite one: there a
+green control certifies coverage it does not have, here a green name retires a fix that works.
+
 ### A run's status is not the aggregate of its jobs', and the two can disagree forever
 
 The concurrency ceiling this account is scheduled against is a **job** ceiling, and
@@ -2782,6 +2886,33 @@ The saturation it exposed is worth stating as a shape rather than a number: 28 c
 `QUEUED` with **zero** `IN_PROGRESS` reads exactly like a stalled scheduler, and here it was a
 nightly scheduled gate holding three quarters of the slots. Neither the check names nor their
 conclusions can separate those two; only the job census can.
+
+### Summing jobs is the right unit, and `?status=in_progress` is the wrong set to sum over
+
+The recorded fix for "a run count is not a job count" is to ask capacity by summing
+`runs/<id>/jobs`. That is necessary and not sufficient, because the *set* of runs still has to
+come from somewhere, and the obvious source is wrong in exactly the way the original row warns
+about: `actions/runs?status=in_progress` filters by the **run's** status, and a run whose status
+is `queued` can hold jobs that are running. Measured within one minute of each other on the same
+account:
+
+```
+runs?status=in_progress -> 6 runs -> summed jobs in_progress =  5
+runs of BOTH statuses   ->         -> summed jobs in_progress = 20   (the ceiling)
+```
+
+The `5` was read as "the pool is nearly empty, so 25 queued jobs must be blocked by something
+else", and a workflow's `concurrency:` block was opened to look for the cause. There was no cause:
+the account was saturated. One CI run in that census reported `queued` at run level while carrying
+`in_progress=2, queued=10` — it is the row's own example, met from the other side by someone who
+had just cited the row.
+
+The rule that survives is about **which quantity a filter names**. A status filter on a collection
+is a filter on that collection's members, never on the things they contain; when the question is
+about the contained thing, the filter has to be dropped and the aggregation done over everything.
+And the failure was not a plausible-looking number this time — it was a number that *contradicted*
+the observable (25 jobs waiting while the pool looked idle) and was believed anyway, because the
+contradiction was read as evidence about the workflow rather than about the census.
 
 ### Two branches appending sections to one document merge cleanly and duplicate in silence
 
@@ -2981,6 +3112,41 @@ whether the instrument could have produced a non-zero on that input at all; if t
 from reading the classifier's branches rather than from the data, the zero belongs in a sentence
 about the instrument.
 
+### A second unit that disagrees 9x can be an instrument that cannot express the mechanism
+
+Region granularity moved one statistic ninefold. Over the fmt ratchet's 520 live entries (524
+listed, 4 already byte-equal), labelling each divergence per *hunk* gives 448 single-label entries
+and per *line* gives 47. The reading published off that was that the statistic is unit-dependent,
+so every conclusion resting on it is too.
+
+But *"the two units genuinely differ"* and *"my second instrument cannot express this mechanism"*
+produce the identical observation. What separated them was the sub-population where the two must
+agree — the clusters that do not change a hunk's line count:
+
+| hunk-solo cluster | n | still solo per line | rate |
+|---|---|---|---|
+| breaks-later | 215 | 0 | 0% |
+| breaks-earlier | 181 | 0 | 0% |
+| indent-only | 29 | 27 | 93% |
+| intra-line-ws | 14 | 13 | 93% |
+| other | 7 | 5 | 71% |
+| missing-line | 1 | 1 | 100% |
+| extra-line | 1 | 1 | 100% |
+
+A moved break point necessarily makes a hunk's two sides unequal in length, so the surplus lines
+are labelled `missing-line` / `extra-line` **by construction**, and a line where both sides broke
+differently is a prefix of neither, so it is `other`. Six such lines read directly:
+
+```
+oracle : '                measurementSystem,'
+rsvelte: '              "imperial"'
+```
+
+— one break rendered across several lines, not a second mechanism. Had every row read 0%, the two
+readings would have been indistinguishable. This is the large-difference sibling of *a measured
+zero has two kinds that print identically*: **carve out the sub-population where no difference can
+arise, and let it be the control.**
+
 ### A dead instrument does not have to return a zero — it can return one plausible red
 
 The recorded case of an instrument dead on the carrying population returns **0**, and a zero
@@ -3090,6 +3256,27 @@ The check is one line per file: after staging, `diff -q <staged> <real source>`.
 an intention and the diff is an observation — the same split as an agent's shell cwd silently
 resetting. Re-measured from the real sources the answer was *narrower and better supported*,
 which is the usual shape of a retraction that was measured rather than argued.
+
+### A tool that rewrites in place is not a read, so a probe on a stored arm destroys it
+
+An arm is identified by a discriminating probe on its output. That leaves open what the probe
+itself does to the thing being probed. Measured on 2026-09-04: a stored `collapse-off` arm was
+checked with `RSVELTE_HUG_TRACE=1 rsvelte-fmt <arm>/x.svelte`, to count which passes it reached
+— and `rsvelte-fmt` **formats in place**, so the file became "the off output re-formatted with
+collapse on". The arm was correct when staged and wrong when read.
+
+Every entry in the arm-identity table passes here, mechanically: the binary was right, the path
+was right, the `Compiling` line was right, and the file at that path was not what its name said.
+What separates it from a corrupt staged input is that the corruption was **created by the
+verification**, so it did not exist at any moment anyone would think to check.
+
+It surfaced only because the prefix sweep's `k=0` end had been required to reproduce a
+previously measured arm byte-for-byte and came back **71/72**. That requirement existed to pin
+the ladder's calibration and caught an entirely different failure — which is the argument for
+fixing both ends of a sweep even when only the middle is in question.
+
+The rule outlives the tool: `rsvelte-fmt`, `cargo fmt`, `prettier --write`, `sed -i` and every
+`--fix` mode write. Before pointing a command at a stored measurement, ask whether it writes.
 
 ### Three spellings of "I added the stage that loses the verdict"
 
@@ -3610,6 +3797,22 @@ The direction to be careful in is the other one — equal blobs for the inputs y
 says nothing about an input you did not enumerate, so list what the regeneration actually
 reads (here: the ratchet it rewrites, the classifier, and the merger) before concluding.
 
+**And the command that row prescribes fabricates the revision when the path is absent.**
+`git rev-parse <rev>:<path>` writes its **argument** to *stdout* when it fails — so a census
+written as `a=$(git rev-parse "$MB:$p" 2>/dev/null || echo MISSING)` does not substitute
+`MISSING`, it **appends** it after the echoed argument, and any prefix truncation of the
+result (`${a:0:9}`) yields the first nine characters of `$MB`. Measured on git 2.33.0, with a
+full 40-character rev: a present path returns its blob, an absent one returns a hash-shaped
+value that is the *revision* — in the column the row exists to keep revisions out of. Two of
+five inputs read that way, and both had in fact been **added on `main` after the merge base**,
+which is the one answer the census could not report.
+
+What exposed it was a shape that cannot occur — two different files carrying the same hash —
+not a count, and not the `||` guard, which fired and was overwritten. `git ls-tree <rev> --
+<path>` prints **nothing** on stdout for an absent path and a full blob line for a present one,
+so absent and present are distinguishable without reading an exit code at all. Use it, and
+report *absent at the merge base* as its own state: a file the other side added is not a file
+that moved, and treating it as one hides the whole reason it is there.
 
 ### A third kind of red: the runner vanished, and its fingerprint is that there is no log
 
@@ -4476,6 +4679,27 @@ The failure signature is worth separating from the ordinary one: an incomplete i
 picture** — every line correct, and no line explaining what you observe. When a value has more
 than one way in, enumerate the field's writers before instrumenting any one of them.
 
+### Counting a field's writers closes the field axis and says nothing about which record
+
+The row above closes "who writes this field". It does not close "which record does this name
+resolve to", and a change that moves the second moves every field on that record **with no
+writer moving at all**.
+
+Measured on 2026-09-04, deciding whether two concurrent changes to `2_analyze` interact. One adds
+three writes of a new `Binding::initial_span`; the other fills five different fields on a record
+it obtains by lookup. The field census closes cleanly — the added writes are `initial_span` only
+(positive control: 7 added lines mention it), and the second change writes none of those five —
+and the all-clear was wrong. The second change alters what
+`scope.declarations.insert(name, idx)` points `idx` at, a throwaway record before and the scope
+builder's record after, so the first change's reader (`get_binding(name).initial_span`) can begin
+seeing a value that was previously absent while neither patch touches the other's fields.
+
+An interaction between two changes therefore has two axes, and the cheap one is not sufficient:
+**which code writes the field**, and **which record the lookup returns**. The second is settled by
+reading the resolution chain — `get_binding` → `lookup_binding` → `scope.declarations[name]` →
+`bindings[idx]` — and asking whether either patch moves an entry in it. A grep over field names
+cannot see it, and an all-clear issued from one axis reads exactly like one issued from both.
+
 ### A key with a valueless element leaves ORDER as the only discriminator
 
 `assign_dev_ast.rs` matches a lowered assignment back against a source-order site list keyed
@@ -4515,6 +4739,33 @@ family, list what every one of its cells has in common and ask which of those th
 on — and when the answer looks like "this family never reaches that code", check it, because
 "reaches it and cannot tell two answers apart" is the commoner case and the two prescribe
 different fixes.
+
+### A product isolates an axis inside itself, and generalising it swaps necessity for sufficiency
+
+Three candidate axes were proposed and falsified in one afternoon on one defect, and all three
+died the same way: a conclusion was carried outside the product that separated it. The first two
+were ordinary — "the initializer's kind" and "the arrow has a parameter" each came from two cells
+differing in more than one respect, and each died on a grid built for it (8 cells and 6 cells, 0
+movement).
+
+The third is the one worth recording, because it **survived its own grid**. A 2x2 over `<script>`
+presence × arrow-body layout separated cleanly — with a script both cells moved, without one
+neither did — and was written up as "the axis is instance `<script>` presence". Cross-tabulated
+against the 17 cells already in hand:
+
+```
+cell                  script?  base  fix        cell                script?  base  fix
+N1_negctl_unused      yes      DIFF  EQ         P4_fn               yes      DIFF  DIFF
+FIXTURE_delegated     yes      DIFF  EQ         R3_shadow_instance  yes      DIFF  DIFF
+A_template_arrow      NO       DIFF  DIFF       R4_shadow_module    yes      DIFF  DIFF
+Q / R1 / R2           NO       DIFF  DIFF
+```
+
+Every cell the fix moves has a script — 0 counterexamples — and three script-bearing cells do not
+move. The 2x2 had established a **necessary** condition and it was read as **the** condition. A
+product separates an axis among its own cells; the claim it licenses is about those cells. Before
+generalising, cross-tabulate the proposed axis against every cell you already have — no build, and
+it is what distinguishes "necessary" from "sufficient".
 
 ### A catch-all whose default is the SAFE answer is invisible to every gate but byte equality
 
@@ -4599,6 +4850,29 @@ Stamping the artifact with the arm's sha256 and reading it back is the only
 one that survives someone else's run landing in the same path — and note the
 sweep here already wrote `arm` and `sha256` at the top level and nobody read
 them, which is the declared-but-unread-field row wearing a different hat.
+
+### The delete-then-wait fix has a premise: that the writer ever reaches the event loop
+
+Deleting an output before launching and waiting on `[ -f out ]` is recorded above as the safe
+completion check, because a crash that writes nothing leaves `-f` false forever and a false green
+becomes a hang. That prescription has a premise, and a synchronous writer breaks it.
+`fs.createWriteStream` opens its fd **on the event loop**; a run-to-completion loop
+(`readFileSync` + a sync `compile`) never turns it, so nothing is created until the loop ends and
+every write sits in the stream's buffer. Measured both directions in one probe:
+
+```
+existsSync DURING sync loop: false
+existsSync AFTER  stream end: true
+```
+
+Meanwhile `process.stderr.write` to a file **is** synchronous on POSIX, so the progress log
+advances against an absent artifact — a contradiction that reads exactly like a broken job.
+
+The safety direction survives: still no false green. What breaks is that *running* and *died
+having written nothing* become the same observation, so a one-sided reader concludes the job is
+dead and kills a live measurement. Two consequences: a sweep in flight cannot be monitored through
+its own output, only through stderr; and stamping `{arm, sha256}` at the head of the file to read
+back later buys nothing, because a crash leaves no file at all.
 
 ### A control must traverse the stage the measurement died on
 
@@ -5437,14 +5711,22 @@ both sides and rewritten differently. Every gate keyed on `(ruleId, line, column
 blind to that split by construction — the same "two ports of one function, and no gate compares
 the ports" shape recorded for the client/server constant fold, one level down.
 
-**rsvelte's `parse()` accepts a document official's `parse()` rejects**, and the linter is only
-where it was noticed. `svelte_meta_invalid_placement` — `<svelte:head>` inside an element — is
-raised by upstream from `phases/1-parse/state/element.js:161` and by rsvelte from
-`phases/2_analyze/visitors/svelte_head.rs:31-32`. Anything that parses without analyzing
-(svelte2tsx, the language server, `rsvelte-lint`) therefore sees a valid tree where the official
-toolchain sees a fatal error. It surfaced as an autofix divergence: ESLint's `verifyAndFix` stops
-when a pass produces text its parser rejects, so upstream fixed one nesting level and stopped
-while rsvelte relinted cleanly and fixed the next. Zero of 6,788 real-world sources reach it.
+**This paragraph used to say that rsvelte's `parse()` accepts a document official's rejects, and
+it was falsified by someone SPENDING it rather than reading it.**
+`svelte_meta_invalid_placement` — `<svelte:head>` inside an element — is raised by upstream from
+`phases/1-parse/state/element.js:161`, and rsvelte raised it only from phase 2, so anything that
+parses without analyzing (svelte2tsx, the language server, `rsvelte-lint`) saw a valid tree where
+the official toolchain saw a fatal error. The phase-2 citation is still accurate — seven sites
+carry the code (`svelte_head`, `svelte_body`, `svelte_window`, `svelte_document`, `svelte_options`,
+`shared/special_element`, `errors`) — and the **conclusion** stopped being true when the check was
+added to `1_parse/state/element.rs:184` as well, with nothing updating the prose. What found it
+was picking the diagnostic as the discriminating case for "does `parse()` run phase 2?" on the
+strength of "this one is phase-2 only": the probe threw where it was predicted to pass, and
+printing the error *code* is what separated a stale paragraph from an input rejected for some
+unrelated reason. Reading it, including reading it in order to cite it, could not have found that.
+The class it was noticed through is still real: ESLint's `verifyAndFix` stops when a pass produces
+text its parser rejects, so upstream fixed one nesting level and stopped while rsvelte relinted
+cleanly and fixed the next. Zero of 6,788 real-world sources reach it.
 
 **Rule OPTIONS are the axis this corpus is now saturated on, and the measurement is worth keeping
 because "each rule has an option pattern" is the non-discriminating version of it.** 29 of the 76
