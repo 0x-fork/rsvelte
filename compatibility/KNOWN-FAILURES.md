@@ -3704,11 +3704,11 @@ that became unparseable only with `dev: true`; #3877 corrected the component
 callback tail-comment insertion point, so both its parse and output entries have
 been retired.
 
-### Client dev (`known-failures.client-dev.json`, 3 entries)
+### Client dev (`known-failures.client-dev.json`, 1 entry)
 
-Partition of `known-failures.client-dev.json` by verdict: `3`
+Partition of `known-failures.client-dev.json` by verdict: `1`
 
-- **3 — the generated JS differs.**
+- **1 — the generated JS differs.**
 
 `svelte-tweakpane-ui/…/Point.svelte` left this target with `client`'s, for the same two rules;
 the paragraph under `client` above is the one description.
@@ -3773,9 +3773,31 @@ first-match lookup) from the corrected one rather than as identity probes: both 
 fix too. Two arms over the corpus moved 1 of 134,180 units (129,450 live),
 `MISMATCH -> match: 1`, `match -> MISMATCH: 0`.
 
-All remaining 3 arrived with the wave-2 enrolment (#3176); this target was at 0 before
-it, and it is the largest of the four — 3 JS entries that `client` does not
-carry, which is the reason it is ratcheted separately.
+`immich/…/Timeline.svelte` and `svelte-lexical/…/NestedComposer.svelte` left this target
+together when a parenthesised prop mutation stopped being wrapped inside its own setter call.
+Upstream's `validate_mutation` wraps the **fully built** expression (`shared/utils.js:390`, from
+`AssignmentExpression.js:27`), so `$$ownership_validator.mutation(…)` encloses the setter call;
+rsvelte matched the setter's first argument as `Argument::AssignmentExpression`, and
+`ParseOptions` preserve parens, so a source-level `(p.x = 1)` arrived wrapped and fell through to
+the assignment visitor. **The axis is the parenthesis, not the host** — `const q = p.x = 1` was
+already correct and `const q = (p.x = 1)` was not, so a grid varying where the mutation is written
+holds the deciding property fixed. 9 cells against the oracle, 3 EQ / 6 DIFF before and 9 EQ / 0
+DIFF after, on arms separated by `sha256`.
+
+**Both entries were kept out of that fix's own accounting, and the gate retired them anyway.**
+The commit that repairs the mutation wrap says "neither entry is retired by this alone, both keep
+a separate comment residue", and that reading is still correct about the *bytes*: esrap places a
+trailing comment where rsvelte does not. It is wrong about the **verdict**, because comment
+placement is exactly what `ast_equiv_batch` cannot represent, so the gate rescues the pair once
+the code line matches. This is the second recorded instance of that class — a stricter-than-the-
+gate local reconstruction reporting a divergence the gate does not have — and in both instances
+the correction came from CI's stale-entry check rather than from any local instrument. A local
+`MISMATCH` is a candidate; only a local `match` is a verdict.
+
+All remaining 1 arrived with the wave-2 enrolment (#3176); this target was at 0 before
+it, and what it still carries is a JS entry that `client` does not, which is the reason it is
+ratcheted separately. Whether it is the largest of the four is not stated here: a superlative
+has to be re-derived every time any of them moves, and nothing gates a superlative in prose.
 
 `immich/…/asset-viewer/ActivityViewer.svelte` left this target and `client` for the other half of
 the same predicate. Upstream's `should_proxy` answers `false` for `undefined` in the **same
