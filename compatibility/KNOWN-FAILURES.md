@@ -2950,14 +2950,40 @@ checked-in pattern corpus (#2019) surfaced are gone too: the two SSR
 destructuring ones (#2033, #2034) were fixed by #2036, and the block-local
 snippet render tag (#2031) by #2057.
 
-### Client (`known-failures.client.json`, 8 entries)
+### Client (`known-failures.client.json`, 1 entry)
 
-Partition of `known-failures.client.json` by verdict: `8`
+Partition of `known-failures.client.json` by verdict: `1`
 
-- **8 — the generated JS differs** (`js` / `code-differs`).
+- **1 — the generated JS differs** (`js` / `code-differs`).
 
 No CSS entry survives on this target: the one that did left with the ancestor-scoping fix
 below.
+
+`musicat/…/settings/SettingsPopup.svelte` left this target and `client-dev` with a phase-2
+filter whose comment asserted the opposite of upstream. `2-analyze/index.js:445` declares each
+`$name` as a real `store_sub` binding, so `scope.get('$s')` returns one and
+`RegularElement.js:81` attaches a `<select bind:value={…}>`'s indirect bindings to it like any
+other binding; rsvelte discarded exactly that case in two places, so the store branch of the
+setter and every `$s.a = …` in the file lost the `$.invalidate_inner_signals` tail. Upstream's
+exclusion of `store_sub` is on the **assign** arm's proxy flag (`AssignmentExpression.js:147`)
+and the mutate arm at `:154-181` has no condition on binding kind at all — which is why the same
+grid separates the two: `$s.a = 2` and `$s.a += 2` must gain the tail and `$s.a++` must not,
+since `UpdateExpression.js` never imports `build_assignment`. The first version of the fix
+wrapped both and the six store cells went 6 DIFF → 4 EQ / 2 DIFF, which is what named the
+update arm. **17 of 18 cells EQ after** (the one that stays is a separate defect: `$: st.a++`
+loses its `$.mutate` entirely). Two arms over the corpus moved **2 of 134,180 units**,
+`MISMATCH -> match: 2`, `match -> MISMATCH: 0`.
+
+`ha-fusion/…/Modal/VisibilityConfig/Index.svelte` left this target and `client-dev` with the
+ninth application site of one upstream rule. Upstream reads a **reassigned** each item as
+`collection[$index]` and never as `$.get(item)` (`EachBlock.js:216-227`); rsvelte ports that as
+`build_reassigned_item_read` and calls it from eight places, and the dependency list an inner
+`bind:` hands to `$.invalidate_inner_signals` is a ninth — built by a string loop that reads
+`state.transform` directly, so the rule never reached it. Every *other* read of the item in the
+same file was already correct, which is why the divergence was one line of 336 and why a grid
+over each-block shapes with one read per cell would have been green: the axis is which read, not
+which block. Two arms over the whole corpus moved **2 of 134,180 units** (129,450 live), both
+this file, `MISMATCH -> match: 2`, `match -> MISMATCH: 0`.
 
 `svelteui/…/Modal/ModalForm.svelte` and `mathesar/…/sort-entry/SortEntry.svelte` left this target
 and `client-dev` when a **write** inside a prop's default value started reaching the passes an
@@ -2987,10 +3013,33 @@ placement, and scores it a pass. The line that moved went **to** official's spel
 `$_('descending')` → `$_()('descending')`, which is what upstream emits — and that direction was
 measured against the oracle rather than inferred from the entry leaving.
 
-`primo/…/ui/Button.svelte` was expected to move with this fix and **does not**: its output is
-byte-identical across the two arms on both targets. It sits on the same prop-default path and is
-a different defect (a JSDoc annotation attached to the default is dropped), which is a
-measurement about that entry rather than a limit of this fix.
+`primo/…/ui/Button.svelte` carried two defects on one line pair, and the first is closed.
+`is_simple_expression_str` read a leading JSDoc comment as the callee of the parentheses after
+it, so `type = /** @type {…} */ ('button')` took the lazy branch — `19, (/** … */) => 'button'`
+where official emits `3, 'button'`. Neither axis reproduces it alone (a comment without
+parentheses does not end in `)`, parentheses without a comment have nothing before the matching
+`(`), so `crates/rsvelte_core/tests/prop_default_leading_comment.rs` crosses them.
+
+**It has now left both targets, and the local sweep said it would not.** What remains in the
+output is comment PLACEMENT, and the oracle's rule there is not the one a single-prop grid can
+show. Measured on one, two and three props: official emits the annotation after the value of the
+**first** `$.prop` in the declaration — `let a = $.prop($$props, 'a', 3, '' /** … */)` — however
+many props precede the one that carried it, because esrap flushes a pending comment at the first
+located node past it and the `$.prop` calls are builder-made. A one-prop cell reaches that rule
+and cannot separate it from "place it ahead of the value", since there is nothing before it to
+trail; rsvelte agrees there and drops the comment everywhere else. That line is still divergent
+and the entry still passes, because the gate hands every byte-different output to
+`ast_equiv_batch`, **which does not represent comment placement** — the same rescue the
+`SettingsPopup` paragraph above describes.
+
+The lesson is the one this repository already records about reconstructions, arriving from its
+other side. A two-arm sweep over 134,180 units moved exactly this entry's two targets and scored
+them `MISMATCH -> MISMATCH`, so the PR was prepared with the entry kept — and the sweep's
+comparison stops at the normalized byte diff, which makes it **stricter** than the gate. A
+non-zero from a stricter reconstruction is a list of candidates, never a verdict; here it
+produced two false keeps, and CI's two-sided ratchet caught them as `already PASS`. When a
+retained entry's own justification is "what remains is comment placement", that is precisely the
+sentence that predicts the gate will rescue it.
 
 The error classes this section used to carry are gone: the run behind this
 baseline reports `error-mismatch: 0` and `js-unparseable: 0` on every target, so
@@ -3261,7 +3310,54 @@ comments and compare" said the opposite, because official's line reduces to a ba
 the stripper invents a structural difference; that is the stricter-reconstruction hazard two
 paragraphs above, reached from the other side.
 
-Every one of the remaining 8 arrived with the wave-2 enrolment (#3176) and is described
+`syntaxfm-website/…/guests/+page.svelte` left this target and `client-dev` on the right-hand
+side of a destructuring assignment. `shared/assignments.js:20-22` reads
+`should_cache = value.type !== 'Identifier'` off the **visited** node, so a prop is cached in
+`$$value` whichever read form it takes; rsvelte answered from the list of props eligible as
+assignment *targets*, which in runes mode excludes a prop that is never written — and that is
+exactly the prop whose read is `$$props.data`, a member expression. A 7-row grid over the
+binding kind of the right-hand side separates it from "cache whenever the binding is reactive":
+a `$state` object reads as a bare identifier and must NOT be cached, while a `$derived` reads as
+`$.get(data)` and must be. Two arms moved 2 of 134,180 units (129,450 live),
+`MISMATCH -> match: 2`, `match -> MISMATCH: 0`.
+
+Three entries left this target and `client-dev` on three separate decisions, each measured with
+its own grid.
+
+`headscale-ui/…/ServerSettings.svelte` carried `pattern={String.raw`…`}`.
+`TaggedTemplateExpression.js` gives a tagged template `has_state` only when its TAG is not pure,
+and `is_pure` calls any identifier with no binding a global — so `String.raw`…`` is inert and the
+attribute is written once at init. rsvelte's `has_reactive_state_json` has no arm for the node
+type at all and fell into its conservative `_ => true`, wrapping every tagged template in a
+`$.template_effect`. That default is why nothing found it earlier: over-wrapping is correct
+behaviour and wrong bytes, so only output equality can see it. 15 expression kinds × 2 hosts
+reads 24 EQ / 6 DIFF, and all six are a pure tag; a local tag and a member tag rooted at a local
+stay wrapped, which separates the fix from "never wrap a tagged template". The sibling
+`has_call_json` names the node type correctly, citing the upstream file — two ports of one
+visitor disagreeing about which node types exist, and nothing compares them.
+
+`photon/…/navbar/Profile.svelte` was an ordering divergence with no other content:
+`transform-client.js:201` unshifts the legacy `$.reactive_import(…)` declarations onto the
+MODULE program's body and `:513` assembles `[...imports, ...module_level_snippets, ...body]`, so
+a hoisted `{#snippet}` precedes them. rsvelte emitted them straight after the imports. Both
+outputs were 593 lines; moving two declarations 60 lines made 62 lines differ, which is what a
+first-differing-line reading would have called a large divergence. Each control in the 4-cell
+grid holds only one of the two declarations and so cannot express an order at all.
+
+`trakt-web/…/navbar/_internal/NavbarHeader.svelte` is upstream aliasing an array.
+`RegularElement.js:333` gives an element's children the PARENT's `consts` array itself when
+`has_declarations` is false, and `:443` splices that same array into the `{ … }` wrapper the
+element grows for a `{#snippet}` — so an enclosing `{@const}` is declared a second time inside
+the wrapper. `has_declarations` is `!fragment.metadata.transparent`, which only a
+**`DeclarationTag`** (`{const x = …}` / `{let x = …}`, no `@`) clears; `{@const}` cannot be an
+element's immediate child at all, so the first version of that cell was rejected by both
+compilers. `<svelte:element>` delegates to `Fragment.js:68`, whose `consts` is a fresh `[]`, and
+is the cell that separates the aliasing from "an element with a snippet re-expands".
+
+Two arms over the corpus moved 6 of 134,180 units (129,450 live) — the three files on `client`
+and `client-dev` and nothing else — `MISMATCH -> match: 6`, `match -> MISMATCH: 0`.
+
+The remaining 1 entry arrived with the wave-2 enrolment (#3176) and is described
 in § *Wave-2 enrolment*. The list was **0** before it, and the one entry it ever
 held — #2031, a `{#snippet}` declared inside
 an `{#if}` branch and `{@render}`ed as a sibling in that same branch, lowered
@@ -3365,16 +3461,55 @@ that became unparseable only with `dev: true`; #3877 corrected the component
 callback tail-comment insertion point, so both its parse and output entries have
 been retired.
 
-### Client dev (`known-failures.client-dev.json`, 14 entries)
+### Client dev (`known-failures.client-dev.json`, 5 entries)
 
-Partition of `known-failures.client-dev.json` by verdict: `14`
+Partition of `known-failures.client-dev.json` by verdict: `5`
 
-- **14 — the generated JS differs.**
+- **5 — the generated JS differs.**
 
 Unlike `client`, no CSS entry survives on this target.
 
-All remaining 14 arrived with the wave-2 enrolment (#3176); this target was at 0 before
-it, and it is the largest of the four — 6 JS entries that `client` does not
+`huly/…/HelpAndSupport.svelte` left this target with the site claim in
+`assign_dev_ast.rs`. `$.assign(…, '<file>:<line>:<column>')` locates the assignment's own
+left-hand side, and rsvelte finds that by matching the lowered target back against a
+source-order site list keyed `(root, path, operator)` — where a computed member contributes a
+valueless `Computed` element, so `o.p[2]` and `o.p[3]` share a key and only the order the sites
+are consumed in separates them. The visitor claimed its site *after* descending, so the inner
+link of `loc.path[2] = loc.path[3] = settingId` took the outer's site and reported `53:4` where
+official reports `53:18`. A static-key chain (`o.a = o.b = s`) has two distinct keys and was
+correct throughout, which is what separates "claims in source order" from "always claims the
+first site"; a grid of computed chains alone cannot. Two arms over the corpus moved 2 of 134,180
+units (129,450 live), `MISMATCH -> match: 1`, `match -> MISMATCH: 0`.
+
+`svelvet/…/Edge/Edge.svelte` moved on this target without leaving it. Upstream runs
+`is_simple_expression` on the **visited** default of a legacy `export let`, and in dev
+`BinaryExpression.js` rewrites all four equality operators into `$.strict_equals` / `$.equals`
+CALLS unconditionally — so `export let straight = edgeStyle === 'straight'` is simple in
+production and not simple in dev, where it becomes `$.prop(…, 24, () => …)`. rsvelte answered
+from the source shape, and the same reduction found a second, opposite defect in the text scan
+that decides it: a `(` after an operator opens a parenthesised operand, not a call, so
+`a || (b === 'x')` was read as a call and made lazy in production where official is eager. A
+13-shape × 2-mode grid separates the two directions and holds five mode-invariant rows
+(`a < 1`, `a + 1`, a literal, an identifier, and an arrow whose body holds the operator — an
+arrow is simple whatever it contains, which is what fails a text search for the token). Two arms
+over the corpus moved 1 of 134,180 units (129,450 live).
+
+**The entry has left this target.** It was kept on the reading that its remaining line is comment
+placement — esrap attaches a trailing `//` to the literal inside `$.mutable_source(false)` and
+rsvelte keeps it at end of line — and that reading is still correct about the bytes. It is wrong
+about the verdict for the same reason the `Button.svelte` paragraph above gives: comment
+placement is exactly what `ast_equiv_batch` cannot represent, so the gate rescues it once the
+code line matches. Both keeps came from the same stricter-than-the-gate local sweep, and both
+were caught by CI's stale-entry check rather than by any local instrument.
+
+The other moved unit is `svelte-bits/…/MetallicPaint.svelte`, whose verdict did **not** change:
+its location is now right and its remaining line is the other half — upstream declines to wrap
+the innermost link of `a[i] = a[j] = a[k] = gray` because `scope.evaluate(gray)` follows the
+binding's initializer to `Math.round(…)` and calls it primitive, which rsvelte answers from the
+expression's shape alone. A moved unit is not a retired entry.
+
+All remaining 5 arrived with the wave-2 enrolment (#3176); this target was at 0 before
+it, and it is the largest of the four — 5 JS entries that `client` does not
 carry, which is the reason it is ratcheted separately.
 
 `immich/…/asset-viewer/ActivityViewer.svelte` left this target and `client` for the other half of

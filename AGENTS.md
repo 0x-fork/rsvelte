@@ -4286,6 +4286,239 @@ The cheap discriminator is not the PR state, which is what was stale: it is
 `git log --oneline origin/main | grep '(#N)'`. Ask whether the work is on `main` before treating
 a missing branch, an `UNKNOWN` mergeable, or a fresh conflict as something to repair.
 
+### A ratchet entry's own NAME can be the wrong axis, and the fixture agrees with it
+
+`known-failures.client-dev.json` carried
+`svelte/…/snapshot/samples/delegated-locally-declared-shadowed/index.svelte`, whose one
+differing line is a `console.log` wrapped in `$.log_if_contains_state` that upstream leaves
+plain. The name says shadowing, the fixture is a locally declared `const index` masking an
+each index, and a grid built on that axis passes half its cells and reads as done.
+
+Shadowing is not the axis. The discriminating cell is one where **no outer name of that
+spelling exists at all** — `const q = Number(e.currentTarget.dataset.i); console.log(q)` in an
+`onclick` diverges exactly as the fixture does. What separates the cells is the **host**:
+crossing 4 hosts × 6 declaration shapes gives 3 divergences, all in the `template arrow` host
+and none in the instance-function, instance-top-level or module-script hosts, because
+`console_wrap.rs` answers the same question through two ports and only the estree one is wrong.
+
+This is one level earlier than "a justification names the wrong axis to reproduce on": here the
+*corpus id itself* names it, so the wrong axis arrives with the entry rather than with someone's
+prose. When a ratchet id reads like a diagnosis, treat it as a report of what someone hit.
+
+### The refutation can be inside a line you already read
+
+Two people chased the same defect from the same `DEBUG_EVAL` line:
+
+```
+[evaluate] name=q kind=Normal scope=2 decl_start=None updated=false initial=None initial_type=None
+```
+
+Both read `initial=None`, found a mechanism that predicts it (`process_binding_pattern_typed`
+never writes `binding.initial`), and implemented a fix that moved **0 of 44 cells**. The same
+line says `decl_start=None`, and that function writes `declaration_start` unconditionally — so
+the record `evaluate` resolves was never the one that function creates, and the whole search was
+in the wrong file. Every assignment to `declaration_start` in the tree is `Some(...)` (13 sites,
+none clearing it), which closes it: not "cleared after being set", but "a different record".
+
+This is not an unmeasured quantity. It is a measured one that was **printed and not read**,
+because a mechanism consistent with the first field arrived before the second field was looked
+at. No additional instrumentation can surface it — only finishing the line.
+
+### Count the WRITERS of a field, not the callers of the function you suspect
+
+Chasing that record, `#[track_caller]` was added to `declare_binding` and all 22 call sites were
+printed. The picture stayed contradictory, and the reason is that `declare_binding` is not the
+only writer of `bindings`: `ScopeRoot::push_binding` is a fifth, with six call sites of its own,
+and `2_analyze/visitors/shared/utils.rs`'s statement walker pushes a *temporary* record through
+it. The instrumentation was complete and the population was wrong.
+
+The failure signature is worth separating from the ordinary one: an incomplete instrument goes
+**silent**, and a complete instrument over the wrong population produces a **contradictory
+picture** — every line correct, and no line explaining what you observe. When a value has more
+than one way in, enumerate the field's writers before instrumenting any one of them.
+
+### A key with a valueless element leaves ORDER as the only discriminator
+
+`assign_dev_ast.rs` matches a lowered assignment back against a source-order site list keyed
+`(root, path, operator)`, and a computed member contributes `PathElement::Computed`, which
+carries no value. So `o.p[2]` and `o.p[3]` have the *same* key, and the only thing separating
+their two sites is which is still unclaimed — which makes the visit order part of the rule. The
+visitor claimed its site post-order, after descending, so the inner link of a chain took the
+outer's site and every `$.assign` in a computed chain reported the same column.
+
+The cell that says so is the one that was already **passing**: a static-key chain
+(`o.a = o.b = s`) has two distinct keys and was correct throughout, so a grid of computed chains
+alone cannot tell "claims in source order" from "always claims the first site". Ask of any
+key-matched rewrite which of its key's fields are *valueless*; each one converts a lookup into
+an ordering dependency that nothing in the key documents.
+
+### The constant a grid holds fixed was fixed by a PREDICTION, and being wrong is green
+
+`AGENTS.md` already records a grid whose held constant turned out to be the branch condition
+(`node.pos` was 0 in every cell). Two more landed on one day, and both are the *reaching is not
+discriminating* shape rather than the *never entered* one — which is the part that had to be
+measured rather than assumed, because the first write-up of this row asserted the second and was
+wrong. A prop-default grid held the declaration at **one prop**: every cell reached esrap's
+comment cursor and every cell agreed, because with nothing before it the annotation can only be
+flushed ahead of the value. Add a second prop and the same rule trails it on the *first*
+`$.prop` instead, which is where rsvelte drops it. A `console_wrap` grid held `target` at
+**client-dev**: all 44 cells reached `scope.evaluate` — the client calls the server's port since
+#3027 — and the regression it missed is on `server`, because only the server consumer inlines
+the folded value into a template string. The corpus sweep says so directly: the carrier moved on
+`server` and `server-dev` and did not move on `client` or `client-dev`, same input, same fold.
+
+Two things generalize. The held constant is fixed because someone judged it irrelevant, and that
+judgement is a *prediction*, not a measurement — so the axis worth adding is on the side you did
+**not** vary, which is why enumerating more failing shapes never finds it. And the symptom is a
+**green** grid, so nothing prompts the check: 8/8 against the oracle and 44/44, both while the
+mechanism they were written for had a branch no cell could separate. Before trusting a green
+family, list what every one of its cells has in common and ask which of those the oracle branches
+on — and when the answer looks like "this family never reaches that code", check it, because
+"reaches it and cannot tell two answers apart" is the commoner case and the two prescribe
+different fixes.
+
+### A catch-all whose default is the SAFE answer is invisible to every gate but byte equality
+
+`has_reactive_state_json` is rsvelte's port of upstream's `has_state`, written as a `match` over
+node-type strings with `_ => true` and a comment explaining the choice: wrapping a static
+expression in a `$.template_effect` is slower and correct, while not wrapping a reactive one is
+a bug. That reasoning is right, and it is exactly what made the missing arm unfindable.
+`TaggedTemplateExpression` had none, so `pattern={String.raw`a`}` was wrapped where upstream
+writes the attribute once at init — output that behaves identically, passes every runtime
+fixture, parses, and is *only* wrong as bytes. Measured: 15 expression kinds x 2 hosts, **24 EQ
+/ 6 DIFF**, and all six are a tagged template whose tag is pure; a local tag and a member tag
+rooted at a local stay wrapped, which is what separates the fix from "never wrap a tagged
+template".
+
+Two things generalize. **A conservative default converts a missing enumeration entry from a
+crash into a silent divergence**, so the usual defence — the arm that is absent throws — does not
+apply, and which gate can see it is decided by the *direction* of the default: over-approximating
+is visible to output equality alone, under-approximating is visible to a runtime test. And the
+enumeration's own members are the census: this `match` names 20 types, `has_call_json` beside it
+names `TaggedTemplateExpression` correctly with a comment citing the upstream file, so **the two
+ports of one upstream visitor disagreed about which node types exist** — the sibling was the
+cheapest place to find the gap and nothing compares them.
+
+**And the one defence this file names against the two-ports class was present, and pinned the
+wrong value.** `typed_reactive_state_front_end_agrees_with_the_json_walk` compares the typed
+front end to the JSON walk **and spells out the expected answer** — exactly so that "a front end
+that always says `false` can't pass by agreeing with an equally broken oracle". Its row for
+`` tag`x` `` read `true`, under a comment saying the typed walk does not answer this shape so the
+two "agree by construction". Both halves are accurate; the number was transcribed from what the
+JSON walk did, which was the `_ => true` fallback. Fixing the compiler turned the test red, and
+the oracle says `false` for an unbound tag and `true` for a bound one. So an independently
+pinned expectation is only independent of the *other port*, not of the port it was read from —
+generate the value from the oracle even when the assertion's purpose is to compare two ports,
+and note that the shape a comment calls "unanswered" is the one whose expectation nobody
+derived.
+
+### A predicate's NAME can name a construct that cannot reach it
+
+`RegularElement.js:324` computes `has_declarations` as `!node.fragment.metadata.transparent`, and
+the grid cell written to exercise the `true` branch — an element holding its own `{@const}` — is
+rejected by the compiler: `{@const}` must be the immediate child of a block, a snippet or a
+component, never of a plain element. What actually clears `transparent` is a **`DeclarationTag`**
+(`{const x = …}` / `{let x = …}`, no `@`; `1-parse/state/tag.js:41`, `1-parse/index.js:310`),
+which is the one declaration form an element may hold. The cell threw, which is the lucky
+outcome — the same inference could as easily have produced a cell that compiles and exercises the
+other branch.
+
+The rule is the grid-construction twin of "generate an expected value from the oracle, do not
+back it out of its output": when a cell exists to reach a named flag, derive the input from the
+**code that sets the flag**, not from what the flag is called. Here the two are one `grep` apart
+and the name is actively misleading.
+
+### A completion predicate can be satisfied by the PREVIOUS run's output file
+
+`until [ -f /tmp/sw-head.json ]; do sleep 20; done` fired instantly and reported
+`SWEEP HEAD DONE 20765747 bytes` for a run that was 40 seconds old. The file was
+two days old, from a sweep of a different tree. Nothing was empty, nothing was
+truncated, the byte count was plausible, and the arm's own probes had already
+printed correctly — the only thing wrong was *which run wrote it*.
+
+It is the stale-verdict class with the artifact in the role of the check-run,
+and the tell is the same one that catches an `awk` key collapse: a **shape** that
+cannot occur. The base arm's JSON had 6 top-level keys (`arm`, `sha256`,
+`probe`, `rows`, `hashes`, `liveness`) and the "head" had 104,439, because the
+older instrument wrote a flat `{key: hash}` map. Comparing the two structures is
+what exposed it; comparing their sizes would not have.
+
+The structural tell was luck, and reading it as the rule is the mistake to
+avoid: the two files had different shapes only because the instrument's output
+format had changed two days earlier. With a stable format, 29 MB against 21 MB
+reads as "a different tree" and nothing looks wrong. The format-independent
+test is **freshness** — `touch out.START` before launching and wait on
+`[ out.json -nt out.START ]`.
+
+Three fixes, and rank them by which way they fail rather than by what they
+buy. Deleting the output before launching is the only one whose failure is
+safe: if the run crashes and writes nothing, `-f` stays false forever, so a
+false green becomes a hang — the same property as a settle predicate an empty
+population cannot satisfy. Keying the wait on the **job** rather than its
+artifact is what a harness that tracks background commands already offers.
+Stamping the artifact with the arm's sha256 and reading it back is the only
+one that survives someone else's run landing in the same path — and note the
+sweep here already wrote `arm` and `sha256` at the top level and nobody read
+them, which is the declared-but-unread-field row wearing a different hat.
+
+### A control must traverse the stage the measurement died on
+
+The recorded rule is that a control has to bypass at least one stage the
+measurement passes through — that buys *independence*. It does not buy
+*reachability*, and the two fail separately. Looking for a peer's shared script,
+`find /tmp -maxdepth 4 -name 'port-probe2.py'` returned nothing; the positive
+control `find /tmp -maxdepth 4 -name 'cc-socks'` returned a hit, and that was
+read as "so `find` works, so the file is absent". The file existed. `/tmp` is a
+symlink to `private/tmp` and bare `find` does not descend one, and the original
+was a level deeper than `-maxdepth 4` reaches. The control was satisfied at
+**depth 2 through a different root**, so it exercised neither property that was
+killing the measurement.
+
+Measured both ways on the same tree: `find /tmp -maxdepth 4 …` → 0 hits with the
+file present; `find /tmp/ …` and `find -L /tmp …` → the path. The rule that
+covers it: **a control has to be satisfied by the same path the measurement
+takes** — same root, same depth, same traversal — and only then does its
+success say the instrument reached your question. A control that succeeds
+somewhere easier proves the command exists, which nobody doubted.
+
+### A stage that MERGES two measurements is the truncation table's other half
+
+Every row of the truncating-stage table loses a datum. A stage can instead make
+two data look like one, and that reads as a smaller population rather than as a
+missing one. A probe runner extracted results with
+`code.match(/console\.log\([^\n]*/g)` and joined the matches with `' ~~ '`.
+Each match runs to **end of line** and `g` advances `lastIndex` past the whole
+match, so a second call on the same line is swallowed: a cell with three
+`console.log` calls printed two `~~` pieces, and the piece count reads as a call
+count. It also manufactured a false finding — one piece read
+`console.log(n); else console.log(1);`, which was proposed as evidence that a
+`$: if` body had been split at the statement level, when the regex cannot
+produce a piece beginning with `else` at all and the two calls were simply on
+one line.
+
+The same runner mixed two scopes in one line: its WRAP/plain verdict tested the
+**whole file** while the displayed arguments were **per line**, so a cell with
+one wrapped and one unwrapped call reports `WRAP`. Ask of any result line what
+scope each of its fields was computed at; a merging stage is invisible to
+`pipestatus`, to a truncation check, and to re-reading the output.
+
+### A bundle's price cannot be set from one of its members
+
+Two defects were bundled as one batch because they share a *rule* (where an
+`$.invalidate_inner_signals` tail belongs), and the batch was then priced —
+"this needs new plumbing through the port" — from a `grep` in **one** of the two
+files: 0 hits, positive control 40. The measurement was right and the price was
+wrong, because the other member lives in a different file where the same grep
+returns 6, and its missing wrapper sits in the *same function* as a sibling
+branch that already calls the helper, 140 lines away. One member needed a new
+parameter threaded through; the other needed a call the enclosing function
+already makes.
+
+Sharing a rule is what makes two defects one story; it says nothing about
+whether they share a cost. Price each member, or split the bundle — and note
+that the cheap member is the one that looks unnecessary to measure, because the
+expensive member's number is already in hand and reads like the batch's.
+
 ### Working with Subagents
 
 Use the `Agent` tool for substantial work — feature implementation, multi-file refactors, broad code exploration, or anything likely to consume meaningful context.

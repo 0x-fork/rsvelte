@@ -2347,13 +2347,14 @@ pub(crate) fn transform_client(
         }
     }
 
-    // Add legacy reactive imports (after all imports, before other declarations)
-    // Reference: transform-client.js line 211: module.body.unshift(...state.legacy_reactive_imports)
-    body.extend(legacy_reactive_imports);
-
     // Add module-level snippets (after imports, before module script exports)
     // This ensures `const foo = ...` comes before `export { foo }`
     body.extend(module_level_snippets);
+
+    // `transform-client.js:201` unshifts these onto `module.body`, and `:513`
+    // then puts `module_level_snippets` ahead of it — so they follow the
+    // snippets, not the imports.
+    body.extend(legacy_reactive_imports);
 
     // Add module script non-import content (exports, declarations, etc.)
     // This comes after module_level_snippets so that `export { foo }` can reference `const foo`
@@ -7740,6 +7741,18 @@ fn transform_instance_script_for_visitors(
         .map(|b| b.name.clone())
         .collect();
 
+    // Every prop, unfiltered: a destructure's right-hand side is cached when the
+    // VISITED read is not an `Identifier` (`shared/assignments.js:21`), and a
+    // prop reads as `name()` or `$$props.name` whether or not it is ever
+    // assigned — which is what the list above filters on.
+    let destructure_rhs_prop_vars: Vec<String> = analysis
+        .root
+        .bindings
+        .iter()
+        .filter(|b| matches!(b.kind, BindingKind::Prop | BindingKind::BindableProp))
+        .map(|b| b.name.clone())
+        .collect();
+
     // For each prop binding that carries `legacy_indirect_bindings` (legacy
     // `<select bind:value={prop…}>` whose subtree references other variables),
     // precompute the `$.invalidate_inner_signals(() => { … })` body — the read
@@ -8102,7 +8115,7 @@ fn transform_instance_script_for_visitors(
                     super::profile::PA_EL_TRANSFORM,
                     statement.len() as u64,
                 );
-                transform_export_let(&statement, analysis)
+                transform_export_let(&statement, analysis, dev)
             };
             // After converting to $.prop(), apply prop read wrapping to the DEFAULT VALUE
             // inside $.prop() calls. wrap_prop_source_reads skips lines containing $.prop(),
@@ -8178,6 +8191,7 @@ fn transform_instance_script_for_visitors(
                         prop_assignment_transform_vars,
                         state_vars,
                         non_reactive_state_vars,
+                        &prop_invalidate_bodies,
                     )
                 } else {
                     transformed
@@ -8212,7 +8226,8 @@ fn transform_instance_script_for_visitors(
                     || first_line_trimmed.starts_with("var "))
             {
                 // Check if any of the declarators are BindableProp
-                if let Some(transformed) = transform_let_with_reexported_props(&statement, analysis)
+                if let Some(transformed) =
+                    transform_let_with_reexported_props(&statement, analysis, dev)
                 {
                     result.push_str(&transformed);
                     result.push('\n');
@@ -8358,6 +8373,7 @@ fn transform_instance_script_for_visitors(
                         non_reactive_state_vars,
                         store_sub_vars,
                         prop_assignment_transform_vars,
+                        &destructure_rhs_prop_vars,
                     ))
                     .map(Cow::Owned)
                     .unwrap_or(t)
@@ -8547,6 +8563,7 @@ fn transform_instance_script_for_visitors(
                         prop_assignment_transform_vars,
                         state_vars,
                         non_reactive_state_vars,
+                        &prop_invalidate_bodies,
                     ))
                 });
                 stage("store_reads", transformed, |t| {
