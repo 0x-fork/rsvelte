@@ -1064,32 +1064,187 @@ separate product bug and was fixed by #3629. These two entries remain because
 gate 9 intentionally compares the shipped native CSS path rather than replacing
 it with `--no-native-css`; #3628 records that decision and the engine boundary.
 
-**472 of 549 (86%) are cluster 20 or 21 — one question, where a line breaks** —
-and that is the burndown target, not the tail. That is the live `Partition of …`
-line above (258 + 214), the one the doc check verifies. The figure this sentence
-carried until #4062, *624 of 765 (82%)*, was the wave-2 table's population, and it
-did not agree with that table either — its own rows give 386 + 239 = 625.
+**Clusters 20 and 21 — one question, where a line breaks — are the first two
+addends of the `Partition of …` line above, and between them they are the large
+majority of this ratchet.** That is the burndown target, not the tail. The count is
+deliberately not restated here: the partition line is what `known-failures-md-check.mjs`
+verifies, so it is the one place that cannot go stale, and this sentence carried
+*472 of 549 (86%)* with a parenthetical `(258 + 214)` after the gated line had
+already moved. The figure it carried before that, until #4062, was
+*624 of 765 (82%)*, which did not agree with the wave-2 table either — its own rows
+give 386 + 239 = 625. Three successive restatements, three different populations,
+one gated line beside them that was right each time.
 Nothing here is an oracle bug: the
 `oracle-invalid` classification already carries those and is a pass, not a ratchet
 entry.
 
-**And 398 of those 472 are inside the TEMPLATE, not inside embedded JS or CSS
-(2026-09-01).** The cluster table names the *shape* of the first differing line and
-never says which printer produced it, which reads as a line-breaking backlog in the
-embedded-JS formatter. Locating each entry’s first differing line back in its **source**
-— by a token needle, reporting `unlocated` rather than guessing — partitions the 549 as
-`template 438 | unlocated 48 | script 41 | style 22`, and crossed with the shape rule:
-`breaks-later|template 215`, `breaks-earlier|template 183`, `indent-only|template 31`,
-`breaks-later|script 19`, `indent-only|script 14`, `intra-line-ws|style 9`, the rest in
-single digits. So **72.5% of this ratchet is one question about Svelte markup**, and the
-embedded-JS and embedded-CSS engines together carry 63 entries.
+**And almost all of them are inside the TEMPLATE REGION of the source, which is not
+the same claim as "the template printer produced them".** The cluster table names the
+*shape* of the first differing line and never says which printer produced it. What
+follows measures the *region* the line falls in — outside `<script>` and `<style>` —
+and that is all it measures: a mustache sits in the template region and its interior
+is printed by neither side's template printer. Upstream hands `{expr}` to prettier's
+own estree printer through `svelteExpressionParser` (`embed.ts` `node.isJS` branch),
+and rsvelte delegates embedded JS to `oxc_formatter`, so a break *inside* an
+expression is an engine-level difference reached from the template rather than a
+defect in the template printer. Re-measured 2026-09-04 at `7a30d488f`:
 
-The positive control is that the same local harness reproduces the CI gate’s own
-partition on **five of its seven buckets exactly** (`breaks-later 258`,
-`breaks-earlier 214`, `intra-line-ws 15`, `extra-line 1`, `missing-line 1`), differing by
-two entries that move between `indent-only` and `other`. A region split measured by a
+| region | n |
+|---|---|
+| template | 489 |
+| style | 29 |
+| script | 5 |
+| unlocated | 1 |
+
+and crossed with the shape rule: `breaks-later|template 234`,
+`breaks-earlier|template 215`, `indent-only|template 30`, `breaks-later|style 12`,
+`intra-line-ws|style 11`, `other|template 7`, `indent-only|style 4`, the rest in low
+single digits. So **the template printer's line breaking is nearly the whole
+ratchet**, and the two embedded engines together carry 34 entries — of which the
+five `Entries by mechanism` names above are the CSS-engine boundary.
+
+**Read that cross-tab against a reimplementation of the shape rule, not against the
+partition line above it.** The regions come from anchoring `detail.line` in the oracle
+output; the shape labels come from re-deriving the cluster rule from `fmt-report.json`,
+and that reimplementation disagrees with the partition line by three entries on the
+`breaks-earlier` / `other` boundary (215 / 10 against 212 / 13). Both spellings sum to
+the ratchet's size, so `breaks-earlier|template 215` sits above a partition line whose
+`breaks-earlier` term is 212 — a sub-cell larger than its own total, which is a
+contradiction in the labels and not in the population. Neither set of terms is checked
+by anything: `known-failures-md-check` reads a partition line through `sumExpression`
+and compares only the **sum** to the JSON's length, so the per-cluster numbers are as
+ungated as prose, and its own summary line says the partitions "add up". What the
+region split establishes is the split by region — 489 / 29 / 5 / 1 — which is
+independent of the boundary the two shape rules disagree on.
+
+**How much of the break-point cluster is embedded JS is UNMEASURED, and the one proxy
+taken is weak.** Classifying the divergence region — the text the longer side carries
+past the shorter one — of the 461 break-point entries the reimplementation names, by
+which characters it contains: 224 JS tokens only, 100 tag characters only, 78 both, 59
+neither. That reads the *elided tail* the report stores rather than the whole line, and
+`.` `(` `,` occur in ordinary text, so it bounds nothing. It is recorded because it is
+enough to deny the stronger sentence this section used to carry: the break-point
+cluster is not known to be the template printer's. Separating the two needs the
+printer, not the region.
+
+**And the engine reading is the wrong one: measured, both sides break the same
+expression the same way, and they part company over whether ONE break is enough.**
+Holding a member chain fixed and varying only nesting depth, the two agree at indents
+2-10 and diverge at 12-16, while the same expression as a `<script>` statement at the
+*matched* indent of 14 agrees, as it does at 16 and 18 — so `oxc_formatter` and the
+estree printer the oracle reaches through `svelteExpressionParser` do not disagree
+about it. At indent 12 **both** sides break at the `&&`; rsvelte stops there and emits
+an 81-column first line, and the oracle, finding that line still over budget, breaks
+the *inner* group as well (`linkedCollectionList` / `.map(String)` / `.includes(…)`).
+Whether one break suffices is what indentation changes, which is why the divergence
+looks indentation-shaped.
+
+**That cell is a real class and a small one — 8 of the 171.** Aligning both sides by
+whitespace-stripped text and counting the lines each spends on it partitions the
+carriers: **90 spend ONE line where the oracle breaks** (rsvelte does not break there
+at all), 26 use the same number of lines with different placement, 8 break into fewer
+lines — the constructed cell's class — 46 never align and so are not a placement
+difference at all, and **1 breaks into MORE lines than the oracle**, which is the
+opposite direction
+(`appwrite-console/…/database-[database]/settings/+page.svelte:127`, oracle 2 lines
+against rsvelte's 3; it is one entry and its sign is recorded rather than rounded,
+because a fix for the other 170 either moves it or does not, and that is independent
+evidence). Two of those buckets are load-bearing. The 46 were first reported under a
+40-line search cap, which makes "unaligned" a statement about the instrument; removing
+the cap entirely leaves **46**, every one of them because the whitespace-stripped text
+diverges and none because the search ran out of file — so they are a different
+question, not a longer one. And the 90 split on whether the oracle needed one break or
+several: in **39** of them the oracle used exactly two lines, so a single break
+sufficed and rsvelte performed none, which is what separates "never reached the break
+decision" from "broke once and stopped" — the other 51 are predicted by both readings
+and settle nothing. A 2×2 over the parent's start tag — does it break, are the
+children long — reproduces the shape with both controls agreeing, and counting **both
+directions** against the carriers is what sizes it: **8** of the 90 match the cell
+that diverges, **12** are the inline-parent shape whose cell says EQ while the corpus
+says they diverge, and **70** sit under an intact start tag that no cell addresses.
+The middle bucket is the informative one — a cell that predicts agreement where the
+carriers disagree is falsified, not merely absent, so the inline row is missing an
+axis. Counting only the shapes a cell reproduces would have reported 20 by folding
+the hug in with the break, and the first carriers printed here all had a hugged `>`,
+which is 12 of 90 rather than the majority it looked like. Four reductions of one of
+those 12 — its parent's attribute count and length, its nesting depth, its children —
+all come back EQ while the **unreduced file** diverges through the same harness, with
+a passing corpus file as the negative control. So the trigger is outside what those
+four axes carry, and the reduction is what to distrust rather than the carrier.
+
+**An automatic reduction of one has to pin the divergence CLASS, and "the two
+outputs differ" does not.** A line-level delta debug on that carrier took it from
+469 lines to 105 in 6,547 probes while preserving a predicate that only asked
+whether the outputs differ — and what survived is a *different* divergence in the
+same file (a closing tag hugged as `</div></Footer` + `>`, the same line count on
+both sides, one line over `printWidth` on each), so the result is outside this
+population entirely and says nothing about the entry it came from. A file that
+carries several divergences reduces toward whichever one is cheapest to keep, and
+the cheapest one is rarely the one being studied. That drift is systematic rather
+than incidental, which is what separates this from the ratchet-key rule it otherwise
+mirrors: a key that cannot tell two things apart suppresses both **symmetrically**,
+while a reduction actively minimises, so a predicate wider than its goal walks
+*toward* whichever member of the class shrinks furthest. The 105 lines are not a
+coincidence — they are why the wrong answer was persuasive. And the exposure is not
+one carrier's bad luck: counting divergent regions per failing entry (a resync-window
+alignment, so the counts are approximate), **191 of the 524 carry more than one** —
+63.5% have a single region, 17.2% two, and 6.1% six or more. Better than a third of
+this ratchet cannot be reduced safely under a predicate that only asks whether the
+outputs differ. The predicate has to be the
+signature — here, the first differing line overflows, the oracle's fits, and the
+oracle's is a proper prefix of rsvelte's — and it costs nothing extra, because the
+reduction is already computing both outputs on every probe. Read the distribution and not the cell: a
+mechanism read off constructed cells is a property of the cells, and this one was
+about to be quoted at 171. The first alignment attempt returned 128 unaligned and was
+the instrument — collapsing a newline to a space makes `</span\n>` and `</span>`
+unequal, which is the very shape under study.
+
+Two readings died on the way, and the second is the one worth recording. "The budget
+is not reduced by the current indentation" fits every cell of that depth sweep and is
+false: the sweep held the expression at 75 columns and varied only the indent, and at
+indent 0 — where an indentation-blind budget and a correct one are the same budget —
+the two sides agree with the content run out to 111 columns, both breaking at the
+`&&`. **The axis the rule turns on is the content width, and it was the sweep's held
+constant.** The corpus says so independently: of the 524 entries, 207 have a first
+differing line wider than `printWidth` and 171 of those have the oracle's line as a
+proper prefix of rsvelte's, but only 103 of the 171 would fit with the indentation
+removed — and three sit at indent 0, where rsvelte emits 87 and 93 columns against an
+oracle that breaks. The pre-registered prediction's other half was false too:
+**the oracle overflows `printWidth` on 42,871 lines in 12,134 files**, because a
+construct with no break point in it overflows on any printer, so rsvelte's own 43,366
+bounds nothing. The measurement that carries the mechanism is the 171, and the number
+to read beside it is the 68 it does not explain.
+
+**The anchoring method changed, and that is most of the difference from the previous
+reading.** The 2026-09-01 measurement located each entry's first differing line back in
+its **source** by a token needle and reported `template 438 | unlocated 48 | script 41 |
+style 22` over a 549-entry ratchet. A needle matches the first occurrence of a token,
+and a JS-looking fragment occurs in a template expression as readily as in a `<script>`,
+so that method can place a template line inside a script and has 48 it cannot place at
+all. This one uses the report's own line number against the oracle's output, which is
+exact: **523 of 524 anchored** (the one that is not is recorded as `unlocated`). The
+two are different measurements of the same quantity and they disagree; the disagreement
+is not attributed here, and the anchoring rates are stated so a reader can weigh them.
+
+Two controls. The five entries `Entries by mechanism` identifies as CSS-engine
+divergences — established independently, by running both arms over those sources and
+reading the diffs — all classify as `style`, 5 of 5. And six `template` classifications
+sampled across the set are, on inspection of the oracle output around the named line,
+mustache expressions inside attribute values and markup, with no `<script>` or
+`<style>` in scope.
+
+The shape half has its own control: the same local harness reproduces the gated
+`Partition of …` line on **six of its seven buckets exactly**, differing by three
+entries that move between `breaks-earlier` and `other`. A region split measured by a
 harness that did not reproduce the shape split would be describing a different
 population.
+
+**This run is macOS, and the committed baseline is the Linux CI failure set** — see
+*Cross-platform baseline rule* below, which governs shrinking and is not being invoked
+here. It reproduced the ratchet exactly: same size, **0 new failures and 0 baseline
+entries already passing**, so on this tree the two platforms agree about which entries
+fail. That 0-stale figure is also the answer to whether any of these entries can be
+retired by re-baselining alone: none can.
 
 ### Three axes the cluster table does not carry (2026-08-31)
 
