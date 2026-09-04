@@ -1248,6 +1248,49 @@ buckets per entry from the doc would be transcription, not measurement.
 
 Partition of `fmt-known-failures.json` by mechanism: `1 + 2 + 1 + 1 + 519`
 
+### Entries by DIFF SHAPE — a second axis, and 3 in 4 are layout alone
+
+The table above partitions by **attribution target**. This one partitions the same 524 entries by
+**what the two outputs actually disagree about**, which answers a different question: not *who
+owns this* but *how much of the ratchet is the formatter laying the same tokens out differently*.
+
+It is derived from `compatibility/fmt/{oracle,actual}` alone — both trees materialise in full
+locally (33,644 files each) and **`fmt-report.json` is not needed for it**, which matters because
+the paragraph above declines the seven-bucket split on the grounds that the report is a build
+artifact. That objection is right about the report and does not reach this axis: the two output
+trees are regenerable by `pnpm run generate-fmt-corpus` and the classification below is a
+measurement of them, not a transcription of a doc.
+
+Each entry is placed by the first of these tests that passes, so the classes are disjoint and
+exhaustive:
+
+| n | class | test |
+|---|---|---|
+| 247 | whitespace **placement** only | equal once every whitespace byte is deleted from both |
+| 127 | a real token difference | none of the below |
+| 123 | line breaks only, whitespace-preserving | equal once whitespace runs collapse to one space |
+| 27 | horizontal whitespace only | equal once spaces/tabs collapse and trailing ones are dropped |
+
+**397 of 524 — 75.8% — agree on every token and differ only in layout.** The `247` and the `123`
+are separated on purpose: collapsing runs to one space preserves a text node's single space, so a
+`123` entry is a difference the HTML would render identically, while a `247` entry can move a
+space in or out of rendered text. Only `127` carry a token neither side's layout can explain.
+
+The first fingerprints of the `127` are dominated by the same close-tag hug Cluster 1 describes
+(`O: >` against `A: </div>`, 25 entries, the largest single shape), so the shape axis and the
+cluster prose agree where they overlap.
+
+Two things this measurement is not. It is **not** an attribution: a layout difference against an
+oracle whose byte output is the goal is still an entry to eliminate, so the mechanism table's
+`519 unattributed` stands unchanged. And the counts are a measurement of a tree (`ac2908043`,
+against a locally regenerated corpus), so recompute them rather than citing them.
+
+**One control came for free: `0` entries are byte-equal now.** The classifier's first test is
+`O === A`, which no entry passed, so nothing in this ratchet is stale, which independently
+confirms what the two-sided ratchet asserts and was taken without running the gate.
+
+
+
 ### Cluster 1 — close-tag-dangle / open-tag hugging for inline & void children (3)
 
 The most common failure. Prettier prints whitespace-sensitive inline elements
@@ -2964,11 +3007,17 @@ checked-in pattern corpus (#2019) surfaced are gone too: the two SSR
 destructuring ones (#2033, #2034) were fixed by #2036, and the block-local
 snippet render tag (#2031) by #2057.
 
-### Client (`known-failures.client.json`, 1 entry)
+### Client (`known-failures.client.json`, 0 entries)
 
-Partition of `known-failures.client.json` by verdict: `1`
+Partition of `known-failures.client.json` by verdict: `0`
 
-- **1 — the generated JS differs** (`js` / `code-differs`).
+**This target is empty.** `svelte-tweakpane-ui/…/Point.svelte` was the last entry, and it left
+with the two rules below. Line 187 carries both of them at once —
+`export let expanded: … = $$props.expanded ?? undefined //  $$Props['expanded']; not working here?`
+— which is why neither fix retires it alone: the `$$props` rewrite skipped the whole line
+because a comment was on it, and the trailing `//` with no `;` was misplaced. #4223 recorded
+that entry as the only one of 25 with no candidate target, on the reading that its sibling
+defect was already fixed; it was not, and the line scan was still in the tree.
 
 No CSS entry survives on this target: the one that did left with the ancestor-scoping fix
 below.
@@ -3404,7 +3453,7 @@ Attribution of `known-failures.server.json`:
 
 | n | target | cluster |
 |---|---|---|
-| 2 | `deliberate-divergences` | a `$`-prefixed function parameter is a local binding; upstream's server visitor decides by name and lowers a write to `$.store_mutate`, which throws — reported in `upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md`, pinned by `crates/rsvelte_core/tests/dollar_parameter_is_not_a_store.rs` |
+| 2 | `deliberate-divergences` | a `$`-prefixed local binding is not a store subscription; upstream's server visitor decides by SPELLING (a nested `let` gives byte-identical output) and lowers a write to `$.store_mutate`, whose module throws at SSR — reported in `upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md`, pinned by `crates/rsvelte_core/tests/dollar_parameter_is_not_a_store.rs` |
 
 `networking-toolbox/…/SiteMapList.svelte` and `trakt-web/…/SegmentedSelect.svelte` left this
 target, and the other three, when ancestor scoping started following a `{@render}` into the
@@ -3413,10 +3462,11 @@ snippet it renders — see § *Client* for the measurement.
 - **2 — a recorded deliberate divergence, not a burndown target.**
   `pattern/issues/dollar-function-parameter.svelte` and
   `threlte/packages/extras/src/lib/hooks/useViewport.svelte.ts`. A `$`-prefixed
-  **function parameter** is a local binding, not a store subscription; upstream's
-  server visitor decides by name alone and lowers a write to it to
-  `$.store_mutate`, which throws at runtime, while upstream's own *client*
-  agrees with rsvelte. Reported in
+  **local binding** is not a store subscription; upstream's server visitor decides
+  from the name's **spelling** — a nested `let $viewport` produces byte-identical
+  output, so *parameter* is the repro's shape and not the axis — and lowers a write
+  to it to `$.store_mutate`, whose module throws at SSR in both dev and prod, while
+  upstream's own *client* agrees with rsvelte. Reported in
   [`upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md`](../upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md),
   recorded in
   [`deliberate-divergences.md`](#deliberate-divergences)
@@ -3459,12 +3509,13 @@ Attribution of `known-failures.server-dev.json`:
 
 | n | target | cluster |
 |---|---|---|
-| 2 | `deliberate-divergences` | a `$`-prefixed function parameter is a local binding; upstream's server visitor decides by name and lowers a write to `$.store_mutate`, which throws — reported in `upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md`, pinned by `crates/rsvelte_core/tests/dollar_parameter_is_not_a_store.rs` |
+| 2 | `deliberate-divergences` | a `$`-prefixed local binding is not a store subscription; upstream's server visitor decides by SPELLING (a nested `let` gives byte-identical output) and lowers a write to `$.store_mutate`, whose module throws at SSR — reported in `upstream_issues/svelte-server-treats-a-dollar-parameter-as-a-store.md`, pinned by `crates/rsvelte_core/tests/dollar_parameter_is_not_a_store.rs` |
 
 The same two snippet-scoping entries left this target with the other three; see § *Client*.
 
-What remains is the same deliberate divergence as on `server` — the `$`-prefixed function
-parameter — carried on both targets because the server transform runs on both.
+What remains is the same deliberate divergence as on `server` — a `$`-prefixed **local
+binding**, decided by spelling rather than by what the name resolves to — carried on both
+targets because the server transform runs on both.
 
 - **2 — the same recorded deliberate divergence as on `server`.**
 
@@ -3475,11 +3526,14 @@ that became unparseable only with `dev: true`; #3877 corrected the component
 callback tail-comment insertion point, so both its parse and output entries have
 been retired.
 
-### Client dev (`known-failures.client-dev.json`, 5 entries)
+### Client dev (`known-failures.client-dev.json`, 4 entries)
 
-Partition of `known-failures.client-dev.json` by verdict: `5`
+Partition of `known-failures.client-dev.json` by verdict: `4`
 
-- **5 — the generated JS differs.**
+- **4 — the generated JS differs.**
+
+`svelte-tweakpane-ui/…/Point.svelte` left this target with `client`'s, for the same two rules;
+the paragraph under `client` above is the one description.
 
 Unlike `client`, no CSS entry survives on this target.
 
@@ -3522,9 +3576,9 @@ the innermost link of `a[i] = a[j] = a[k] = gray` because `scope.evaluate(gray)`
 binding's initializer to `Math.round(…)` and calls it primitive, which rsvelte answers from the
 expression's shape alone. A moved unit is not a retired entry.
 
-All remaining 5 arrived with the wave-2 enrolment (#3176); this target was at 0 before
-it, and it is the largest of the four — 5 JS entries that `client` does not
-carry, which is the reason it is ratcheted separately.
+All remaining 4 arrived with the wave-2 enrolment (#3176); this target was at 0 before
+it, and it is still the largest of the four — 4 JS entries that `client` does not carry, which
+is the reason it is ratcheted separately.
 
 `immich/…/asset-viewer/ActivityViewer.svelte` left this target and `client` for the other half of
 the same predicate. Upstream's `should_proxy` answers `false` for `undefined` in the **same
@@ -4871,6 +4925,29 @@ each side's declared values identifies the preimage, which running the two serve
 run reports only *that* two arrays differ. Six of the cluster's recorded hashes are reproduced from
 source in `scripts/compat-lsp/capability-hashes.test.mjs`, which needs no build, no servers and no
 corpus.
+
+**Read the composition before reading the size, because the two halves are not the same kind of
+work.** Derived from the JSON alone (no gate run, no artifact) — split each key on `|`, drop
+`phase=edit`, and ask whether any surviving segment carries a `:` class:
+
+| | measured at `8c8772a52` |
+|---|---|
+| entries | 23,742 |
+| distinct bases with `phase=edit` collapsed | 11,876 (a **1.999x** collapse — essentially every entry is present on both phases) |
+| entries whose unit is an `aggregate:` real-world key | 21,630 (**91.1%**) |
+| entries whose key carries a divergence class | 2,112 (**8.9%**) |
+| distinct units | 4,041 |
+
+The 91.1%, phase-collapsed, is three methods in near-equal thirds — `textDocument/completion`
+3,632, `textDocument/definition` 3,630, `textDocument/hover` 3,553 — against ~3,600 corpus files.
+So **almost every corpus file diverges on all three**, which is the signature of a small number of
+systemic causes rather than of ten thousand independent ones; the 8.9% that *does* carry a class
+(`extra-rsvelte`, `missing-rsvelte`, `value-mismatch` on `diagnostic`, `documentSymbol`,
+`foldingRange`, `inlayHint`) is the half where the ratchet says what an entry is.
+
+Neither half is a count of defects, and only one of them can be partitioned from the file on disk.
+The numbers above are stamped with the revision because they are a measurement of a tree; recompute
+them rather than citing them.
 
 The real-world corpus uses one compact entry per `(file, method)`, and its key records the divergent
 request count and nothing else. It carried a raw divergent-field count and a digest over every

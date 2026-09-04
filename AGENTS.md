@@ -2981,6 +2981,145 @@ whether the instrument could have produced a non-zero on that input at all; if t
 from reading the classifier's branches rather than from the data, the zero belongs in a sentence
 about the instrument.
 
+### A dead instrument does not have to return a zero — it can return one plausible red
+
+The recorded case of an instrument dead on the carrying population returns **0**, and a zero
+invites suspicion. The other half returns a number that looks like a finding. A triage tool
+compared every corpus file an open issue names against the oracle and reported one issue as
+`files=6 bad=4`, with the four rows all one path:
+
+```
+pattern/issues/3072-extends-shapes-legal.svelte.js  client / client-dev / server / server-dev
+```
+
+The tool called `compile()` on **both** sides of a `.svelte.(js|ts)`, where the entry point is
+`compileModule()`. Both sides were wrong and wrong *differently*, so the output was not an
+absence — it was **five green files and one red one**, which is exactly what a live instrument
+looks like. Re-run through `compileModule` on both sides: 4/4 `match`.
+
+Two things generalise. **A verifier with one code path, pointed at a population with two entry
+points, fails on the minority and passes on the majority** — and the majority is what certifies
+it. And what caught it was the *shape* of the one red path, not the count: the id ends in
+`.svelte.js`, which cannot be compared by the component entry point. The same tool made the same
+class of error one row over, comparing a **CSS** issue on `js.code`; that one was caught by
+reading the issue's title. Reading a title does not scale. Enumerate the kinds of output an issue
+is about (`js` / `css` / warnings / map / AST) *before* comparing, and give the verifier one path
+per kind — the population's entry points are a property you can count, and the tool's are too.
+
+### A cell can be EQ for a reason unrelated to what it is named, and no name check finds that
+
+A control's name is a claim about coverage, and a name that misdescribes its cell is caught by
+grepping the name against the cell's input. This is one level worse, because the **verdict** is
+right: a cell named `string literal (OVER)` — a `$$props` inside a string, which the compiler
+must not rewrite — was `EQ` before the fix and `EQ` after it. Not because strings were handled,
+but because in that particular source the string lands on a line that also carries `$.prop(`,
+and the broken rule skipped whole lines. The cell was correct **by the mechanism it existed to
+catch**.
+
+Its name grep-checks clean, its verdict is right, and it cannot move — so it contributes nothing
+in either direction and reads as a passing control. The other eight cells of the same grid moved
+`DIFF -> EQ`; had the grid been three cells instead of nine, "1 of 3 already passing" would have
+been the whole signal. What separates it is asking, per cell, **which rule produces the expected
+answer here** — for a cell that must not change, if the answer is the rule under repair rather
+than the rule under test, move the cell (here: put the string on a line with no generated call)
+before measuring the fix, not after.
+
+### A cancelled check's STEP states say whether it ran, and the log says nothing at all
+
+A cancelled run is recorded here as indistinguishable from a real regression, and the remedy given
+is to read the rollup rather than `gh pr checks`'s buckets. That gets you as far as *cancelled*,
+and stops one question short: a job cancelled **before it started** and a job **killed while
+running** are the same conclusion and want opposite responses. `gh run view --log-failed` cannot
+separate them — it returns **0 bytes**, because a cancelled job has no failed step, so the
+instrument that would normally explain a red check is silent by construction.
+
+The step list does separate them, and it costs one API call
+(`gh api repos/O/R/actions/jobs/<id> --jq '[.steps[]|{name,conclusion,status}]'`). Measured on one
+job: `Set up job` success, `checkout` success, `setup-rust` **in_progress**, and the remaining
+twelve `pending`, with 35 minutes between the job's `started_at` and its `completed_at`. That is a
+run that was executing and was killed — a toolchain install that hung — not capacity reclaiming a
+queued slot, which leaves every step `pending`. The first wants `gh run rerun <id> --failed`; the
+second wants the queue looked at. Reading `conclusion: cancelled` alone tells you neither, and the
+empty log invites the conclusion that nothing is knowable.
+
+### A step every cell enters is not the discriminator, and the negative cells are what say so
+
+Chasing a comment dropped from generated output, two causes were named by reading rsvelte's own
+source and both were wrong. The first was a strip whose comment names the defect
+(`// Remove trailing line comment if present`) and which **cannot fire** — a broader strip ninety
+lines above it has already run, so the value reaching it never holds a comment. The second was that
+broader strip, which really does delete the comment and really is on the path.
+
+One `eprintln!` per call site over a 2x2 grid killed it: **all four cells enter the same site and
+all four have the comment removed there**, while two of the four show it in the final output. So
+the framing "the comment is dropped in two cells" was wrong — it is stripped in four and
+**restored** in two, and the defect is in the restorer's condition. That inverts the fix: re-emitting
+at the strip would *duplicate* the comment in the two rows something already handles.
+
+What separated the two candidates was the **negative** cells. Both hypotheses predict that a
+diverging cell strips; only one predicts that an *agreeing* cell strips too. The rule this file
+already carries for grids — the cell that kills an explanation is usually the one that passes —
+applies to instrumentation with the same force, and is easier to skip there, because a probe placed
+on the failing input answers immediately and looks conclusive. Probe the cells you expect to be
+boring.
+
+### A staged input can be corrupt, and no output-side control fires on it
+
+The arm-identity table collects the ways a measurement lies about *which binary* it ran, and the
+truncating-stage table the ways it lies about *what came back*. There is a third place, upstream
+of both: **the input can carry the right name and the wrong bytes.**
+
+Measured on 2026-09-04. Five `fmt-known-failures.json` entries were staged out of the corpus,
+both gate arms were run over them, and an A/B table was published from the result. Diffed
+afterwards against the real sources: **five of five corrupt**, by 28 / 44 / 52 / 81 / 681 lines —
+they had been re-typed rather than copied, so the real sources indent with tabs and write
+`.card >> .a` where the staged ones indent with spaces and write `.card>>.a`. The whole table
+described files the corpus does not contain.
+
+**Every control in the arm-identity table passes here**, mechanically rather than by oversight:
+both binaries were the right binaries and both processed the files they were given correctly.
+`Compiling <crate> (<path>)`, the artifacts' `sha256`, a discriminating probe on the output — all
+green. Nothing on the output side can catch an input that was never the input.
+
+What surfaced it was an **implausible result**, which is luck and not method: under the corrupt
+inputs one file returned a zero-line diff while being a listed ratchet entry, a shape that reads
+as a stale entry and so prompted a second look. A slightly different corruption returns five
+plausible divergences and the table ships.
+
+The check is one line per file: after staging, `diff -q <staged> <real source>`. "I copied it" is
+an intention and the diff is an observation — the same split as an agent's shell cwd silently
+resetting. Re-measured from the real sources the answer was *narrower and better supported*,
+which is the usual shape of a retraction that was measured rather than argued.
+
+### Three spellings of "I added the stage that loses the verdict"
+
+`| tail` truncates it and `|| echo` fabricates it. The third is
+`cmd > log 2>&1; echo "EXIT=$?" >> log`: a compound command's status is the last component's, so
+the `echo` succeeds and **the wrapper honestly reports 0** for a `cargo check` that exited 101.
+Measured on one run — an exhaustive `match` missing two new fields, `E0027`, reported by the
+background-task display as `[exited with code 0]`, with the true value surviving only in the
+`CHECK_EXIT=101` line the same command had written into the log.
+
+Two things generalize. The wrapper is not the liar here, and neither is any filter: **the stage
+was added by the person reading the result**, which is why re-reading the command finds nothing —
+it does exactly what it says. And the habit this file already prescribes for a different reason
+(write to a file, then read the file) is what recovered it, by routing around the path its own
+author had just broken. The fix is to redirect only and let the wrapper carry the status.
+
+### A byte you believe is a space can be a NUL, and every reader renders it as one
+
+Already recorded as a hazard in a `grep` pattern. It has a second, quieter home: **a key's
+separator**. A two-arm sweep wrote `${id}\0${target}` and the comparison stage split on
+`lastIndexOf(' ')`. `console.log`, a JSON round-trip and a terminal all render the NUL as
+nothing, so the printed keys looked exactly right at stage 1; stage 2 then returned
+`SOURCE-MISSING` for **26 of 26** units, and only the error text
+(`Received '…/Separator.svelte\x00clien'`) named it. The author of the row warning about this
+was the one who walked into it, three hours after quoting it.
+
+The cheap defence is not vigilance: print `JSON.stringify(key)` once when a key-joined stage is
+first wired, and prefer a separator that **cannot occur in the data** over one that reads well —
+a corpus id can contain a space, so the readable choice was also the wrong one.
+
 ### Report a measurement as `mechanism | carrier | population | result`, and the mistakes cannot hide
 
 Three failures of the same family landed in one afternoon, and each one is a different column
